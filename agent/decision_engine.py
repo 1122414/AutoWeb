@@ -4,7 +4,7 @@ from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel, Field
 
-from agent.tools.registry import tool_registry
+from agent.skills.registry import tool_registry
 from agent.prompt_template import build_system_prompt
 
 # =============================================================================

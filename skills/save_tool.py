@@ -8,7 +8,7 @@ from datetime import datetime
 from typing import List, Dict, Any, Union
 
 # 引入 registry 以获取缓存数据
-from agent.tools.registry import tool_registry
+from agent.skills.registry import tool_registry
 
 # 确保输出目录存在
 OUTPUT_DIR = "output"

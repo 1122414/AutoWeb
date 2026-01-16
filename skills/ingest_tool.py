@@ -14,7 +14,7 @@ from langchain_community.embeddings import OllamaEmbeddings
 from langchain_milvus import Milvus
 
 # 引入 registry 以获取缓存数据
-from agent.tools.registry import tool_registry
+from agent.skills.registry import tool_registry
 
 from config import *
 

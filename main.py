@@ -6,17 +6,17 @@ from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
 
 # 1. 导入核心组件
-from agent.tools.registry import tool_registry
+from agent.skills.registry import tool_registry
 from agent.decision_engine import init_decision_engine
 
 # 2. 导入工具函数
 # 爬虫工具
 # 注意：请确保 agent/tools/crawl_tool.py 中已导出这两个同步包装函数
-from agent.tools.crawl_tool import sync_playwright_fetch, sync_hierarchical_crawl
+from agent.skills.crawl_tool import sync_playwright_fetch, sync_hierarchical_crawl
 # 保存工具 (文件/数据库)
-from agent.tools.save_tool import save_to_csv, save_to_json, save_to_postgres
+from agent.skills.save_tool import save_to_csv, save_to_json, save_to_postgres
 # RAG 入库工具
-from agent.tools.ingest_tool import save_to_milvus
+from agent.skills.ingest_tool import save_to_milvus
 
 # 导入配置
 from config import *

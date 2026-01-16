@@ -22,7 +22,7 @@ from langchain_openai import OpenAIEmbeddings
 from langchain_community.embeddings import OllamaEmbeddings
 
 # 引入 registry
-from agent.tools.registry import tool_registry
+from agent.skills.registry import tool_registry
 from config import *
 
 load_dotenv()

@@ -10,7 +10,7 @@ from langchain_core.prompts import PromptTemplate
 from langchain_community.document_transformers import Html2TextTransformer
 
 # 引入核心 DOM 工具 (从 agent.tools.dom_helper)
-from agent.tools.dom_helper import dom_analyzer
+from agent.skills.dom_helper import dom_analyzer
 # 引入提示词
 from agent.prompt_template import XPATH_ANALYSIS_PROMPT, SCRAWL_DATA_SYSTEM_PROMPT
 from config import *
