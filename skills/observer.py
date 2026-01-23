@@ -23,6 +23,8 @@ class BrowserObserver:
             openai_api_base=OPENAI_BASE_URL,
             
         )
+        # [Optimization] DOM Cache
+        self._dom_cache = {"hash": None, "analysis": None}
 
     # ================= 工具函数 (原 dom_helper/extractor_utils) =================
     
@@ -158,7 +160,22 @@ class BrowserObserver:
     def analyze_locator_strategy(self, dom_skeleton: str, requirement: str) -> Union[Dict, list]:
         """
         [推理] 基于 DOM 骨架和用户需求，生成操作定位策略
+        [Optimization] 增加 MD5 缓存机制
         """
+        try:
+            import hashlib
+            # 计算 Hash
+            current_hash = hashlib.md5(dom_skeleton.encode('utf-8')).hexdigest()
+            
+            # 检查缓存: 如果 DOM Hash 一致，且缓存中有有效结果，直接返回
+            if self._dom_cache["hash"] == current_hash and self._dom_cache["analysis"]:
+                print(f"⏩ [Observer] DOM Cache Hit! ({current_hash[:8]}) - Skipping LLM Analysis")
+                return self._dom_cache["analysis"]
+                
+        except Exception as e:
+            print(f"⚠️ Cache Check Failed: {e}")
+
+        # Cache Miss - Call LLM
         prompt = DRISSION_LOCATOR_PROMPT.format(
             requirement=requirement,
             dom_json=dom_skeleton[:50000] # 防止 Token 溢出
@@ -166,6 +183,12 @@ class BrowserObserver:
         
         response = self.llm.invoke(prompt)
         strategy = self._parse_json_safely(response.content)
+        
+        # Update Cache
+        try:
+            self._dom_cache["hash"] = current_hash
+            self._dom_cache["analysis"] = strategy
+        except: pass
         
         if isinstance(strategy, dict):
             print(f"🧠 [Observer] 定位策略生成: {strategy.get('locator', 'N/A')}")
