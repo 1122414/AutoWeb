@@ -137,6 +137,7 @@ class PlannerAgent:
             "messages": [response],
             "plan": response.content,
             "dom_skeleton": dom,
+            "locator_suggestions": suggestions_str, # [Optimization] 将感知结果存入 State
             "loop_count": state.get("loop_count", 0) + 1,
             "is_complete": is_finished
         }

@@ -7,7 +7,7 @@ ACTION_CODE_GEN_PROMPT = """
 你的任务是将用户提供的【XPath 策略】转化为**健壮、高效**的 Python 执行代码。
 
 # Input Context
-- **Env**: 假设代码运行在已配置好的环境中，`tab` 对象已存在。
+- **Env**: 假设代码运行在已配置好的环境中，`tab` 对象已存在，**严禁** 再次生成 page = ChromiumPage()导致浏览器再次被实例化。
 - **Variables**:
     - `tab`: 当前已激活的 DrissionPage 浏览器对象 (ChromiumTab 或 MixTab)。
     - `strategy`: 包含定位逻辑的字典 (用户提供)。

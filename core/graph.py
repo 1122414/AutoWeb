@@ -77,7 +77,17 @@ class AutoWebGraph:
             should_analyze = False
             
         if should_analyze: 
-            xpath_plan = self.observer.analyze_locator_strategy(raw_dom, task)
+            # [Optimization] Perception Sharing
+            # 优先检查 State 中是否已有 Planner 分析好的 Suggestions
+            cached_suggestions = state.get("locator_suggestions", None)
+            
+            if cached_suggestions and "无特定定位建议" not in cached_suggestions and "Initial Navigation" not in cached_suggestions:
+                 print(f"   ⏩ [Coder] 复用 Planner 的视觉感知结果，跳过重复分析。")
+                 xpath_plan = cached_suggestions
+            else:
+                 # 只有当缓存无效时，才重新分析
+                 print(f"   🧠 [Coder] 缓存无效/不存在，执行视觉分析...")
+                 xpath_plan = self.observer.analyze_locator_strategy(raw_dom, task)
         
             # 正确格式化 Base Prompt
             base_prompt = ACTION_CODE_GEN_PROMPT.format(

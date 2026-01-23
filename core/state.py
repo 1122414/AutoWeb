@@ -14,6 +14,7 @@ class AgentState(TypedDict):
     # 2. 环境快照 (Observer 更新)
     current_url: str
     dom_skeleton: str
+    locator_suggestions: Optional[str] # Planner 分析过的定位建议 (JSON String)，供 Coder 复用 -- [Optimization]
     
     # 3. 协作流转数据
     user_task: str                  # 原始任务
