@@ -160,8 +160,29 @@ class BrowserObserver:
     def analyze_locator_strategy(self, dom_skeleton: str, requirement: str) -> Union[Dict, list]:
         """
         [推理] 基于 DOM 骨架和用户需求，生成操作定位策略
-        [Optimization] 增加 MD5 缓存机制
+        [Optimization] 增加 MD5 缓存机制 & 启发式搜索
         """
+        # 1. [Local Tool] 启发式搜索 (Heuristic Search)
+        # 如果需求非常明确 (如 "点击 '登录'"), 且页面刚好有这个文本，直接返回，不消耗 Token
+        try:
+            import re
+            # 提取需求中的引用文本， e.g. "点击 '确 定'" -> "确 定"
+            # 匹配单引号或双引号中的内容
+            match_req = re.search(r"['“](.+?)['”]", requirement)
+            if match_req:
+                target_text = match_req.group(1)
+                # 简单清洗
+                target_text = target_text.strip()
+                
+                if len(target_text) > 1 and "dom_json" not in requirement: # 避免误判
+                     # 尝试在 DOM String 中直接搜索该文本 (比解析 JSON 快)
+                     # 查找 "txt": "target_text" 或 "text=target_text"
+                     if f'"{target_text}"' in dom_skeleton:
+                         print(f"⚡ [Observer] Heuristic Hit! Found explicit text '{target_text}' in DOM.")
+                         return {"locator": f"text={target_text}", "reason": "Heuristic Match"}
+        except Exception as e:
+            pass
+
         try:
             import hashlib
             # 计算 Hash

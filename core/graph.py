@@ -162,6 +162,20 @@ class AutoWebGraph:
         task = state.get("user_task", "")
         current_plan = state.get("plan", "Unknown Plan")
 
+        # 1. [Local Tool] 确定性验收 (Deterministic Verification)
+        # 如果日志包含明确的严重错误，直接判定为失败，跳过 LLM
+        error_keywords = ["Runtime Error:", "Traceback (most recent call last):", "ElementNotFound", "TimeoutException", "SyntaxError"]
+        for kw in error_keywords:
+            if kw in log:
+                print(f"⚡ [Verifier] Deterministic Fail! Found error keyword '{kw}' in log.")
+                updates = {
+                    "messages": [AIMessage(content=f"Status: STEP_FAIL\nSummary: 执行报错: {kw}\nReasoning: 日志包含明确错误信息。")],
+                    "reflections": [f"Step Failed: {current_plan}. Reason: Log contains {kw}"],
+                    "is_complete": False
+                }
+                print(f"   ❌ [Verifier] 步骤失败 (Fast Fail)。")
+                return updates
+
         # 截断日志和 DOM 以防止 Token 溢出 (Error 400)
         # 保留最后的 2000 字符日志，通常包含报错信息
         short_log = log[-2000:] if len(log) > 2000 else log

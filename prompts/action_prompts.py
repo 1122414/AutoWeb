@@ -2,113 +2,64 @@
 # 1. 自动化代码生成 (Code Generation)
 # =============================================================================
 ACTION_CODE_GEN_PROMPT = """
-# Role
-你是一位精通 Python 自动化库 **DrissionPage (v4.x)** 的爬虫专家。
-你的任务是将用户提供的【XPath 策略】转化为**健壮、高效**的 Python 执行代码。
+# Python 自动化专家 (DrissionPage v4)
+将 XPath 策略转化为健壮的 Python 代码。
 
-# Input Context
-- **Env**: 假设代码运行在已配置好的环境中，`tab` 对象已存在，**严禁** 再次生成 page = ChromiumPage()导致浏览器再次被实例化。
-- **Variables**:
-    - `tab`: 当前已激活的 DrissionPage 浏览器对象 (ChromiumTab 或 MixTab)。
-    - `strategy`: 包含定位逻辑的字典 (用户提供)。
-    - `results`: 用于存储结果的列表 (List[Dict])。
-- **禁止操作**:
-    - 严禁 `from DrissionPage import ChromiumPage`。
-    - 严禁 `page = ChromiumPage()` 或 `tab = ...` (覆盖变量)。
-    - 必须直接使用上下文中提供的 `tab` 变量。
+# 上下文 (Context)
+- `tab`: 当前激活的浏览器 Tab 对象 (严禁重新实例化)。
+- `strategy`: 定位策略字典。
+- `results`: 结果列表 List[Dict]。
+- `from skills.toolbox import *`: http_request, download_file, clean_html, db_insert, save_to_csv, notify.
+- `from skills.tool_rag import save_to_knowledge_base`: 用于"学习/入库"任务。
 
-# Code Generation Rules (代码生成强制规范)
+# 核心铁律 (Critical Rules)
+1. **禁止实例化**: 严禁 `ChromiumPage()`。只能用 `tab`。
+2. **语法速查 (DrissionPage Cheatsheet)**:
+   - **查**: `tab.eles('x://div')` (列表), `ele.ele('x://span')` (单项)
+   - **读**: `el.text`, `el.attr('href')`, `el.link` (绝对URL)
+   - **交互**: `el.click(by_js=True)`, `el.input('text')`
+   - **等待**: `tab.wait.load_start()`, `tab.wait.ele_displayed('x://...')`
+   - **状态**: `if el.states.is_displayed:`, `if el.states.is_enabled:`
+   - **新页**: `new = el.click.for_new_tab()`; ... ; `new.close()`
+3. **流程控制**: 仅在 Explicit Loop 时使用 `for`。禁止 `while True`。
+4. **数据安全**: 每 10 条存一次 (CSV/DB)。
+5. **工具箱**: 优先用 `skills.toolbox` (HTTP/RAG/DB) 替代浏览器操作。
 
-## 1. 核心语法映射 (Syntax Mapping - 必须严格遵守)
-将 XPath 策略转换为代码时，**必须**使用以下 DrissionPage 专用方法：
-- **获取列表 (List)**: `items = tab.eles('x:YOUR_XPATH')`  <-- 注意是 eles (复数)
-- **内部查找 (Single)**: `item.ele('x:YOUR_XPATH')`   <-- 注意是 ele (单数)
-- **获取文本 (Text)**: `el.text`
-- **获取属性 (Attribute)**: `el.attr('href')` 或 `el.attr('data-id')`
-- **点击操作 (Click)**: `el.click(by_js=True)` (用于翻页或跳转)
+# 输出与稳健性 (Output & Robustness)
+1. **纯粹代码**: 严禁包含Markdown标记，严禁 `import`(除toolbox)，严禁 `tab = ...`。仅输出函数体逻辑。
+2. **防崩溃**: 对可能不存在的元素或不稳定的步骤，**必须**使用 `try...except` 捕获并打印异常 (`print(f"Warning: {e}")`)，确保流程不中断。
 
-## 2. 混合返回类型处理 (Return Type Handling)
-DrissionPage 的 `ele()` 方法非常灵活，根据 XPath 结尾不同，返回值不同：
-- **情况 A (返回对象)**: 若 XPath 结尾是元素 (如 `//div`) -> 返回对象。
-    - 此时需使用 `.text` 获取内容，或 `.attr('href')` 获取属性。
-    - **特例**: 若字段名为 "链接/Url/Link"，必须使用 `el.link` (自动获取绝对路径)。
-- **情况 B (返回字符串)**: 若 XPath 结尾是属性或文本 (如 `/text()` 或 `/@href`) -> 直接返回字符串。
-    - 此时**严禁**再调用 `.text` 或 `.attr()`，直接赋值即可。
+# 示例 (Few-Shot)
+## Ex1: 遍历列表并点击
+User: "爬取所有商品链接" / Plan: "遍历 .item，点击进入"
+Code:
+counts = len(tab.eles('.item'))
+for i in range(counts):
+    try:
+        # 每次循环重新获取防止 Stale
+        item = tab.eles('.item')[i]
+        item.click(by_js=True)
+        tab.wait.load_start()
+        # ... 采集逻辑 ...
+        tab.back()
+        tab.wait.ele_displayed('.item')
+    except Exception as e:
+        print(f"Error at index {i}: {e}")
 
-## 3. 流程控制与交互 (Flow Control & Interaction)
-DrissionPage 的核心优势在于智能等待和状态判断，请在循环或判断逻辑中优先使用以下模式：
-- **状态判断 (State Checking)**:
-    - 不要仅判断元素是否存在 (`if ele:`), 需结合状态属性：
-    - `if ele.states.is_displayed:` (判断可见性)
-    - `if ele.states.is_enabled:` (判断是否可用)
-    - `if ele.states.is_clickable:` (判断是否可被点击，无遮挡)
-- **智能等待 (Smart Waiting)**:
-    - 页面跳转后: `tab.wait.load_start()` (等待加载开始) 或 `tab.wait.doc_loaded()`。
-    - 动态元素: `tab.wait.ele_displayed('x:xpath')` 或 `ele.wait.stop_moving()` (等待动画结束)。
-    - **严禁**使用 `time.sleep()`，除非无其他特征可供等待。
-- **动作链 (Actions)**:
-    - 若遇到需模拟鼠标悬停、拖拽或复杂按键，使用 `tab.actions` 链式操作 (如 `tab.actions.move_to(ele).click(by_js=True)`)。
+## Ex2: 工具箱调用
+User: "下载图片" / Plan: "下载 img_url"
+Code:
+img_url = tab.ele('tag:img').link
+if img_url:
+    from skills.toolbox import download_file
+    download_file(img_url, "data/1.jpg")
 
-## 4. 多标签页与窗口管理 (Tab & Page Management)
-DrissionPage 的标签页对象(Tab)是独立的，**不需要**像 Selenium 那样频繁 `switch_to` 切换焦点。
-- **对象独立性**:
-    - `tab1 = browser.get_tab(1)` 和 `tab2 = browser.new_tab(url)` 是两个独立对象，可同时操作，互不干扰。
-- **新建/打开标签页**:
-    - 主动打开: `new_tab = tab.new_tab('url')`。
-    - 点击链接打开: 若点击某按钮会弹出新窗口，**必须**先判断是否有新页面出现，如果有则使用 `new_tab = ele.click.for_new_tab()`。这是 DrissionPage 独有且最高效的方法，它会自动等待新窗口出现并返回对象。
-- **资源释放**:
-    - 任务完成后，**必须**调用 `tab.close()` 关闭标签页以释放内存。
-    - 若需关闭浏览器，使用 `browser.quit()`。
+# 输入
+策略: {xpath_plan}
+需求: {requirement}
 
-## 5. 详情页处理策略 (Detail Page Strategy - 核心修正)
-**必须**根据 `target="_blank"` 属性严格区分两种模式。若无法确定，**默认使用【模式 A】**以保证代码不报错。
-
-### 重要警告 (State Persistence)
-- **严禁**在非跳转步骤中使用 `tab.get()`。当前页面已经由上一步操作到达，使用 `tab.get()` 会导致状态重置和死循环。
-- **动态获取**: 页面上的元素必须实时获取，不要假设已存在。
-
-### 模式 A：当前页跳转 (Current Tab - 默认/安全模式)
-适用于：链接在当前页打开，或者不确定是否会有新标签页。
-**痛点解决**：跳转再回退后，原列表元素会失效（Stale Object）。
-**强制规范**：
-1. **获取总数**: `counts = len(tab.eles('x:列表项XPath'))`
-2. **索引循环**: `for i in range(counts):`
-3. **重新获取**: 循环内第一步必须是 `item = tab.eles('x:列表项XPath')[i]` (确保拿到新鲜对象)。
-4. **点击跳转**: `item.click(by_js=True)` -> `tab.wait.load_start()` (等待新页面加载)。
-5. **采集数据**: 此时 `tab` 已变成详情页，直接采集。
-6. **回退复原**: `tab.back()` -> `tab.wait.ele_displayed('x:列表项XPath')` (必须等待列表重新出现)。
-
-### 模式 B：新标签页打开 (New Tab - 仅当确信 target="_blank" 时使用)
-适用于：明确知道链接会弹出新窗口。
-1. **点击接管**: `new_page = item.click.for_new_tab()`
-2. **容错处理**: 若 `new_page` 为 None 或报错，说明未弹出，需立即降级到【模式 A】。
-3. **关闭页面**: 采集完成后必须 `new_page.close()`。
-
-## 6. 严格对齐 (Strict Alignment - 抗幻觉)
-**核心铁律**: 
-- **严禁抢跑**: 你只能实现【Planner 的执行计划】中明确指出的步骤。
-- **严禁自作主张**: 即使你知道【用户需求】是要爬 10 页，但如果 Planner 这一步只规划了 "点击下一页" 或 "爬取当前页"，你就**只写那一步**的代码。
-- **循环禁令 (No Implicit Loops)**: 除非 Plan 中明确写了 "遍历列表"、"循环每一项" 或 "爬取前 N 页"，否则**严禁使用 `for/while` 循环**。简单的 "点击链接" 必须是单次点击。
-- **原因**: 你的代码是在一个大型状态机中运行的，"抢跑" 会导致状态脱节和死循环。
-
-## 7. 数据安全 (Data Safety)
-**核心铁律**:
-- **边做边存**: 在涉及循环采集（如爬取列表）时，**必须**使用追加模式 (`mode='a'`) 写入文件，或者每采集 N 条（推荐 10 条）就回写一次文件。
-- **严禁内存积压**: 严禁将所有数据存在 `results` 列表里最后一次性写入。如果程序在第 99 页崩溃了，前 98 页的数据必须已经安全保存在硬盘上。
-- **文件检查**: 写入前检查文件是否存在，如果不存在则先写入 Header (如果是 CSV/JSONL)。
-
-# Output Constraints
-1. **仅输出代码**: 严禁包含 Markdown 解释、import 语句或 tab 初始化代码。
-2. **健壮性**: 使用 `ele()` 获取元素对象后，必须先判断 `if el:` 再取值。
-3. **稳定性**: 在必要情况下，比如某些地方可能缺失元素，请使用 `try...except` 块进行异常处理，并将异常信息进行打印。
-4. **保障性**: 当xpath_plan为''时，仅生成导航到目标页面的DrissionPage代码
-
----
-【XPath 策略】
-{xpath_plan}
-
-【用户需求】
-{requirement}
+# 输出
+(仅 Python 代码)
 """
 
 # =============================================================================
