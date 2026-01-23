@@ -152,7 +152,11 @@ DOM_SKELETON_JS = """
             // --- 剪枝层 (最后防线) ---
             // 如果一个节点既没有 ID/Class/Text/Attributes，也没有子节点，那它就是废节点
             let hasAttr = Object.keys(info).some(k => CONFIG.ATTRIBUTES_TO_KEEP.includes(k));
-            if (!info.id && !info.c && !info.txt && !hasAttr && (!info.kids || info.kids.length === 0)) {
+            
+            // [Relaxed] 不要轻易剪枝 BODY 或 content 容器，即使它们看起来是空的（可能是动态加载中）
+            let isRoot = (node === document.body || node.id === 'content' || node.id === 'wrapper');
+            
+            if (!isRoot && !info.id && !info.c && !info.txt && !hasAttr && (!info.kids || info.kids.length === 0)) {
                 // 特殊放行：INPUT 和 IMG 即使没内容也要保留
                 const selfClosing = ['input', 'img', 'button', 'select', 'textarea'];
                 if (!selfClosing.includes(info.t)) return null;
@@ -165,6 +169,7 @@ DOM_SKELETON_JS = """
         // 优先寻找主要内容容器，减少 Header/Footer 干扰
         // 策略：如果找到了 #content 或 main 标签，优先以此为根，否则用 body
         let root = document.getElementById('content') || 
+                   document.getElementById('wrapper') || 
                    document.querySelector('main') || 
                    document.querySelector('.container') ||
                    document.body;
@@ -179,8 +184,18 @@ DOM_SKELETON_JS = """
         let result = traverse(root, 0);
 
         if (!result) {
-            window.__dom_result = JSON.stringify({error: "Empty DOM"});
-            window.__dom_status = 'error';
+            // [Final Fallback] 如果结构化分析彻底失败，至少返回纯文本，别让 Agent 瞎眼
+            let fallbackText = document.body.innerText.substring(0, 2000);
+            if (fallbackText.trim().length > 0) {
+                 window.__dom_result = JSON.stringify({
+                    t: "body",
+                    txt: "[Structure Analysis Failed, Fallback to Text] " + fallbackText
+                 });
+                 window.__dom_status = 'success';
+            } else {
+                 window.__dom_result = JSON.stringify({error: "Empty DOM"});
+                 window.__dom_status = 'error';
+            }
         } else {
             // 添加元数据，告诉 Python 这里的根节点不是 HTML，要注意 XPath 拼接
             result.is_fragment = (root !== document.body && root !== document.documentElement);

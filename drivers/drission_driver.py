@@ -78,7 +78,7 @@ class BrowserDriver:
             # 设置全局超时策略 (秒)
             # base: 基础元素查找超时
             # page_load: 页面加载超时
-            cls._instance.set_timeouts(base=10, page_load=30)
+            cls._instance.set.timeouts(base=10, page_load=30)
             
         except Exception as e:
             print(f"❌ [Driver] Failed to launch browser: {e}")

@@ -51,7 +51,7 @@ DRISSION_LOCATOR_PROMPT = """
    - **T1**: `.class_name` (唯一Class)
    - **T2**: `text=登录` (唯一文本)
    - **T3**: `@placeholder=请输入` (特殊属性)
-   - **T4**: `x://div[...]` (XPath，仅作为兜底)
+   - **T4**: `x://div[...]` (XPath，仅作为兜底，如果是XPath，一定要`x:...`
 
 2. **对象原则**:
    - 严禁定位到 TextNode (如 `/text()`) 或 Attribute (如 `/@href`)。

@@ -20,7 +20,8 @@ class BrowserObserver:
             model=MODEL_NAME, 
             temperature=0, 
             openai_api_key=OPENAI_API_KEY, 
-            openai_api_base=OPENAI_BASE_URL
+            openai_api_base=OPENAI_BASE_URL,
+            
         )
 
     # ================= 工具函数 (原 dom_helper/extractor_utils) =================
@@ -47,7 +48,59 @@ class BrowserObserver:
             match = re.search(r'\{[\s\S]*\}', text) 
             if match: return json.loads(match.group(0))
         except: pass
+
+        # 2. 尝试直接解析 (Best Case)
+        try: 
+            return json.loads(text)
+        except json.JSONDecodeError:
+            pass
         
+        # 3. 针对“多个 JSON 对象堆叠”的补救 (即你遇到的情况)
+        # 现象：text 是 '{"a":1}\n{"b":2}' 或 '{"a":1}{"b":2}'
+        # 对策：正则查找 `} <空白> {`，替换为 `}, {`，然后两头加 []
+        try:
+            # 检查是否存在两个对象的边界
+            # 正则解释：查找 } 后面跟着任意空白字符(包括换行)，然后是 {
+            if re.search(r'\}\s*\{', text):
+                print("🔧 [Observer] 检测到多个独立 JSON 对象，尝试自动合并为列表...")
+                # 将边界替换为逗号，并确保两边有空格
+                fixed_text = re.sub(r'\}\s*\{', '}, {', text)
+                # 包裹为列表
+                fixed_text = f"[{fixed_text}]"
+                return json.loads(fixed_text)
+        except Exception as e:
+            # 不要让这里报错中断流程，继续尝试下一种方法
+            pass
+
+        # 4. 暴力提取 (Last Resort)
+        # 如果还是不行，用正则把所有 {...} 抠出来，一个个解析再组装
+        try:
+            # 匹配最外层的 {}
+            # 注意：这个正则可能处理不了嵌套很深且格式极其混乱的情况，但在大多数 LLM 输出场景下足够用
+            matches = re.findall(r'(\{[\s\S]*?\})(?=\s*\{|\s*$)', text)
+            
+            # 如果上面的正则没匹配到，尝试更简单的贪婪匹配
+            if not matches:
+                 matches = re.findall(r'\{[\s\S]*?\}', text)
+
+            valid_objs = []
+            for m in matches:
+                try:
+                    # 验证每个片段是否是合法 JSON
+                    obj = json.loads(m)
+                    valid_objs.append(obj)
+                except:
+                    continue
+            
+            if valid_objs:
+                print(f"🔧 [Observer] 暴力提取成功，回收了 {len(valid_objs)} 个对象")
+                # 如果只有一个对象且原意可能不是列表，视情况返回（但为了统一，返回列表通常更安全）
+                # 这里为了兼容你的 Prompt 定义 (return List)，直接返回列表
+                return valid_objs
+        except:
+            pass
+        
+        # 如果所有尝试都失败了
         return {"error": "Failed to parse JSON", "raw": text}
 
     # ================= 核心感知能力 =================
@@ -56,34 +109,71 @@ class BrowserObserver:
         """
         [视觉] 获取当前页面的 DOM 骨架
         直接调用注入的 JS，不再使用 Python 进行繁重的 lxml 解析
+        包含重试机制，应对动态页面渲染延迟
         """
-        try:
-            # 注入 JS (如果页面刷新了需要重新注入，DrissionPage run_js 会自动处理上下文)
-            # 注意：DOM_SKELETON_JS 应该是一个完整的 IIFE 脚本字符串
-            raw_result = tab.run_js(DOM_SKELETON_JS)
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                # 注入 JS
+                tab.run_js(DOM_SKELETON_JS)
             
-            # JS 返回的可能已经是字符串化的 JSON，也可能是对象
-            if isinstance(raw_result, str):
-                return raw_result
-            return json.dumps(raw_result, ensure_ascii=False)
-            
-        except Exception as e:
-            print(f"⚠️ DOM Skeleton Capture Failed: {e}")
-            return json.dumps({"error": str(e)})
+                # 轮询等待 JS 结果
+                start_time = time.time()
+                timeout = 10  
+                dom_json_str = None
+                
+                while time.time() - start_time < timeout:
+                    status = tab.run_js("return window.__dom_status;")
+                    if status == 'success':
+                        dom_json_str = tab.run_js("return window.__dom_result;")
+                        break
+                    elif status == 'error':
+                        error_msg = tab.run_js("return window.__dom_result;")
+                        print(f"   ⚠️ JS 内部报错 (Attempt {attempt+1}): {error_msg}")
+                        break
+                    time.sleep(0.5)
+                
+                # 清理全局变量
+                tab.run_js("delete window.__dom_result; delete window.__dom_status;")
+                
+                # 检查结果有效性
+                if dom_json_str:
+                    if isinstance(dom_json_str, str) and "Empty DOM" in dom_json_str:
+                         print(f"   ⚠️ 检测到 Empty DOM (Attempt {attempt+1})，等待 1s 后重试...")
+                         time.sleep(1.0)
+                         continue
+                    
+                    if isinstance(dom_json_str, str):
+                        return dom_json_str
+                    return json.dumps(dom_json_str, ensure_ascii=False)
+                else:
+                    print(f"   ⚠️ JS 执行超时 (Attempt {attempt+1})")
+                
+            except Exception as e:
+                print(f"   ⚠️ DOM Capture Failed (Attempt {attempt+1}): {e}")
+                time.sleep(1.0)
+        
+        return json.dumps({"error": "Failed to capture DOM after retries"})
 
-    def analyze_locator_strategy(self, dom_skeleton: str, requirement: str) -> Dict:
+    def analyze_locator_strategy(self, dom_skeleton: str, requirement: str) -> Union[Dict, list]:
         """
         [推理] 基于 DOM 骨架和用户需求，生成操作定位策略
         """
         prompt = DRISSION_LOCATOR_PROMPT.format(
             requirement=requirement,
-            dom_json=dom_skeleton[:30000] # 防止 Token 溢出
+            dom_json=dom_skeleton[:50000] # 防止 Token 溢出
         )
         
         response = self.llm.invoke(prompt)
         strategy = self._parse_json_safely(response.content)
         
-        print(f"🧠 [Observer] 定位策略生成: {strategy.get('locator', 'N/A')}")
+        if isinstance(strategy, dict):
+            print(f"🧠 [Observer] 定位策略生成: {strategy.get('locator', 'N/A')}")
+        elif isinstance(strategy, list) and len(strategy) > 0:
+            print(f"🧠 [Observer] 定位策略生成 (List): {len(strategy)} items, First: {strategy[0].get('locator', 'N/A')}")
+        else:
+            print(f"🧠 [Observer] 定位策略生成: {strategy}")
+            
         return strategy
 
     def extract_structured_data(self, html_snippet: str, schema_desc: str) -> Dict:
