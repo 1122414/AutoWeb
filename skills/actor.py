@@ -65,9 +65,15 @@ class BrowserActor:
         except Exception as e:
             return {"status": "error", "msg": str(e)}
 
-    def execute_python_strategy(self, strategy_code: str, context: Dict = None) -> List[Dict]:
+    def execute_python_strategy(self, strategy_code: str, context: Dict = None) -> Dict[str, Any]:
         """
         [高危能力] 执行 LLM 生成的 Python 代码 (原 main.py 的沙箱逻辑)
+        
+        Returns:
+            Dict: {
+                "result_data": List[Dict],  # 爬取的数据 results
+                "execution_log": str        # 捕获的 print 日志 + 系统日志
+            }
         """
         print("⚡ [Actor] Executing dynamic strategy...")
         
@@ -79,9 +85,44 @@ class BrowserActor:
             "json": json
         }
         
+        # 1. 记录初始状态
+        start_url = self.tab.url
+        logs = []
+        
+        import io
+        import contextlib
+        
+        output_buffer = io.StringIO()
+        
         try:
-            exec(strategy_code, {}, local_scope)
-            return local_scope.get("results", [])
+            # 2. 执行代码并捕获 print 输出
+            with contextlib.redirect_stdout(output_buffer):
+                exec(strategy_code, {}, local_scope)
+            
+            # 获取捕获的 print 内容
+            stdout_content = output_buffer.getvalue()
+            if stdout_content:
+                logs.append(f"--- [Code Output] ---\n{stdout_content.strip()}")
+            
+            # 3. 检查 URL 变化
+            end_url = self.tab.url
+            if start_url != end_url:
+                logs.append(f"--- [System Log] ---\nURL Changed: {start_url} -> {end_url}")
+            else:
+                logs.append(f"--- [System Log] ---\nURL Unchanged: {end_url}")
+
+            return {
+                "result_data": local_scope.get("results", []),
+                "execution_log": "\n".join(logs)
+            }
+            
         except Exception as e:
-            print(f"❌ Execution Error: {e}")
-            return [{"error": str(e)}]
+            error_msg = f"❌ Execution Error: {e}"
+            print(error_msg)
+            # 即使出错，也要把已打印的内容返回
+            logs.append(f"--- [Code Output (Partial)] ---\n{output_buffer.getvalue()}")
+            logs.append(error_msg)
+            return {
+                "result_data": local_scope.get("results", []),
+                "execution_log": "\n".join(logs)
+            }

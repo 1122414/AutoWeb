@@ -6,14 +6,14 @@ DOM_SKELETON_JS = """
     try {
         console.time("DOM_Analysis");
         
-        // ================= 配置区 (Aggr. Compression) =================
+        // ================= 配置区 (Balanced Compression) =================
         const CONFIG = {
-            MAX_DEPTH: 30,             // [Reduced] 降低深度限制
-            MAX_TEXT_LEN: 50,          // [Reduced] 截断长度 80 -> 50
-            LIST_HEAD_COUNT: 4,        // [Reduced] 5 -> 4
-            LIST_TAIL_COUNT: 1,
-            VIEWPORT_RATIO: 3.0,       // [New] 视口倍率，超过 3 屏以外的内容不抓
-            ATTRIBUTES_TO_KEEP: ['href', 'src', 'title', 'placeholder', 'type', 'aria-label', 'role', 'data-id', 'name', 'value']
+            MAX_DEPTH: 50,             // [Relaxed] 30 -> 50
+            MAX_TEXT_LEN: 200,         // [Relaxed] 50 -> 200 (保留更多描述)
+            LIST_HEAD_COUNT: 10,       // [Relaxed] 4 -> 10 (列表多看点)
+            LIST_TAIL_COUNT: 2,        // [Relaxed] 1 -> 2
+            VIEWPORT_RATIO: 10.0,      // [Relaxed] 3.0 -> 10.0 (基本覆盖长页面)
+            ATTRIBUTES_TO_KEEP: ['href', 'src', 'title', 'placeholder', 'type', 'aria-label', 'role', 'data-id', 'name', 'value', 'target'] // [Added] target
         };
         
         const winHeight = window.innerHeight;
@@ -42,28 +42,31 @@ DOM_SKELETON_JS = """
             }
         }
 
-        // [New] 视口检查
+        // [Relaxed] 视口检查 (更加宽容)
         function isInViewport(elem) {
-            // body/html 始终保留
+            // 关键元素始终保留
+            if (['INPUT', 'BUTTON', 'A', 'FORM', 'IMG'].includes(elem.tagName)) return true;
             if (elem === document.body || elem === document.documentElement) return true;
             
             const rect = elem.getBoundingClientRect();
-            // 如果元素在视口上方太远，或者下方太远 (3屏外)，则忽略
-            // 注意：要保留在视口上方的 Header (top < 0 但 bottom > 0)
-            if (rect.bottom < 0) return false; // 滚过去了
-            if (rect.top > winHeight * CONFIG.VIEWPORT_RATIO) return false; // 在很下面
+            
+            // 只有当元素完全滚出上方很远 (>2屏) 时才剪裁
+            if (rect.bottom < -winHeight * 2) return false; 
+            
+            // 下方保留 10 屏
+            if (rect.top > winHeight * CONFIG.VIEWPORT_RATIO) return false; 
+            
             return true;
         }
 
-        // [New] 类名降噪
+        // [Improved] 类名降噪
         function cleanClass(cls) {
             if (!cls) return null;
-            // Tailwind 检测：如果类名包含大量空格且很长
-            if (cls.length > 50 && (cls.match(/ /g) || []).length > 5) {
-                // 只保留看起来像关键词的
-                const keywords = ['btn', 'button', 'nav', 'menu', 'item', 'list', 'card', 'title', 'input', 'form', 'active', 'selected', 'disabled', 'search', 'link'];
+            // Tailwind/原子类 CSS 检测
+            if (cls.length > 50 && (cls.match(/ /g) || []).length > 4) {
+                const keywords = ['btn', 'nav', 'menu', 'item', 'list', 'card', 'title', 'input', 'form', 'active', 'selected', 'search', 'link', 'banner', 'main', 'footer', 'header'];
                 const kept = cls.split(' ').filter(c => keywords.some(k => c.toLowerCase().includes(k)));
-                return kept.length > 0 ? kept.join(' ') : null; // 如果没关键词，直接丢弃 Class
+                return kept.length > 0 ? kept.join(' ') : null;
             }
             return cls;
         }
@@ -73,16 +76,22 @@ DOM_SKELETON_JS = """
             if (!node) return null;
 
             // 1. 基础过滤
-            const skipTags = ['SCRIPT', 'STYLE', 'NOSCRIPT', 'SVG', 'PATH', 'HEAD', 'META', 'LINK', 'IFRAME', 'BR', 'HR', 'WBR', 'FOOTER'];
+            const skipTags = ['SCRIPT', 'STYLE', 'NOSCRIPT', 'SVG', 'PATH', 'HEAD', 'META', 'LINK', 'IFRAME', 'BR', 'HR', 'WBR'];
             if (skipTags.includes(node.tagName)) return null;
             if (node.nodeType !== 1) return null;
 
             // 2. 视口与可见性过滤
-            if (node.style.display === 'none' || node.style.visibility === 'hidden' || node.getAttribute('aria-hidden') === 'true') {
-                 // 保留 hidden input
+            const style = window.getComputedStyle(node);
+            if (style.display === 'none' || style.visibility === 'hidden') {
+                 // 保留 hidden input (承载数据)
                  if (!(node.tagName === 'INPUT' && node.type === 'hidden')) return null;
             }
-            // [Aggressive] 视口外剪枝 (仅对主要块级元素检查，防止误杀)
+            if (node.getAttribute('aria-hidden') === 'true') {
+                 // Aria-hidden 有时只是装饰性隐藏，还是稍微检查下
+                 if (!['DIV', 'SPAN'].includes(node.tagName)) return null;
+            }
+            
+            // 视口剪枝 (仅对布局容器粗剪，叶子节点细剪)
             if (['DIV', 'SECTION', 'ARTICLE', 'LI'].includes(node.tagName)) {
                 if (!isInViewport(node)) return null;
             }
@@ -101,7 +110,7 @@ DOM_SKELETON_JS = """
             CONFIG.ATTRIBUTES_TO_KEEP.forEach(attr => {
                 let val = node.getAttribute(attr);
                 if (val) {
-                    if (val.length > 80 && (attr === 'href' || attr === 'src')) val = val.substring(0, 80) + '...';
+                    if (val.length > 100 && (attr === 'href' || attr === 'src')) val = val.substring(0, 100) + '...';
                     info[attr] = val;
                 }
             });
@@ -115,7 +124,10 @@ DOM_SKELETON_JS = """
                 }
             });
             if (directText.trim()) {
-                info.txt = directText.trim().substring(0, CONFIG.MAX_TEXT_LEN);
+                info.txt = directText.trim();
+                if (info.txt.length > CONFIG.MAX_TEXT_LEN) {
+                    info.txt = info.txt.substring(0, CONFIG.MAX_TEXT_LEN) + "...";
+                }
             }
 
             // 4. 子节点递归与 flatten
@@ -124,7 +136,7 @@ DOM_SKELETON_JS = """
                 let validKids = [];
                 
                 // 列表采样检测
-                let isList = children.length > 8;
+                let isList = children.length > 15; // 提高阈值，少折叠
                 if (isList) {
                     let head = children.slice(0, CONFIG.LIST_HEAD_COUNT);
                     let tail = children.slice(children.length - CONFIG.LIST_TAIL_COUNT);
@@ -133,7 +145,12 @@ DOM_SKELETON_JS = """
                          let r = traverse(c, depth + 1); 
                          if(r) validKids.push(r);
                     });
-                    validKids.push({ t: "skipped", count: children.length - head.length - tail.length });
+                    
+                    let skippedCount = children.length - head.length - tail.length;
+                    if (skippedCount > 0) {
+                        validKids.push({ t: "skipped", count: skippedCount });
+                    }
+                    
                     tail.forEach(c => {
                          let r = traverse(c, depth + 1);
                          if(r) validKids.push(r);
@@ -145,46 +162,36 @@ DOM_SKELETON_JS = """
                     });
                 }
                 
-                info.kids = validKids;
+                if (validKids.length > 0) info.kids = validKids;
                 
-                // [New] Wrapper Flattening (空间折叠)
-                // 如果当前节点无 ID，无 Class(或已被清洗)，无属性，无文本，且只有一个子节点
-                // 则直接返回子节点，跳过当前层级
-                if (!info.id && !info.c && !info.txt && Object.keys(info).length <= 2 && info.kids.length === 1) {
-                    // 确保不是特殊标签 (如 a, button)
-                    if (!['a', 'button', 'input', 'select', 'textarea'].includes(info.t)) {
-                        return info.kids[0];
-                    }
-                }
+                // [Wrapper Flattening] 仅对无意义、无属性的纯包裹层进行折叠
+                // 必须非常谨慎，因为 XPath 依赖层级
+                // 此处取消 Flattening 以保证 XPath 绝对准确性与 Agent 理解
             }
 
-            // 5. 垃圾节点最终清洗
+            // 5. 垃圾节点最终清洗 (Empty Node Filter)
             // 如果节点是空的 (无ID/Class/Txt/Attr/Kids)
+            // 保留主要布局标签以免破坏结构
             let hasAttr = Object.keys(info).some(k => CONFIG.ATTRIBUTES_TO_KEEP.includes(k));
-            let isRoot = (node === document.body || node.id === 'content' || node.id === 'wrapper' || node.tagName === 'MAIN');
+            let isStructural = ['DIV', 'MAIN', 'SECTION', 'ARTICLE', 'HEADER', 'FOOTER', 'NAV', 'UL', 'OL', 'TABLE', 'TR', 'TD'].includes(node.tagName);
             
-            if (!isRoot && !info.id && !info.c && !info.txt && !hasAttr && (!info.kids || info.kids.length === 0)) {
-                const selfClosing = ['input', 'img', 'button', 'select', 'textarea'];
-                if (!selfClosing.includes(info.t)) return null;
+            if (!info.id && !info.c && !info.txt && !hasAttr && (!info.kids || info.kids.length === 0)) {
+                if (!isStructural) return null; 
             }
 
             return info;
         }
 
         // ================= 执行入口 =================
-        let root = document.getElementById('content') || 
-                   document.getElementById('wrapper') || 
-                   document.querySelector('main') || 
-                   document.body;
-                   
-        if (root.innerText.length < 50) root = document.body;
-
-        console.log(`🎯 压缩扫描开始: <${root.tagName} ID=${root.id}>`);
+        // 优先全量扫描，只有当 DOM 确实巨大 (预计) 时才收缩 Scope
+        // 实际上 LLM 需要全局视野，我们尽量用 body
+        let root = document.body;
+        
+        console.log(`🎯 全量扫描开始: <${root.tagName}>`);
         let result = traverse(root, 0);
 
         if (!result) {
-            // Fallback
-             let fallbackText = document.body.innerText.substring(0, 1500);
+             let fallbackText = document.body.innerText.substring(0, 2000);
              window.__dom_result = JSON.stringify({t: "body", txt: "[Structure Fail] " + fallbackText});
              window.__dom_status = 'success';
         } else {
@@ -193,7 +200,7 @@ DOM_SKELETON_JS = """
         }
         
         console.timeEnd("DOM_Analysis");
-        console.log("✅ 压缩完成 (Size: " + window.__dom_result.length + ")");
+        console.log("✅ 完成 (Size: " + window.__dom_result.length + ")");
 
     } catch (e) {
         console.error("❌ 压缩崩溃:", e);

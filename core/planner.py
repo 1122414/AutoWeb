@@ -60,7 +60,7 @@ class PlannerAgent:
         # 1. 感知环境 (Observer)
         try:
             # 捕获 DOM (限制长度防止 Token 溢出)
-            dom = self.observer.capture_dom_skeleton(browser_tab)[:30000] 
+            dom = self.observer.capture_dom_skeleton(browser_tab)[:50000] 
             
             # 【适配重点】调用视觉分析，获取定位建议列表
             # 注意：这里返回的是 List[Dict]，例如 [{"locator": "#search"}, {"locator": "#btn"}]

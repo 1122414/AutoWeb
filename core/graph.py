@@ -92,7 +92,7 @@ class AutoWebGraph:
             # 正确格式化 Base Prompt
             base_prompt = ACTION_CODE_GEN_PROMPT.format(
                 xpath_plan = xpath_plan,
-                requirement = task
+                user_context = task
             )
             
             prompt = f"""
@@ -122,6 +122,7 @@ class AutoWebGraph:
             
             Example:
             tab.get("https://www.baidu.com")
+            print(f"-> goto : https://www.baidu.com")
             """
         response = self.llm.invoke([HumanMessage(content=prompt)])
         
@@ -145,10 +146,23 @@ class AutoWebGraph:
         
         try:
             print(code)
-            exec_results = actor.execute_python_strategy(code, context)
-            log = f"Execution Results: {json.dumps(exec_results, ensure_ascii=False, default=str)}"
-            print(f"   -> {log}")
-            return {"messages": [AIMessage(content=f"【执行报告】\n{log}")], "execution_log": log}
+            # exec_results 现在返回 Dict {result_data, execution_log}
+            exec_output = actor.execute_python_strategy(code, context)
+            
+            result_data = exec_output.get("result_data", [])
+            execution_log = exec_output.get("execution_log", "")
+            
+            # 打印被捕获的日志到控制台，方便调试
+            print(f"   -> [Captured Log]\n{execution_log}")
+            
+            # 将 result_data 序列化以便展示（如果需要）
+            log_preview = json.dumps(result_data, ensure_ascii=False, default=str)[:200]
+            
+            return {
+                "messages": [AIMessage(content=f"【执行报告】\n{execution_log}")], 
+                "execution_log": execution_log,
+                # 如果需要将数据存入 state，可以在这里做，但目前主要依赖 execution_log 给 Verifier
+            }
         except Exception as e:
             error_msg = f"Runtime Error: {str(e)}\n{traceback.format_exc()}"
             print(f"   ❌ Error: {error_msg}")
@@ -163,7 +177,6 @@ class AutoWebGraph:
         current_plan = state.get("plan", "Unknown Plan")
 
         # 1. [Local Tool] 确定性验收 (Deterministic Verification)
-        # 如果日志包含明确的严重错误，直接判定为失败，跳过 LLM
         error_keywords = ["Runtime Error:", "Traceback (most recent call last):", "ElementNotFound", "TimeoutException", "SyntaxError"]
         for kw in error_keywords:
             if kw in log:
@@ -176,24 +189,17 @@ class AutoWebGraph:
                 print(f"   ❌ [Verifier] 步骤失败 (Fast Fail)。")
                 return updates
 
-        # 截断日志和 DOM 以防止 Token 溢出 (Error 400)
-        # 保留最后的 2000 字符日志，通常包含报错信息
-        short_log = log[-2000:] if len(log) > 2000 else log
+        # 截断日志
+        short_log = log[-3000:] if len(log) > 3000 else log
         
-        try:
-            tab = self.browser.get_latest_tab()
-            # 限制 DOM 长度
-            current_dom = self.observer.capture_dom_skeleton(tab)[:15000]
-        except:
-            current_dom = "无法获取 DOM"
-        
+        # [User Request] 移除 DOM 传递，只看日志
         prompt = f"""
         你是自动化测试验收员。请验证上一步的执行情况。
         
         【用户最终目标】{task}
         【当前步骤计划】{current_plan}
-        【执行日志 (部分)】{short_log}
-        【当前页面 DOM (精简)】{current_dom}
+        【执行日志 (含代码输出与系统日志)】
+        {short_log}
         
         请判断：
         1. **步骤执行情况**: 
@@ -204,6 +210,9 @@ class AutoWebGraph:
         2. **总任务进度**: 
            - 只有当用户要求的最终结果 (如文件保存、数据抓取完毕) 明确发生时，才算完成。
            - 简单的翻页或点击不代表任务结束。
+
+        3. **反思检查**: 
+           - 自动化或者爬虫问题，大概率是**planner**执行元素定位出现问题，让planner重生检查生成定位策略。
         
         请严格按以下格式回复：
         Status: [STEP_SUCCESS | STEP_FAIL]

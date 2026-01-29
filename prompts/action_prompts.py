@@ -24,10 +24,17 @@ ACTION_CODE_GEN_PROMPT = """
 3. **流程控制**: 仅在 Explicit Loop 时使用 `for`。禁止 `while True`。
 4. **数据安全**: 每 10 条存一次 (CSV/DB)。
 5. **工具箱**: 优先用 `skills.toolbox` (HTTP/RAG/DB) 替代浏览器操作。
+6. **日志留痕**: **必须**对每一步关键操作进行 print 输出，供验收员检查，包括但不限于以下示例。
+   - `print(f"-> goto : {{url}}")`
+   - `print(f"-> Clicking login button: {{btn}}")`
+   - `print(f"-> Page title is now: {{tab.title}}")`
+7. **反幻觉 (Anti-Hallucination)**:
+   - **严禁**凭空臆造 XPath。生成的代码必须基于 `strategy` 字典中的定位符。
+   - 如果 `strategy` 中缺少某字段的定位符，请在代码中打印 Warning 并跳过该字段，绝不要瞎编。
 
 # 输出与稳健性 (Output & Robustness)
 1. **纯粹代码**: 严禁包含Markdown标记，严禁 `import`(除toolbox)，严禁 `tab = ...`。仅输出函数体逻辑。
-2. **防崩溃**: 对可能不存在的元素或不稳定的步骤，**必须**使用 `try...except` 捕获并打印异常 (`print(f"Warning: {e}")`)，确保流程不中断。
+2. **防崩溃**: 对可能不存在的元素或不稳定的步骤，**必须**使用 `try...except` 捕获并打印异常 (`print(f"Warning: {{e}}")`)，确保流程不中断。
 
 # 示例 (Few-Shot)
 ## Ex1: 遍历列表并点击
@@ -44,7 +51,7 @@ for i in range(counts):
         tab.back()
         tab.wait.ele_displayed('.item')
     except Exception as e:
-        print(f"Error at index {i}: {e}")
+        print(f"Error at index {{i}}: {{e}}")
 
 ## Ex2: 工具箱调用
 User: "下载图片" / Plan: "下载 img_url"
@@ -56,10 +63,10 @@ if img_url:
 
 # 输入
 策略: {xpath_plan}
-需求: {requirement}
+全局上下文(仅供理解业务背景，严禁作为执行目标): {user_context}
 
 # 输出
-(仅 Python 代码)
+(仅 Python 代码，包括 print 语句)
 """
 
 # =============================================================================
@@ -76,41 +83,45 @@ UNIVERSAL_EXTRACTION_PROMPT = """
 {dom_json}
 
 【定位策略生成铁律 - 必须严格遵守】
-1. **语法优先级 (Syntax Priority)**：
+1. **完整性优先 (Completeness)**：
+   - 必须为用户需求中的**每一个字段**找到最精确的定位符。
+   - 严禁遗漏。如果某个字段在列表中不显示（如详情页才有），请标记 "Need Detail Page"。
+
+2. **语法优先级 (Syntax Priority)**：
    - **T0 (极简)**: 若元素有唯一 ID，直接输出 `#id_value`。
    - **T1 (极简)**: 若元素有唯一 Class，直接输出 `.class_name`。
    - **T2 (文本)**: 若元素内容固定且唯一，使用 `text=下一页`。
    - **T3 (属性)**: 若有特殊属性，使用 `@data-id=123`。
    - **T4 (XPath)**: 仅在上述无法定位时，使用 `x:` 开头的 XPath (如 `x://div[@class='box']`)。
 
-2. **核心规则：只定位元素 (Element Only)**：
+3. **核心规则：只定位元素 (Element Only)**：
    - **严禁**定位到文本节点 (如 `/text()`) 或属性节点 (如 `/@href`)。
    - **原因**: DrissionPage 需要获取元素对象来执行 `.text` 或 `.link`。
    - ❌ 错误：`x://span/text()`
    - ✅ 正确：`x://span` (后续代码会自动调用 .text)
-   - ✅ 正确：`x://a` (后续代码会自动调用 .link)
 
-3. **相对定位规则**：
+4. **相对定位规则**：
    - `fields` 中的定位符必须是相对于 `item_locator` 的子路径。
    - 若使用 XPath，必须以 `x:.` 开头 (如 `x:.//h3`)。
    - 若使用极简语法，直接写 (如 `tag:h3` 或 `.title`)。
 
-4. **健壮性要求**：
+5. **健壮性要求**：
    - 严禁使用绝对路径 (如 `/html/body/div[1]`)。
    - 严禁写死依赖位置的索引 (如 `div[1]`)，必须利用特征 Class 或属性。
 
 【输出格式 (JSON Only)】
 {{
     "is_list": true,
-    "list_container_locator": "列表父容器 (可选，如 '#content' 或 'x://div[@id=\\'list\\']')",
+    "list_container_locator": "列表父容器 (可选)",
     "item_locator": "能够选中所有子项的通用定位符 (如 '.item-card' 或 'x://li[@class=\\'item\\']')",
     "fields": {{
         "标题": "相对于item的定位符 (如 'tag:h3' 或 '.title')",
         "链接": "相对于item的定位符 (如 'tag:a'，确保选中a标签)",
+        "封面": "相对于item的定位符 (如 'tag:img')",
         "其他字段": "..."
     }},
     "next_page_locator": "下一页按钮 (优先用 'text=下一页' 或 'x://a[contains(@class, \\'next\\')]')",
-    "detail_page_needed": true
+    "detail_page_needed": false
 }}
 """
 
