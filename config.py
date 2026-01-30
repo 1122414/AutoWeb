@@ -13,10 +13,17 @@ COLLECTION_NAME = "spider_knowledge_base"
 # ==========================
 # 魔搭模型参数配置（不加Ollama的全是魔搭、线上API）
 # ==========================
-EMBEDDING_MODEL = os.getenv("MODA_EMBEDDING_MODEL", "text-embedding-3-small")
-MODEL_NAME = os.getenv("MODA_MODEL_NAME", "gpt-4o-mini")
-OPENAI_API_KEY = os.getenv("MODA_OPENAI_API_KEY")
-OPENAI_BASE_URL = os.getenv("MODA_OPENAI_BASE_URL")
+# EMBEDDING_MODEL = os.getenv("MODA_EMBEDDING_MODEL", "text-embedding-3-small")
+# MODEL_NAME = os.getenv("MODA_MODEL_NAME", "gpt-4o-mini")
+# OPENAI_API_KEY = os.getenv("MODA_OPENAI_API_KEY")
+# OPENAI_BASE_URL = os.getenv("MODA_OPENAI_BASE_URL")
+
+# ==========================
+# 百炼
+# ==========================
+MODEL_NAME = os.getenv('BAILIAN_MODEL_NAME')
+OPENAI_API_KEY = os.getenv('BAILIAN_API_KEY')
+OPENAI_BASE_URL = os.getenv('BAILIAN_BASE_URL')
 
 # ==========================
 # 本地Ollama

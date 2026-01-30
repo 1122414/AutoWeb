@@ -35,7 +35,7 @@ class AutoWebGraph:
         
         # 初始化 Planner Agent
         self.planner_agent = PlannerAgent(self.observer)
-        self.tab = self.browser.get_latest_tab()
+        self.tab = self.browser.latest_tab
 
     # ================= 节点封装 =================
     
@@ -140,7 +140,7 @@ class AutoWebGraph:
         """[Executor] 执行代码"""
         print("\n⚡ [Executor] 正在执行代码...")
         code = state.get("generated_code", "")
-        tab = self.browser.get_latest_tab()
+        tab = self.browser.latest_tab
         actor = BrowserActor(tab)
         context = {"goal": state["user_task"]}
         

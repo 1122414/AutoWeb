@@ -39,26 +39,42 @@ DRISSION_LOCATOR_PROMPT = """
 你是一位精通 DrissionPage (v4.x) 的自动化架构师。
 请分析下方的 【DOM 简易骨架】，提取符合【用户操作需求】的定位策略。
 
-【用户需求】
-{requirement} (例如：点击下一页、输入密码、提取列表)
+【用户最终目标】
+{requirement}
+
+【已完成步骤 (Context)】
+{previous_steps}
+
+【分析任务】
+1. 根据【已完成步骤】和【用户最终目标】，推断**当前当下**应该执行的**唯一一步**操作是什么。
+   - 例如：如果刚填完用户名，下一步应该是填密码（而不是点击登录，除非密码已填）。
+   - **严禁剧透**：不要分析当前步骤之后的任何操作。只关注眼前！
+
+2. 在【DOM 简易骨架】中寻找支持这一步操作的元素。
 
 【DOM 简易骨架】
 {dom_json}
 
 【定位策略生成铁律】
-1. **语法优先级**:
+1. **单一聚焦原则 (Single Step Focus)**:
+   - 输出的策略必须仅针对**当前这一步**。
+   - 如果你发现后续步骤的元素，**请忽略它们**。
+   - 目标是让执行者只写出一行代码，而不是一个完整的脚本。
+
+2. **语法优先级**:
    - **T0**: `#id_value` (唯一ID)
    - **T1**: `.class_name` (唯一Class)
    - **T2**: `text=登录` (唯一文本)
    - **T3**: `@placeholder=请输入` (特殊属性)
    - **T4**: `x://div[...]` (XPath，仅作为兜底，如果是XPath，一定要`x:...`
 
-2. **对象原则**:
+3. **对象原则**:
    - 严禁定位到 TextNode (如 `/text()`) 或 Attribute (如 `/@href`)。
    - 必须定位到 Element 节点 (如 `x://a`)，因为我们需要对元素对象进行 `.click()` 或 `.input()` 操作。
 
 【输出格式 (JSON Only)】
 {{
+    "current_step_reasoning": "根据历史，已输入账号，当前页面显示密码框，故下一步是输入密码",
     "target_type": "list|single|button|input", 
     "locator": "主要的定位符 (如 '#submit-btn' 或 'x://div[@class=\\'list\\']')",
     "sub_locators": {{ 

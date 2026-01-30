@@ -13,7 +13,7 @@ class PlannerAgent:
             temperature=0,
             openai_api_key=OPENAI_API_KEY,
             openai_api_base=OPENAI_BASE_URL,
-            
+            streaming=True
         )
 
     def run(self, state: AgentState, browser_tab):
@@ -64,8 +64,9 @@ class PlannerAgent:
             
             # 【适配重点】调用视觉分析，获取定位建议列表
             # 注意：这里返回的是 List[Dict]，例如 [{"locator": "#search"}, {"locator": "#btn"}]
-            print("   -> 正在进行视觉定位分析...")
-            locator_suggestions = self.observer.analyze_locator_strategy(dom, task)
+            finished_steps = state.get("finished_steps", [])
+            print(f"   -> 正在进行视觉定位分析 (Context: {len(finished_steps)} finished steps)...")
+            locator_suggestions = self.observer.analyze_locator_strategy(dom, task, previous_steps=finished_steps)
             
             # 将列表序列化为格式化的 JSON 字符串，以便嵌入 Prompt
             if isinstance(locator_suggestions, list) and locator_suggestions:

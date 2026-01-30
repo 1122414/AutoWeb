@@ -1,12 +1,14 @@
 import os
 import sys
-import json
+import uuid
 import traceback
 from dotenv import load_dotenv
 
 # 1. 导入核心驱动
 from drivers.drission_driver import BrowserDriver
-from core.graph import AutoWebGraph
+# 导入 V2 架构构建函数
+from core.graph_v2 import build_graph
+from langgraph.checkpoint.memory import MemorySaver
 
 # 导入配置
 from config import MODEL_NAME
@@ -15,65 +17,101 @@ from config import MODEL_NAME
 load_dotenv()
 
 def setup_agent():
-    """初始化全栈 Agent"""
+    """初始化全栈 Agent (V2 Architecture)"""
     print("\n>>> 正在初始化浏览器驱动...")
     # 预热浏览器，确保单例被创建
-    BrowserDriver.get_browser()
+    # 注意：在 V2 中，browser 对象将作为 configurable 资源传入，但最好保持全局单例以防多次初始化
+    browser_instance = BrowserDriver.get_browser()
     
-    print(">>> 正在构建 AutoWeb 大脑 (Reflexion Graph)...")
-    # 将 Driver 类注入给 Graph，方便它随时获取最新 Tab
-    graph_builder = AutoWebGraph(BrowserDriver)
-    app = graph_builder.compile()
+    print(">>> 正在构建 AutoWeb V2 大脑 (LangGraph)...")
+    # 初始化 Checkpointer 实现会话记忆
+    memory = MemorySaver()
+    
+    # 构建图
+    app = build_graph(checkpointer=memory)
     
     print(f">>> 系统就绪 (Model: {MODEL_NAME})")
-    return app
+    
+    return app, browser_instance
 
 def print_step_output(event):
     """
-    [UI层] 美化输出图执行过程中的状态更新
-    实时展示 Agent 的思考过程、工具调用结果和反思
+    [UI层] 美化输出 V2 图执行过程中的状态更新
     """
-    for node_name, state_update in event.items():
+    for node_name, updates in event.items():
         print(f"\n🔄 [Node: {node_name}] 执行完成")
         
-        # Case A: Planner 节点
-        if node_name == "Planner" and "plan" in state_update:
-            print(f"   🧠 Plan: {state_update['plan']}")
-            if state_update.get("is_complete"):
-                print(f"   🏁 \033[1;32mPlanner marked task as COMPLETE.\033[0m")
-
-        # Case B: Coder 节点
-        if node_name == "Coder" and "generated_code" in state_update:
-            # 只显示前100字符预览
-            code_preview = state_update['generated_code'][:100].replace('\n', ' ')
+        if "plan" in updates:
+            print(f"   🧠 Plan: {updates['plan']}")
+        
+        if "generated_code" in updates:
+            code_preview = updates['generated_code'][:100].replace('\n', ' ')
             print(f"   💻 Generated Code: {code_preview}...")
-
-        # Case C: Executor 节点
-        if node_name == "Executor" and "execution_log" in state_update:
-            log = state_update['execution_log']
+            
+        if "execution_log" in updates:
+            log = updates['execution_log']
             if "Error" in log or "Exception" in log:
                  print(f"   ❌ \033[1;31mExecution Failed\033[0m: {log[:200]}...")
             else:
                  print(f"   ✅ Execution Success: {log[:200]}...")
+                 
+        if "finished_steps" in updates:
+             last_step = updates['finished_steps'][-1] if updates['finished_steps'] else "Unknown"
+             print(f"   ✅ \033[1;32mVerification Passed\033[0m: {last_step}")
+             
+        if "error" in updates and updates["error"]:
+             print(f"   ⚠️ Error Flag Set: {updates['error']}")
 
-        # Case D: Verifier 节点
-        if node_name == "Verifier":
-            if "reflections" in state_update and state_update["reflections"]:
-                print(f"   ❌ \033[1;31mVerification Failed\033[0m: {state_update['reflections'][0]}")
-            elif "finished_steps" in state_update:
-                 last_step = state_update['finished_steps'][-1] if state_update['finished_steps'] else "Unknown"
-                 print(f"   ✅ \033[1;32mVerification Passed\033[0m: {last_step}")
-                 if state_update.get("is_complete"):
-                     print(f"   🎉 Task Fully Completed!")
-
-def interactive_loop(app):
+def interactive_loop(app, browser_instance):
     """交互式主循环"""
-    print("\n🤖 AutoWeb Agent (Reflexion版) 已启动 — 输入自然语言任务（输入 exit 退出）")
-    print("💡 提示：输入 'qa <问题>' 可直接针对知识库提问。")
+    print("\n🤖 AutoWeb Agent (LangGraph V2) 已启动 — 输入自然语言任务（输入 exit 退出）")
     
+    # 为当前会话生成唯一 Thread ID
+    thread_id = str(uuid.uuid4())
+    print(f"THREAD ID: {thread_id}")
+    
+    config = {
+        "configurable": {
+            "thread_id": thread_id,
+            "browser": browser_instance
+        },
+        "recursion_limit": 50
+    }
+
     while True:
         try:
-            user_input = input("\n👤 User > ").strip()
+            # 检查是否有挂起的中断验证 (Human-in-the-Loop)
+            # 在 Graph V2 中，interrupt_before=["Executor"] 可能导致线程暂停
+            snapshot = app.get_state(config)
+            
+            if snapshot.next:
+                 print(f"\n⏸️ 任务暂停于节点: {snapshot.next}")
+                 print("   等待人工确认... (输入 'c' 或 'continue' 继续，输入 'q' 退出，输入其他内容作为新指令)")
+                 user_input = input("\n👤 Admin > ").strip()
+                 
+                 if user_input.lower() in ("c", "continue", "yes", "y"):
+                     print("   ✅ 批准执行，继续...")
+                     # 恢复执行 (传入 None 作为 input)
+                     for event in app.stream(None, config=config, stream_mode="updates"):
+                        print_step_output(event)
+                     continue
+                     
+                 elif user_input.lower() in ("q", "quit", "exit"):
+                     break
+                 
+                 elif user_input:
+                     print(f"   🔄 收到新指令，正在更新状态并重规划: {user_input}")
+                     # 对于中断处的新指令，通常意味着修改计划或提供反馈
+                     # 这里我们简单地作为新消息传入，但这需要 Graph 能处理
+                     # 或者我们可以 update state
+                     app.update_state(config, {"user_task": f"{user_input} (User Feedback)"})
+                     # 然后继续
+                     for event in app.stream(None, config=config, stream_mode="updates"):
+                        print_step_output(event)
+                     continue
+
+            # 正常的新任务输入
+            user_input = input("\n� User > ").strip()
             if user_input.lower() in ("exit", "quit"):
                 print("👋 正在关闭浏览器资源...")
                 BrowserDriver.quit()
@@ -82,35 +120,19 @@ def interactive_loop(app):
             if not user_input:
                 continue
 
-            # --- 特殊指令：RAG 问答 ---
-            if user_input.lower().startswith("qa ") or user_input.lower().startswith("ask "):
-                query = user_input.split(" ", 1)[1]
-                try:
-                    from rag.retriever_qa import qa_interaction
-                    qa_result = qa_interaction(query)
-                    print(f"\n📚 [Knowledge Base]: {qa_result}")
-                except Exception as e:
-                    print(f"⚠️ RAG Error: {e}")
-                continue
-
-            # --- 启动 Graph 任务 ---
             print(f"🚀 开始执行任务: {user_input}")
             
-            # 构造初始状态
-            initial_state = {
+            # V2 State 结构
+            input_state = {
                 "user_task": user_input,
-                "messages": [],         # 历史消息清空
-                "loop_count": 0,        # 步数重置
-                "reflections": [],      # 初始没有经验
-                "error_flag": False,
-                "current_url": "",
-                "dom_skeleton": ""
+                "messages": [("user", user_input)], 
+                "loop_count": 0,
+                "finished_steps": []
             }
             
-            # 使用 .stream() 逐步执行并获取反馈
-            # recursion_limit 设置稍大一点，允许更多步数的 ReAct 循环
             try:
-                for event in app.stream(initial_state, config={"recursion_limit": 50}):
+                # stream_mode="updates" 只返回增量更新，适合 UI 展示
+                for event in app.stream(input_state, config=config, stream_mode="updates"):
                     print_step_output(event)
                 
                 print("\n✅ 流程结束 (End of Graph)")
@@ -128,8 +150,8 @@ def interactive_loop(app):
 
 if __name__ == "__main__":
     try:
-        app = setup_agent()
-        interactive_loop(app)
+        app, browser = setup_agent()
+        interactive_loop(app, browser)
     except Exception as e:
         print(f"❌ 启动失败: {e}")
         traceback.print_exc()

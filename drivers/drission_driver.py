@@ -97,7 +97,7 @@ class BrowserDriver:
     @classmethod
     def close_current_tab(cls):
         """关闭当前标签页"""
-        tab = cls.get_latest_tab()
+        tab = cls.latest_tab
         tab.close()
 
     @classmethod

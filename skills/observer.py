@@ -21,7 +21,7 @@ class BrowserObserver:
             temperature=0, 
             openai_api_key=OPENAI_API_KEY, 
             openai_api_base=OPENAI_BASE_URL,
-            
+            streaming=True
         )
         # [Optimization] DOM Cache
         self._dom_cache = {"hash": None, "analysis": None}
@@ -157,7 +157,7 @@ class BrowserObserver:
         
         return json.dumps({"error": "Failed to capture DOM after retries"})
 
-    def analyze_locator_strategy(self, dom_skeleton: str, requirement: str) -> Union[Dict, list]:
+    def analyze_locator_strategy(self, dom_skeleton: str, requirement: str, previous_steps: list = []) -> Union[Dict, list]:
         """
         [推理] 基于 DOM 骨架和用户需求，生成操作定位策略
         [Optimization] 增加 MD5 缓存机制 & 启发式搜索
@@ -185,8 +185,9 @@ class BrowserObserver:
 
         try:
             import hashlib
-            # 计算 Hash
-            current_hash = hashlib.md5(dom_skeleton.encode('utf-8')).hexdigest()
+            # 计算 Hash (Include previous_steps in hash to distinguish context)
+            context_str = f"{dom_skeleton}|{requirement}|{str(previous_steps)}"
+            current_hash = hashlib.md5(context_str.encode('utf-8')).hexdigest()
             
             # 检查缓存: 如果 DOM Hash 一致，且缓存中有有效结果，直接返回
             if self._dom_cache["hash"] == current_hash and self._dom_cache["analysis"]:
@@ -196,9 +197,13 @@ class BrowserObserver:
         except Exception as e:
             print(f"⚠️ Cache Check Failed: {e}")
 
+        # Formatted previous steps
+        prev_steps_str = "\n".join([f"- {s}" for s in previous_steps]) if previous_steps else "(无 - 初始状态)"
+
         # Cache Miss - Call LLM
         prompt = DRISSION_LOCATOR_PROMPT.format(
             requirement=requirement,
+            previous_steps=prev_steps_str,
             dom_json=dom_skeleton[:50000] # 防止 Token 溢出
         )
         

@@ -15,6 +15,7 @@ ACTION_CODE_GEN_PROMPT = """
 # 核心铁律 (Critical Rules)
 1. **禁止实例化**: 严禁 `ChromiumPage()`。只能用 `tab`。
 2. **语法速查 (DrissionPage Cheatsheet)**:
+   - **跳转**: `tab.get(url)`
    - **查**: `tab.eles('x://div')` (列表), `ele.ele('x://span')` (单项)
    - **读**: `el.text`, `el.attr('href')`, `el.link` (绝对URL)
    - **交互**: `el.click(by_js=True)`, `el.input('text')`
@@ -33,7 +34,7 @@ ACTION_CODE_GEN_PROMPT = """
    - 如果 `strategy` 中缺少某字段的定位符，请在代码中打印 Warning 并跳过该字段，绝不要瞎编。
 
 # 输出与稳健性 (Output & Robustness)
-1. **纯粹代码**: 严禁包含Markdown标记，严禁 `import`(除toolbox)，严禁 `tab = ...`。仅输出函数体逻辑。
+1. **纯粹代码**: 严禁包含Markdown标记，严禁 `import`(除toolbox)，严禁 `tab = ...`，严禁注释，仅输出函数体逻辑
 2. **防崩溃**: 对可能不存在的元素或不稳定的步骤，**必须**使用 `try...except` 捕获并打印异常 (`print(f"Warning: {{e}}")`)，确保流程不中断。
 
 # 示例 (Few-Shot)
@@ -63,7 +64,6 @@ if img_url:
 
 # 输入
 策略: {xpath_plan}
-全局上下文(仅供理解业务背景，严禁作为执行目标): {user_context}
 
 # 输出
 (仅 Python 代码，包括 print 语句)
