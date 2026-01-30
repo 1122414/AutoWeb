@@ -110,6 +110,10 @@ def planner_node(state: AgentState, config: RunnableConfig) -> Command[Literal["
         print(f"   -> 正在进行视觉定位分析 (Context: {len(finished_steps)} finished steps)...")
         locator_suggestions = _observer.analyze_locator_strategy(dom, task, previous_steps=finished_steps)
         
+        # [Fix] 兼容单字典返回的情况
+        if isinstance(locator_suggestions, dict):
+            locator_suggestions = [locator_suggestions]
+
         if isinstance(locator_suggestions, list) and locator_suggestions:
             suggestions_str = json.dumps(locator_suggestions, ensure_ascii=False, indent=2)
         else:

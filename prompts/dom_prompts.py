@@ -45,42 +45,59 @@ DRISSION_LOCATOR_PROMPT = """
 【已完成步骤 (Context)】
 {previous_steps}
 
-【分析任务】
-1. 根据【已完成步骤】和【用户最终目标】，推断**当前当下**应该执行的**唯一一步**操作是什么。
-   - 例如：如果刚填完用户名，下一步应该是填密码（而不是点击登录，除非密码已填）。
-   - **严禁剧透**：不要分析当前步骤之后的任何操作。只关注眼前！
-
-2. 在【DOM 简易骨架】中寻找支持这一步操作的元素。
-
-【DOM 简易骨架】
+【压缩之后的DOM骨架】
 {dom_json}
 
-【定位策略生成铁律】
-1. **单一聚焦原则 (Single Step Focus)**:
-   - 输出的策略必须仅针对**当前这一步**。
-   - 如果你发现后续步骤的元素，**请忽略它们**。
-   - 目标是让执行者只写出一行代码，而不是一个完整的脚本。
+【分析任务】
+1. 根据【已完成步骤】和【用户最终目标】，推断**当前当下**应该执行的**唯一一步**操作是什么。
+   - **严禁剧透**：不要分析当前步骤之后的任何操作。只关注眼前！
 
-2. **语法优先级**:
-   - **T0**: `#id_value` (唯一ID)
-   - **T1**: `.class_name` (唯一Class)
-   - **T2**: `text=登录` (唯一文本)
-   - **T3**: `@placeholder=请输入` (特殊属性)
-   - **T4**: `x://div[...]` (XPath，仅作为兜底，如果是XPath，一定要`x:...`
+2. 在【压缩之后的DOM骨架】中寻找支持这一步操作的元素。
+   - 注意：为了节省 Token，部分重复结构（如商品列表）已被**压缩**。
+   - 压缩节点格式：`{{ "type": "compressed_list", "xpath_template": "//div[{{i}}]/a", "data": {{ "text": ["A", "B"], "_index": [1, 3] }} }}`
+   - **解压规则 (CRITICAL)**：
+     - 如果 `data` 中包含 `_index` 数组，**必须使用** `_index` 中的值作为 `{{i}}` 中的 `i`。
+       - 例如：想点击 "B" (第 2 项)，其 `_index` 为 3，则 Locator 为 `x://div[3]/a`。
+     - 如果没有 `_index`，则默认使用 1-based 索引 (1, 2, 3...)。
 
-3. **对象原则**:
+3. **Locator 安全性铁律 (Class & Space)**:
+   - **严禁**在 XPath 中使用 `@class='...'` 做全量匹配！
+     - 原因：网页源码常用 `class="active "` (带空格)，导致 `@class='active'` 匹配失败。
+   - **必须**使用以下替代方案：
+     - 方案 A (推荐): `.class_name` (DrissionPage 原生语法，自动处理空格)。
+     - 方案 B (XPath): `contains(@class, 'class_name')`。
+   - **原样保留**: 如果你必须引用精确属性值，请**原封不动**保留 DOM 中的所有字符（包括空格）。
+
+4. **对象原则**:
    - 严禁定位到 TextNode (如 `/text()`) 或 Attribute (如 `/@href`)。
-   - 必须定位到 Element 节点 (如 `x://a`)，因为我们需要对元素对象进行 `.click()` 或 `.input()` 操作。
+   - 必须定位到 Element 节点 (如 `x://a`)。
+
+【Few-Shot Examples】
+1. **场景：点击普通按钮**
+   - Goal: "登录"
+   - DOM: `{{ "t": "button", "id": "login-btn", "txt": "Login" }}`
+   - Output: `{{ "target_type": "button", "locator": "#login-btn", "action_suggestion": "click" }}`
+
+2. **场景：填写表单**
+   - Goal: "输入用户名 admin"
+   - Context: ["已打开登录页"]
+   - DOM: `{{ "t": "form", "kids": [{{ "t": "input", "id": "u", "placeholder": "Username" }}, {{ "t": "input", "id": "p" }}] }}`
+   - Output: `{{ "target_type": "input", "locator": "#u", "action_suggestion": "input" }}`
+
+3. **场景：点击压缩列表中的特定项 (With _index)**
+   - Goal: "点击商品列表中的 'iPhone 15'"
+   - DOM: `{{ "type": "compressed_list", "xpath_template": "//ul/li[{{i}}]/a", "data": {{ "text": ["Galaxy S24", "iPhone 15", "Pixel 8"], "_index": [1, 3, 4] }} }}`
+   - Reasoning: "iPhone 15" is at position 2 in the list. The corresponding `_index` value is 3. Template is `//ul/li[{{i}}]/a`. Result is `//ul/li[3]/a`.
+   - Output: `{{ "target_type": "single", "locator": "x://ul/li[3]/a", "action_suggestion": "click" }}`
 
 【输出格式 (JSON Only)】
 {{
-    "current_step_reasoning": "根据历史，已输入账号，当前页面显示密码框，故下一步是输入密码",
+    "current_step_reasoning": "根据历史，需点击列表中的'手机'分类",
     "target_type": "list|single|button|input", 
-    "locator": "主要的定位符 (如 '#submit-btn' 或 'x://div[@class=\\'list\\']')",
+    "locator": "主要的定位符 (如 '#btn' 或 'x://div[3]/a')",
     "sub_locators": {{ 
-        "username": "#user",
-        "password": "#pass"
-    }} (如果是表单或列表，填写子元素定位符),
+        "username": "#user"
+    }},
     "action_suggestion": "click|input|extract"
 }}
 """

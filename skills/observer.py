@@ -10,6 +10,9 @@ from prompts.dom_prompts import DOM_ANALYSIS_PROMPT, DRISSION_LOCATOR_PROMPT
 from drivers.js_loader import DOM_SKELETON_JS  # 假设你把 JS 放在了这里
 from config import MODEL_NAME, OPENAI_API_KEY, OPENAI_BASE_URL
 
+# 引入 Compressor
+from skills.dom_compressor import DOMCompressor
+
 class BrowserObserver:
     """
     [视觉感知单元]
@@ -25,6 +28,8 @@ class BrowserObserver:
         )
         # [Optimization] DOM Cache
         self._dom_cache = {"hash": None, "analysis": None}
+        # [Optimization] Compressor (Default Lite)
+        self.compressor = DOMCompressor(mode="lite") 
 
     # ================= 工具函数 (原 dom_helper/extractor_utils) =================
     
@@ -145,9 +150,21 @@ class BrowserObserver:
                          time.sleep(1.0)
                          continue
                     
+                    # 1. 解析原始 JSON
+                    raw_dom = dom_json_str
                     if isinstance(dom_json_str, str):
-                        return dom_json_str
-                    return json.dumps(dom_json_str, ensure_ascii=False)
+                        try:
+                            raw_dom = json.loads(dom_json_str)
+                        except:
+                            return dom_json_str # Fallback
+                    
+                    # 2. 调用压缩器 (Compress)
+                    print(f"   📉 [Observer] Compressing DOM (Original Size: {len(str(raw_dom))} chars)...")
+                    compressed_dom = self.compressor.compress(raw_dom)
+                    compressed_str = json.dumps(compressed_dom, ensure_ascii=False)
+                    print(f"   📉 [Observer] Compression Done (New Size: {len(compressed_str)} chars).")
+                    
+                    return compressed_str
                 else:
                     print(f"   ⚠️ JS 执行超时 (Attempt {attempt+1})")
                 
