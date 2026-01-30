@@ -9,7 +9,11 @@ ACTION_CODE_GEN_PROMPT = """
 - `tab`: 当前激活的浏览器 Tab 对象 (严禁重新实例化)。
 - `strategy`: 定位策略字典。
 - `results`: 结果列表 List[Dict]。
-- `from skills.toolbox import *`: http_request, download_file, clean_html, db_insert, save_to_csv, notify.
+- `toolbox`: 全能工具箱对象 (已注入).
+  - `toolbox.save_data(data, name)`: 自动保存 (JSON/CSV)
+  - `toolbox.http_request(url)`: 发送请求
+  - `toolbox.notify(msg)`: 发送通知
+- `save_data`: `toolbox.save_data` 的别名 (可以直接调用)。
 - `from skills.tool_rag import save_to_knowledge_base`: 用于"学习/入库"任务。
 
 # 核心铁律 (Critical Rules)
@@ -23,14 +27,22 @@ ACTION_CODE_GEN_PROMPT = """
    - **状态**: `if el.states.is_displayed:`, `if el.states.is_enabled:`
    - **新页**: `new = el.click.for_new_tab()`; ... ; `new.close()`
 3. **流程控制**: 仅在 Explicit Loop 时使用 `for`。禁止 `while True`。
-4. **数据安全**: 每 10 条存一次 (CSV/DB)。
+4. **数据安全 (Data Saving - CRITICAL)**: 
+   - **严禁**手动编写 `open()`/`csv.writer()` 代码保存数据！
+   - **必须**使用 `toolbox.save_data(results, 'data/movies.json')`。
+   - `toolbox` 对象已内置，直接调用即可。它会自动处理目录创建、格式转换(json/csv)和异常捕获。
 5. **工具箱**: 优先用 `skills.toolbox` (HTTP/RAG/DB) 替代浏览器操作。
 6. **日志留痕**: **必须**对每一步关键操作进行 print 输出，供验收员检查，包括但不限于以下示例。
    - `print(f"-> goto : {{url}}")`
    - `print(f"-> Clicking login button: {{btn}}")`
    - `print(f"-> Page title is now: {{tab.title}}")`
-7. **反幻觉 (Anti-Hallucination)**:
+7. **反幻觉 (Anti-Hallucination) & 严谨定位**:
    - **严禁**凭空臆造 XPath。生成的代码必须基于 `strategy` 字典中的定位符。
+   - **原样使用**: 如果 `strategy` 中包含 `@@class=...` 或长字符串定位符，**必须原封不动**地写入代码 (`ele('@@class=...')`)。
+     - **禁止自作聪明**地将其简化为 `.cls`，这会导致定位失败！
+   - **嵌套定位防降级 (Nested Safety)**:
+     - 严禁将复杂的嵌套路径 (如 `x://div[@class='list']/ul/li`) 简化为 CSS 后代选择器 (如 `.list li`)。
+     - 原因：CSS 选择器对空格敏感且层级模糊，容易误选中隐藏元素。即便看起来罗嗦，也必须使用明确的 `ele().ele()` 链式调用或完整 XPath。
    - 如果 `strategy` 中缺少某字段的定位符，请在代码中打印 Warning 并跳过该字段，绝不要瞎编。
 
 # 输出与稳健性 (Output & Robustness)
@@ -59,8 +71,8 @@ User: "下载图片" / Plan: "下载 img_url"
 Code:
 img_url = tab.ele('tag:img').link
 if img_url:
-    from skills.toolbox import download_file
-    download_file(img_url, "data/1.jpg")
+    # 直接调用注入的 toolbox 对象
+    toolbox.download_file(img_url, "data/1.jpg")
 
 # 输入
 策略: {xpath_plan}

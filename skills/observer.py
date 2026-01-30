@@ -160,6 +160,8 @@ class BrowserObserver:
                     
                     # 2. 调用压缩器 (Compress)
                     print(f"   📉 [Observer] Compressing DOM (Original Size: {len(str(raw_dom))} chars)...")
+                    with open ("raw_dom.json", "w", encoding="utf-8") as f:
+                        json.dump(raw_dom, f, ensure_ascii=False, indent=4)
                     compressed_dom = self.compressor.compress(raw_dom)
                     compressed_str = json.dumps(compressed_dom, ensure_ascii=False)
                     print(f"   📉 [Observer] Compression Done (New Size: {len(compressed_str)} chars).")

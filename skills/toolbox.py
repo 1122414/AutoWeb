@@ -168,6 +168,55 @@ def save_to_csv(data_list: List[Dict], filename: str):
         print(f"❌ [Toolbox] CSV Error: {e}")
         return False
 
+# 8. 💾 Unified Data Saver (The "Arm" for Coder)
+def save_data(data: Union[List[Dict], Dict], filename: str, format: str = "json"):
+    """
+    [Data] 统一数据保存接口 (支持 json, jsonl, csv)
+    会自动创建父目录。
+    """
+    if not data:
+        print("⚠️ [Toolbox] No data to save.")
+        return False
+        
+    print(f"💾 [Toolbox] Saving {format.upper()} -> {filename}")
+    try:
+        # 0. 自动补全后缀 (如果不包含)
+        if not filename.endswith(f".{format}"):
+            filename += f".{format}"
+            
+        # 1. 确保目录存在
+        os.makedirs(os.path.dirname(os.path.abspath(filename)), exist_ok=True)
+        
+        # 2. 根据格式保存
+        mode = 'w'
+        encoding = 'utf-8'
+        
+        if format == "json":
+            with open(filename, mode, encoding=encoding) as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+                
+        elif format == "jsonl":
+            data_list = data if isinstance(data, list) else [data]
+            with open(filename, "a", encoding=encoding) as f: # Append mode for JSONL usually
+                for item in data_list:
+                    f.write(json.dumps(item, ensure_ascii=False) + "\n")
+                    
+        elif format == "csv":
+            data_list = data if isinstance(data, list) else [data]
+            # Reuse existing save_to_csv logic but better wrapped
+            save_to_csv(data_list, filename)
+            
+        else:
+            print(f"❌ [Toolbox] Unknown format: {format}")
+            return False
+            
+        print(f"✅ [Toolbox] Data saved successfully: {filename}")
+        return True
+        
+    except Exception as e:
+        print(f"❌ [Toolbox] Save Error: {e}")
+        return False
+
 # 7. 📧 Notification (Mock)
 def notify(msg: str, title: str = "AutoWeb Notification"):
     """

@@ -77,17 +77,27 @@ class BrowserActor:
         """
         print("⚡ [Actor] Executing dynamic strategy...")
         
+        # [Added] Import Toolbox Wrapper
+        import skills.toolbox as toolbox
+        
         local_scope = {
             "tab": self.tab,
             "results": [],
             "strategy": context or {},
             "time": time,
-            "json": json
+            "json": json,
+            "toolbox": toolbox, # Inject the "Arms"
+            "save_data": toolbox.save_data, # [Fix] Fail-safe alias
+            "save_to_csv": toolbox.save_to_csv, # [Fix] Fail-safe alias for legacy calls
+            "http_request": toolbox.http_request # [Fix] Fail-safe alias
         }
         
         # 1. 记录初始状态
         start_url = self.tab.url
         logs = []
+        
+        # [Log Code Content] - ONLY for file, not for UI
+        # logs.append(f"--- [Generated Code] ---\n{strategy_code}\n") 
         
         import io
         import contextlib
@@ -98,6 +108,8 @@ class BrowserActor:
             # 2. 执行代码并捕获 print 输出
             with contextlib.redirect_stdout(output_buffer):
                 exec(strategy_code, {}, local_scope)
+            
+            # ... (Execution logic remains) ...
             
             # 获取捕获的 print 内容
             stdout_content = output_buffer.getvalue()
@@ -110,6 +122,27 @@ class BrowserActor:
                 logs.append(f"--- [System Log] ---\nURL Changed: {start_url} -> {end_url}")
             else:
                 logs.append(f"--- [System Log] ---\nURL Unchanged: {end_url}")
+            
+            # [Added] Persistent Logging
+            import os
+            log_dir = "logs"
+            try:
+                if not os.path.exists(log_dir):
+                    os.makedirs(log_dir)
+                timestamp = time.strftime("%Y%m%d_%H%M%S")
+                log_file = os.path.join(log_dir, f"exec_{timestamp}.log")
+                
+                # [Crucial Change] Prepend Code ONLY to the file content
+                file_content = f"--- [Generated Code] ---\n{strategy_code}\n\n" + "\n".join(logs)
+                
+                with open(log_file, "w", encoding="utf-8") as f:
+                    f.write(file_content)
+                    
+                print(f"📄 [Actor] Log saved to: {log_file}")
+                # Append log path to execution_log so user can see it in UI too
+                logs.append(f"--- [System Log] ---\nLog saved to: {os.path.abspath(log_file)}")
+            except Exception as e:
+                print(f"⚠️ Failed to save log file: {e}")
 
             return {
                 "result_data": local_scope.get("results", []),
@@ -122,6 +155,25 @@ class BrowserActor:
             # 即使出错，也要把已打印的内容返回
             logs.append(f"--- [Code Output (Partial)] ---\n{output_buffer.getvalue()}")
             logs.append(error_msg)
+            
+            # [Added] Save Error Log
+            import os
+            try:
+                log_dir = "logs"
+                if not os.path.exists(log_dir):
+                    os.makedirs(log_dir)
+                timestamp = time.strftime("%Y%m%d_%H%M%S")
+                log_file = os.path.join(log_dir, f"error_{timestamp}.log")
+                
+                # [Crucial Change] Prepend Code to error log too
+                file_content = f"--- [Generated Code] ---\n{strategy_code}\n\n" + "\n".join(logs)
+                
+                with open(log_file, "w", encoding="utf-8") as f:
+                    f.write(file_content)
+                print(f"📄 [Actor] Error Log saved to: {log_file}")
+            except:
+                pass
+
             return {
                 "result_data": local_scope.get("results", []),
                 "execution_log": "\n".join(logs)

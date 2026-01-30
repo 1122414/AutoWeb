@@ -137,32 +137,68 @@ class DOMCompressor:
         raw_key = "_".join(parts)
         return hashlib.md5(raw_key.encode()).hexdigest()
 
+    def _get_node_text(self, node: Dict) -> str:
+        """
+        [Helper] 递归提取节点及其子孙的文本精华
+        """
+        # 1. 自身有文本
+        if node.get("txt"):
+            return node["txt"]
+        
+        # 2. 如果没有，递归找第一个非空的孩子
+        if "kids" in node and isinstance(node["kids"], list):
+            for kid in node["kids"]:
+                # 如果是 skipped 忽略
+                if kid.get("t") == "skipped":
+                    continue
+                    
+                # 如果子节点是压缩列表，从中取样
+                if kid.get("type") == "compressed_list":
+                     # 尝试取 text 数据的第一个
+                     if "data" in kid and "text" in kid["data"] and kid["data"]["text"]:
+                         return kid["data"]["text"][0]
+                     return ""
+                
+                # 普通子节点递归
+                txt = self._get_node_text(kid)
+                if txt:
+                    return txt
+        
+        return ""
+
     def _aggregate_group(self, group: List[Dict]) -> Dict:
         """将一组节点聚合为一个压缩节点"""
         template = group[0]
         count = len(group)
         
         # 1. 生成模板 XPath
-        # 假设 XPath 结尾是 [n]，我们将其替换为 [{i}]
-        # 如果 XPath 没有索引（比如唯一元素），这通常不会进入 Group（因为需要多个），但为了安全起见
         base_xpath = template.get("x", "")
         # 匹配结尾的 [数字]
         xpath_template = re.sub(r"\[\d+\]$", "[{i}]", base_xpath)
         if xpath_template == base_xpath:
-            # 如果没找到结尾索引，可能是类似 /html/body/div 这种，追加一个 [{i}] 也行，或者说明无法模板化
-            # 但既然是兄弟节点，XPath 必然有区分，通常就是 index
             pass
 
         # 2. 提取数据列
         data = {}
         # 总是提取文本
         # 扫描所有定义的感兴趣 key
+        text_values = [] # 特别保留文本列表用于生成 description
+        
         for key in self.capture_keys:
             extracted_values = []
             has_content = False
             
             for item in group:
                 val = item.get(key)
+                
+                # [Deep Text Extraction]
+                # 如果是 text 键且当前节点没有值，尝试深度提取
+                if key == "txt":
+                    if not val:
+                        val = self._get_node_text(item)
+                    # Normalize text for description
+                    text_values.append(val if val else "")
+                
                 if val:
                     has_content = True
                     extracted_values.append(val)
@@ -171,19 +207,18 @@ class DOMCompressor:
             
             # 只有当该列有至少一个非空值时才保留
             if has_content:
+                # [Normalization] 将 'txt' 统一为 'text' 以匹配 Prompt
+                out_key = "text" if key == "txt" else key
+                
                 # 简单优化：如果所有值都一样（例如 class="btn"），则不必列出数组，保留在 template 属性里即可
-                # 这里只把不一样的放进 data
                 unique_vals = set(extracted_values)
                 if len(unique_vals) == 1 and list(unique_vals)[0] == "":
-                    # 全空，忽略
                     pass
                 else:
-                    # 放入数据列
-                    data[key] = extracted_values
+                    data[out_key] = extracted_values
 
         # [CRITICAL Fix] 提取原始索引 (Original Index Extraction)
         # 从 XPath 中提取结尾的索引，例如 .../li[2] -> 2
-        # 如果中间有跳过的节点 (filtered out)，必须保留这个物理索引
         indices = []
         has_indices = False
         for item in group:
@@ -198,14 +233,24 @@ class DOMCompressor:
         if has_indices:
              data["_index"] = indices
 
+        # [Enhancement] 生成可视化的路径描述 [Values]
+        # 过滤掉空文本以便阅读
+        readable_texts = [t for t in text_values if t]
+        # 截断过长的列表显示，避免 Token 爆炸 (LLM 仍可通过 data['text'] 获取全量)
+        summary_text = str(readable_texts[:20]) 
+        if len(readable_texts) > 20: 
+            summary_text = summary_text[:-1] + ", ...]" # 表示还有更多
+            
+        description = f"{xpath_template} {summary_text}"
+
         return {
             "type": "compressed_list",
             "count": count,
             "tag": template.get("t"),
             "xpath_template": xpath_template,
+            "description": description, # 新增：路径+内容摘要
             "data": data,
-            # 保留一个样本结构供 LLM 理解
-            # 必须保留 kids，否则 LLM 无法看到列表项内部的结构 (如 li 里面的 a)
+            # 保留 kids 确保能看到内部结构
             "kids": template.get("kids", []),
             "sample_attributes": {k:v for k,v in template.items() if k not in ["x", "kids", "txt"] and k in self.capture_keys},
         }

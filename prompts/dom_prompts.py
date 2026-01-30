@@ -49,24 +49,31 @@ DRISSION_LOCATOR_PROMPT = """
 {dom_json}
 
 【分析任务】
-1. 根据【已完成步骤】和【用户最终目标】，推断**当前当下**应该执行的**唯一一步**操作是什么。
-   - **严禁剧透**：不要分析当前步骤之后的任何操作。只关注眼前！
+1. 根据【已完成步骤】和【用户最终目标】，推断当前操作：
+   - **单步操作**：如果还在导航中（如点击分类、登录），仅关注下一步。
+   - **批量/循环操作**：**仅当**判断当前页面已是**最终数据目标页**（Target Page）时，若目标涉及“爬取”、“遍历”，请同时识别**列表项**和**翻页/循环控制器**。
 
 2. 在【压缩之后的DOM骨架】中寻找支持这一步操作的元素。
    - 注意：为了节省 Token，部分重复结构（如商品列表）已被**压缩**。
-   - 压缩节点格式：`{{ "type": "compressed_list", "xpath_template": "//div[{{i}}]/a", "data": {{ "text": ["A", "B"], "_index": [1, 3] }} }}`
+   - 压缩节点格式：`{{ "type": "compressed_list", "description": "//div[{{i}}]/a ['首页', '剧集']", "data": {{ "text": ["首页", "剧集"], "_index": [1, 2] }} }}`
    - **解压规则 (CRITICAL)**：
-     - 如果 `data` 中包含 `_index` 数组，**必须使用** `_index` 中的值作为 `{{i}}` 中的 `i`。
-       - 例如：想点击 "B" (第 2 项)，其 `_index` 为 3，则 Locator 为 `x://div[3]/a`。
-     - 如果没有 `_index`，则默认使用 1-based 索引 (1, 2, 3...)。
+     - **禁止瞎猜**：请直接阅读 `description` 或 `data.text` 列表找到目标文本对应的位置！
+     - 如果 `data` 中包含 `_index` 数组，**必须使用** `data.text` 对应位置的 `_index` 值作为 `{{i}}`。
+       - 例如：想点击 "剧集" (在 `text` 中是第 2 个)，其对应的 `_index` 为 2，则 Locator 为 `x://div[2]/a`。
+     - 如果没有 `_index`，则默认使用 1-based 索引。
 
 3. **Locator 安全性铁律 (Class & Space)**:
-   - **严禁**在 XPath 中使用 `@class='...'` 做全量匹配！
-     - 原因：网页源码常用 `class="active "` (带空格)，导致 `@class='active'` 匹配失败。
-   - **必须**使用以下替代方案：
-     - 方案 A (推荐): `.class_name` (DrissionPage 原生语法，自动处理空格)。
-     - 方案 B (XPath): `contains(@class, 'class_name')`。
-   - **原样保留**: 如果你必须引用精确属性值，请**原封不动**保留 DOM 中的所有字符（包括空格）。
+   - **多类名处理 (Multi-Class - CRITICAL)**：
+     - 如果元素有多个 Class (如 `class="page-link page-next"`)，且单个 Class 不唯一：
+       - **必须**使用全量匹配以确保唯一性。
+       - **语法**：`@@class=page-link page-next` (DrissionPage 专用语法，保留空格) 或 XPath `//a[@class='page-link page-next']`。
+       - **严禁**只取其中一部分 (如 `.page-next`)，这会导致定位到错误的隐藏元素！
+   - **禁止 CSS 后代选择器 (No Descendant Selectors)**:
+     - ❌ **严禁使用**空格分隔的 CSS 选择器 (如 `.module-items .module-poster-item`)。
+     - ✅ **必须使用** XPath 或链式结构 (如 `x://div[@class='module-items']//div[@class='module-poster-item']`)。
+     - 原因: 这种简写会丢失父元素的精确特征（如 trailing space），导致匹配失败。
+   - **空格敏感**:
+     - 注意 HTML 源码中的 Class 可能包含额外的空格 (如 `"active "`)，使用 `@@class=...` 时必须原样保留。
 
 4. **对象原则**:
    - 严禁定位到 TextNode (如 `/text()`) 或 Attribute (如 `/@href`)。
@@ -78,23 +85,28 @@ DRISSION_LOCATOR_PROMPT = """
    - DOM: `{{ "t": "button", "id": "login-btn", "txt": "Login" }}`
    - Output: `{{ "target_type": "button", "locator": "#login-btn", "action_suggestion": "click" }}`
 
-2. **场景：填写表单**
-   - Goal: "输入用户名 admin"
-   - Context: ["已打开登录页"]
-   - DOM: `{{ "t": "form", "kids": [{{ "t": "input", "id": "u", "placeholder": "Username" }}, {{ "t": "input", "id": "p" }}] }}`
-   - Output: `{{ "target_type": "input", "locator": "#u", "action_suggestion": "input" }}`
-
-3. **场景：点击压缩列表中的特定项 (With _index)**
+2. **场景：点击压缩列表中的特定项 (With _index)**
    - Goal: "点击商品列表中的 'iPhone 15'"
    - DOM: `{{ "type": "compressed_list", "xpath_template": "//ul/li[{{i}}]/a", "data": {{ "text": ["Galaxy S24", "iPhone 15", "Pixel 8"], "_index": [1, 3, 4] }} }}`
    - Reasoning: "iPhone 15" is at position 2 in the list. The corresponding `_index` value is 3. Template is `//ul/li[{{i}}]/a`. Result is `//ul/li[3]/a`.
    - Output: `{{ "target_type": "single", "locator": "x://ul/li[3]/a", "action_suggestion": "click" }}`
 
+3. **场景：批量爬取 (Batch Execution)**
+   - Goal: "爬取所有商品数据"
+   - DOM: `{{ "t": "div", "id": "list", "kids": [{{ "type": "compressed_list" ... }}] }} ... {{ "t": "a", "txt": "Next Page", "id": "next" }}`
+   - Output: `{{ "target_type": "batch", "locator": "#list .item", "sub_locators": {{ "next_page": "#next", "title": ".title" }}, "action_suggestion": "extract_loop" }}`
+
+4. **场景：边缘 Case - Class 带空格 (Trailing Space)**
+   - Goal: "获取列表容器"
+   - DOM: `{{ "t": "div", "c": "module-items " }}` (注意: c 后面有个空格)
+   - Analysis: Class is "module-items ", NOT "module-items". DrissionPage @@class requires exact match.
+   - Output: `{{ "target_type": "single", "locator": "@@class=module-items ", "action_suggestion": "extract" }}`
+
 【输出格式 (JSON Only)】
 {{
     "current_step_reasoning": "根据历史，需点击列表中的'手机'分类",
     "target_type": "list|single|button|input", 
-    "locator": "主要的定位符 (如 '#btn' 或 'x://div[3]/a')",
+    "locator": "主要的定位符 (必须遵守上述 Class/Space 规则)",
     "sub_locators": {{ 
         "username": "#user"
     }},

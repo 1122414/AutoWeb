@@ -104,7 +104,10 @@ DOM_SKELETON_JS = """
 
             if (node.id) info.id = node.id;
             
-            const cleanedCls = cleanClass(node.className);
+            // [Critical] 使用 getAttribute 获取原始 Class 字符串，确保保留空格
+            const rawClass = node.getAttribute('class');
+            const cleanedCls = cleanClass(rawClass);
+            
             if (cleanedCls) info.c = cleanedCls;
 
             CONFIG.ATTRIBUTES_TO_KEEP.forEach(attr => {

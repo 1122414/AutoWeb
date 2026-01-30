@@ -106,13 +106,31 @@ def planner_node(state: AgentState, config: RunnableConfig) -> Command[Literal["
     try:
         dom = _observer.capture_dom_skeleton(tab)[:50000] 
         finished_steps = state.get("finished_steps", [])
+
+        # [Optim] DOM Redundancy Check
+        import hashlib
+        current_dom_hash = hashlib.md5(dom.encode()).hexdigest()
+        previous_dom_hash = state.get("dom_hash", "")
         
-        print(f"   -> 正在进行视觉定位分析 (Context: {len(finished_steps)} finished steps)...")
-        locator_suggestions = _observer.analyze_locator_strategy(dom, task, previous_steps=finished_steps)
-        
-        # [Fix] 兼容单字典返回的情况
-        if isinstance(locator_suggestions, dict):
-            locator_suggestions = [locator_suggestions]
+        # 只有当 DOM 发生变化，或者没有历史建议时，才进行视觉分析
+        # 但如果是第一步(finished_steps为空)，肯定要分析
+        should_analyze = (current_dom_hash != previous_dom_hash) or (not state.get("locator_suggestions"))
+
+        if should_analyze:
+            print(f"   -> 正在进行视觉定位分析 (Context: {len(finished_steps)} finished steps)...")
+            locator_suggestions = _observer.analyze_locator_strategy(dom, task, previous_steps=finished_steps)
+            
+            # [Fix] 兼容单字典返回的情况
+            if isinstance(locator_suggestions, dict):
+                locator_suggestions = [locator_suggestions]
+        else:
+            print("   -> 页面无变化，复用上一轮视觉建议 (Skipping Observer Analysis)...")
+            # 复用 State 中的建议 (需要反序列化)
+            cached_suggestions_str = state.get("locator_suggestions", "[]")
+            try:
+                locator_suggestions = json.loads(cached_suggestions_str)
+            except:
+                locator_suggestions = [] # Fallback
 
         if isinstance(locator_suggestions, list) and locator_suggestions:
             suggestions_str = json.dumps(locator_suggestions, ensure_ascii=False, indent=2)
@@ -147,6 +165,7 @@ def planner_node(state: AgentState, config: RunnableConfig) -> Command[Literal["
         "plan": content,
         "dom_skeleton": dom,
         "locator_suggestions": suggestions_str,
+        "dom_hash": current_dom_hash, # [Optim] 保存当前 DOM Hash
         "loop_count": state.get("loop_count", 0) + 1,
         "is_complete": is_finished
     }
