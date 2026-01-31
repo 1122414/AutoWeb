@@ -11,6 +11,7 @@ class EnvState(TypedDict):
     current_url: str
     dom_skeleton: str
     locator_suggestions: Optional[str]  # Planner 分析过的定位建议 (JSON String)
+    dom_hash: Optional[str]  # DOM MD5 哈希，用于检测页面变化 (Optimization)
 
 class TaskState(TypedDict):
     """

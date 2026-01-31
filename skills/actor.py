@@ -1,9 +1,12 @@
+import io
+import os
 import time
 import json
+import contextlib
 from typing import Dict, Any, List, Optional
 from DrissionPage.common import Settings
-# 假设 BrowserDriver 在 drivers 目录下
-from drivers.drission_driver import BrowserDriver 
+from drivers.drission_driver import BrowserDriver
+import skills.toolbox as toolbox
 
 class BrowserActor:
     """
@@ -77,9 +80,6 @@ class BrowserActor:
         """
         print("⚡ [Actor] Executing dynamic strategy...")
         
-        # [Added] Import Toolbox Wrapper
-        import skills.toolbox as toolbox
-        
         local_scope = {
             "tab": self.tab,
             "results": [],
@@ -98,9 +98,6 @@ class BrowserActor:
         
         # [Log Code Content] - ONLY for file, not for UI
         # logs.append(f"--- [Generated Code] ---\n{strategy_code}\n") 
-        
-        import io
-        import contextlib
         
         output_buffer = io.StringIO()
         
@@ -124,7 +121,6 @@ class BrowserActor:
                 logs.append(f"--- [System Log] ---\nURL Unchanged: {end_url}")
             
             # [Added] Persistent Logging
-            import os
             log_dir = "logs"
             try:
                 if not os.path.exists(log_dir):
@@ -157,7 +153,7 @@ class BrowserActor:
             logs.append(error_msg)
             
             # [Added] Save Error Log
-            import os
+
             try:
                 log_dir = "logs"
                 if not os.path.exists(log_dir):
