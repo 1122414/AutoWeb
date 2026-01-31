@@ -9,12 +9,28 @@ ACTION_CODE_GEN_PROMPT = """
 - `tab`: 当前激活的浏览器 Tab 对象 (严禁重新实例化)。
 - `strategy`: 定位策略字典。
 - `results`: 结果列表 List[Dict]。
-- `toolbox`: 全能工具箱对象 (已注入).
-  - `toolbox.save_data(data, name)`: 自动保存 (JSON/CSV)
-  - `toolbox.http_request(url)`: 发送请求
-  - `toolbox.notify(msg)`: 发送通知
-- `save_data`: `toolbox.save_data` 的别名 (可以直接调用)。
-- `from skills.tool_rag import save_to_knowledge_base`: 用于"学习/入库"任务。
+
+# 🔧 工具箱 (Toolbox) - 必须掌握！
+`toolbox` 对象已注入，包含以下工具，**你必须在合适的场景主动调用它们**：
+
+| 工具 | 用途 | 调用示例 |
+|------|------|---------|
+| `toolbox.save_data(data, filename)` | **保存数据到文件** (JSON/CSV) | `toolbox.save_data(results, "data/movies.json")` |
+| `toolbox.http_request(url)` | **发送 HTTP 请求** (绕过浏览器) | `html = toolbox.http_request("https://api.example.com/data")` |
+| `toolbox.download_file(url, path)` | **下载文件** (图片/PDF等) | `toolbox.download_file(img_url, "data/cover.jpg")` |
+| `toolbox.db_insert(table, data)` | **插入数据库** (SQLite) | `toolbox.db_insert("movies", {{"title": "xxx", "year": 2024}})` |
+| `toolbox.notify(msg)` | **发送通知** | `toolbox.notify("爬取完成，共 100 条数据")` |
+| `toolbox.clean_html(html)` | **清洗HTML为纯文本** | `text = toolbox.clean_html(el.html)` |
+
+**快捷别名** (可直接调用):
+- `save_data(...)` = `toolbox.save_data(...)`
+- `http_request(...)` = `toolbox.http_request(...)`
+
+## 🚨 工具使用铁律
+1. **爬取数据后必须保存**: 每当你采集到数据 (`results` 列表非空)，**必须调用 `toolbox.save_data(results, "output/xxx.json")`**！
+2. **下载文件用 toolbox**: 需要下载图片/文件时，**必须用 `toolbox.download_file(url, path)`**，严禁用浏览器下载。
+3. **API 优先**: 如果目标有 API 接口，优先用 `toolbox.http_request()` 而非浏览器渲染。
+4. **任务完成通知**: 大型任务完成后，调用 `toolbox.notify("任务完成: ...")`。
 
 # 核心铁律 (Critical Rules)
 1. **禁止实例化**: 严禁 `ChromiumPage()`。只能用 `tab`。
@@ -50,29 +66,47 @@ ACTION_CODE_GEN_PROMPT = """
 2. **防崩溃**: 对可能不存在的元素或不稳定的步骤，**必须**使用 `try...except` 捕获并打印异常 (`print(f"Warning: {{e}}")`)，确保流程不中断。
 
 # 示例 (Few-Shot)
-## Ex1: 遍历列表并点击
-User: "爬取所有商品链接" / Plan: "遍历 .item，点击进入"
+## Ex1: 爬取列表并保存数据 (完整流程)
+User: "爬取电影列表" / Plan: "遍历 .movie-item，采集标题和链接，保存到 JSON"
 Code:
-counts = len(tab.eles('.item'))
-for i in range(counts):
+results = []
+items = tab.eles('.movie-item')
+print(f"-> Found {{len(items)}} movies")
+for item in items:
     try:
-        # 每次循环重新获取防止 Stale
-        item = tab.eles('.item')[i]
-        item.click(by_js=True)
-        tab.wait.load_start()
-        # ... 采集逻辑 ...
-        tab.back()
-        tab.wait.ele_displayed('.item')
+        title = item.ele('.title').text
+        link = item.ele('tag:a').link
+        results.append({{"title": title, "link": link}})
+        print(f"-> Collected: {{title}}")
     except Exception as e:
-        print(f"Error at index {{i}}: {{e}}")
+        print(f"Warning: {{e}}")
+print(f"-> Total collected: {{len(results)}}")
+toolbox.save_data(results, "output/movies.json")
 
-## Ex2: 工具箱调用
-User: "下载图片" / Plan: "下载 img_url"
+## Ex2: 下载图片
+User: "下载封面图片" / Plan: "获取 img 的 src 并下载"
 Code:
 img_url = tab.ele('tag:img').link
 if img_url:
-    # 直接调用注入的 toolbox 对象
-    toolbox.download_file(img_url, "data/1.jpg")
+    print(f"-> Downloading: {{img_url}}")
+    toolbox.download_file(img_url, "output/cover.jpg")
+
+## Ex3: 使用 HTTP 请求 (绕过浏览器)
+User: "调用 API 获取数据" / Plan: "直接请求 JSON API"
+Code:
+api_url = "https://api.example.com/movies"
+print(f"-> HTTP Request: {{api_url}}")
+response = toolbox.http_request(api_url)
+import json
+data = json.loads(response)
+toolbox.save_data(data, "output/api_data.json")
+
+## Ex4: 存入数据库
+User: "将数据存入数据库" / Plan: "插入 SQLite"
+Code:
+for item in results:
+    toolbox.db_insert("movies", item)
+print("-> Data inserted to database")
 
 # 输入
 策略: {xpath_plan}
