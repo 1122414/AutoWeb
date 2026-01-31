@@ -47,17 +47,24 @@ ACTION_CODE_GEN_PROMPT = """
    - **跳转**: `tab.get(url)`
    - **查**: `tab.eles('x://div')` (列表), `ele.ele('x://span')` (单项)
    - **读**: `el.text`, `el.attr('href')`, `el.link` (绝对URL)
-   - **交互**: `el.click(by_js=True)`, `el.input('text')`
+   - **交互**: `el.click(by_js=True)`, `el.input('text')`（注意，输入搜索是一个整体的原子动作，如果用户提到搜索，就是输入和搜索）
    - **等待**: `tab.wait.load_start()`, `tab.wait.ele_displayed('x://...')`
    - **状态**: `if el.states.is_displayed:`, `if el.states.is_enabled:`
-   - **新页**: `new = el.click.for_new_tab()`; ... ; `new.close()`
-3. **流程控制**: 仅在 Explicit Loop 时使用 `for`。禁止 `while True`。
-4. **数据安全 (Data Saving - CRITICAL)**: 
+   - **新页**: `new_tab = el.click.for_new_tab()`; 操作 `new_tab`; `new_tab.close()`
+3. **新标签页处理 (CRITICAL)**:
+   - **检测新标签页**: 点击后如果打开了新标签页，必须切换焦点！
+   - **方法1 (推荐)**: `new_tab = el.click.for_new_tab()` 点击并获取新标签页
+   - **方法2**: `el.click(by_js=True); tab.wait(1); new_tab = browser.latest_tab` 获取最新标签页
+   - **操作新页**: 在新标签页上操作时用 `new_tab.ele()` 而非 `tab.ele()`
+   - **关闭返回**: 完成后 `new_tab.close()` 关闭新页，焦点自动回到原页
+   - ⚠️ **切换全局 tab**: 如果后续流程需要在新页面继续，使用 `tab = browser.latest_tab`
+4. **流程控制**: 仅在 Explicit Loop 时使用 `for`。禁止 `while True`。
+5. **数据安全 (Data Saving - CRITICAL)**: 
    - **严禁**手动编写 `open()`/`csv.writer()` 代码保存数据！
    - **必须**使用 `toolbox.save_data(results, 'data/movies.json')`。
    - `toolbox` 对象已内置，直接调用即可。它会自动处理目录创建、格式转换(json/csv)和异常捕获。
-5. **工具箱**: 优先用 `skills.toolbox` (HTTP/RAG/DB) 替代浏览器操作。
-6. **日志留痕**: **必须**对每一步关键操作进行 print 输出，供验收员检查，包括但不限于以下示例。
+6. **工具箱**: 优先用 `skills.toolbox` (HTTP/RAG/DB) 替代浏览器操作。
+7. **日志留痕**: **必须**对每一步关键操作进行 print 输出，供验收员检查，包括但不限于以下示例。
    - `print(f"-> goto : {{url}}")`
    - `print(f"-> Clicking login button: {{btn}}")`
    - `print(f"-> Page title is now: {{tab.title}}")`
@@ -72,7 +79,7 @@ ACTION_CODE_GEN_PROMPT = """
 8. **禁止添加其他等待代码**: 只能使用tab.wait({{n}})来等待页面加载
 
 # 输出与稳健性 (Output & Robustness)
-1. **纯粹代码**: 严禁包含Markdown标记，严禁 `import`(除toolbox)，严禁 `tab = ...`，严禁注释，仅输出函数体逻辑
+1. **纯粹代码**: 严禁包含Markdown标记，严禁 `import`(除toolbox)，严禁 `tab = ChromiumPage()`，严禁注释，仅输出函数体逻辑
 2. **防崩溃**: 对可能不存在的元素或不稳定的步骤，**必须**使用 `try...except` 捕获并打印异常 (`print(f"Warning: {{e}}")`。
 3. **元素失效防护 (Stale Element Prevention)**: 
    - 当需要"点击进入详情 -> 采集 -> 返回列表 -> 继续下一个"时，**严禁**先获取所有元素再循环！

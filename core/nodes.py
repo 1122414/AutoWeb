@@ -109,8 +109,10 @@ def planner_node(state: AgentState, config: RunnableConfig) -> Command[Literal["
         )
     
     # 0.2 新任务但在已有页面上（任务连续性）
+    # 重要：新任务需要清空旧任务的定位策略，避免 Coder 被误导
     if loop_count == 0 and not is_initial_page:
         print(f"   🔄 [Planner] 检测到已有页面: {current_url[:50]}..., 使用 CONTINUE Prompt。")
+        print(f"   🔄 [Planner] 新任务开始，清空旧任务的定位策略...")
         finished_steps_str = "\n".join([f"- {s}" for s in finished_steps]) if finished_steps else "(无历史步骤)"
         prompt = PLANNER_CONTINUE_PROMPT.format(
             task=task,
@@ -124,6 +126,7 @@ def planner_node(state: AgentState, config: RunnableConfig) -> Command[Literal["
                 "messages": [response],
                 "plan": response.content,
                 "current_url": current_url,
+                "locator_suggestions": [],  # 清空旧任务的定位策略！
                 "loop_count": loop_count + 1,
                 "is_complete": False
             },
@@ -131,6 +134,17 @@ def planner_node(state: AgentState, config: RunnableConfig) -> Command[Literal["
         )
 
     # 1. 环境感知
+    # 重要：确保获取最新的标签页（处理新标签页打开的情况）
+    browser = config["configurable"].get("browser")
+    if browser:
+        tab = browser.latest_tab  # 每次都重新获取最新标签页
+        # 等待页面加载完成
+        try:
+            tab.wait.load_start()
+            tab.wait(0.5)  # 额外等待确保 DOM 稳定
+        except:
+            pass
+    
     try:
         dom = _observer.capture_dom_skeleton(tab)[:50000] 
         finished_steps = state.get("finished_steps", [])
