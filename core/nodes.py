@@ -10,7 +10,7 @@ from core.state_v2 import AgentState
 from skills.observer import BrowserObserver
 from skills.actor import BrowserActor
 from prompts.action_prompts import ACTION_CODE_GEN_PROMPT
-from prompts.planner_prompts import PLANNER_START_PROMPT, PLANNER_STEP_PROMPT
+from prompts.planner_prompts import PLANNER_START_PROMPT, PLANNER_STEP_PROMPT, PLANNER_CONTINUE_PROMPT
 from config import MODEL_NAME, OPENAI_API_KEY, OPENAI_BASE_URL
 
 # 初始化共享组件
@@ -83,19 +83,47 @@ def planner_node(state: AgentState, config: RunnableConfig) -> Command[Literal["
     
     task = state["user_task"]
     loop_count = state.get("loop_count", 0)
+    finished_steps = state.get("finished_steps", [])
     
-    # 0. 初始启动策略
-    if loop_count == 0:
+    # 0. 检测当前页面状态，决定使用哪个 Prompt
+    current_url = tab.url if tab else ""
+    is_blank = not current_url or current_url.startswith(("about:", "data:", "chrome://"))
+    is_google_home = "google.com" in current_url and "/search" not in current_url
+    is_initial_page = is_blank or is_google_home
+    
+    # 0.1 初始启动（空白页/Google首页）
+    if loop_count == 0 and is_initial_page:
         print("   ⏩ [Planner] 初始启动，跳过 DOM 分析，直接生成导航计划。")
         prompt = PLANNER_START_PROMPT.format(task=task)
         response = _llm.invoke([HumanMessage(content=prompt)])
         
-        # 使用 Command 直接调度到 Coder
         return Command(
             update={
                 "messages": [response],
                 "plan": response.content,
                 "dom_skeleton": "(Start Page - Empty)",
+                "loop_count": loop_count + 1,
+                "is_complete": False
+            },
+            goto="Coder"
+        )
+    
+    # 0.2 新任务但在已有页面上（任务连续性）
+    if loop_count == 0 and not is_initial_page:
+        print(f"   🔄 [Planner] 检测到已有页面: {current_url[:50]}..., 使用 CONTINUE Prompt。")
+        finished_steps_str = "\n".join([f"- {s}" for s in finished_steps]) if finished_steps else "(无历史步骤)"
+        prompt = PLANNER_CONTINUE_PROMPT.format(
+            task=task,
+            current_url=current_url,
+            finished_steps_str=finished_steps_str
+        )
+        response = _llm.invoke([HumanMessage(content=prompt)])
+        
+        return Command(
+            update={
+                "messages": [response],
+                "plan": response.content,
+                "current_url": current_url,
                 "loop_count": loop_count + 1,
                 "is_complete": False
             },
@@ -112,9 +140,12 @@ def planner_node(state: AgentState, config: RunnableConfig) -> Command[Literal["
         current_dom_hash = hashlib.md5(dom.encode()).hexdigest()
         previous_dom_hash = state.get("dom_hash", "")
         
-        # 只有当 DOM 发生变化，或者没有历史建议时，才进行视觉分析
-        # 但如果是第一步(finished_steps为空)，肯定要分析
-        should_analyze = (current_dom_hash != previous_dom_hash) or (not state.get("locator_suggestions"))
+        # 获取历史累积的策略列表
+        accumulated_strategies = state.get("locator_suggestions", [])
+        
+        # 只有当 DOM 发生变化时，才进行视觉分析
+        should_analyze = (current_dom_hash != previous_dom_hash)
+        new_strategy_entry = None  # 本轮新分析的策略
 
         if should_analyze:
             print(f"   -> 正在进行视觉定位分析 (Context: {len(finished_steps)} finished steps)...")
@@ -123,22 +154,32 @@ def planner_node(state: AgentState, config: RunnableConfig) -> Command[Literal["
             # [Fix] 兼容单字典返回的情况
             if isinstance(locator_suggestions, dict):
                 locator_suggestions = [locator_suggestions]
+            
+            # 构建带上下文的策略条目
+            # 从最近完成的步骤提取页面上下文
+            page_context = finished_steps[-1] if finished_steps else "初始页面"
+            new_strategy_entry = {
+                "page_context": page_context,
+                "url": current_url,
+                "strategies": locator_suggestions
+            }
+            print(f"   -> 新增策略条目: {page_context[:30]}...")
         else:
-            print("   -> 页面无变化，复用上一轮视觉建议 (Skipping Observer Analysis)...")
-            # 复用 State 中的建议 (需要反序列化)
-            cached_suggestions_str = state.get("locator_suggestions", "[]")
-            try:
-                locator_suggestions = json.loads(cached_suggestions_str)
-            except:
-                locator_suggestions = [] # Fallback
+            print("   -> 页面无变化，复用历史策略 (Skipping Observer Analysis)...")
 
-        if isinstance(locator_suggestions, list) and locator_suggestions:
-            suggestions_str = json.dumps(locator_suggestions, ensure_ascii=False, indent=2)
+        # 构建完整的策略列表字符串（包含历史 + 本轮新增）
+        all_strategies = accumulated_strategies.copy() if accumulated_strategies else []
+        if new_strategy_entry:
+            all_strategies.append(new_strategy_entry)
+        
+        if all_strategies:
+            suggestions_str = json.dumps(all_strategies, ensure_ascii=False, indent=2)
         else:
             suggestions_str = "无特定定位建议，请自行分析 DOM。"
     except Exception as e:
         dom = f"DOM Capture Failed: {e}"
         suggestions_str = f"视觉分析失败: {str(e)}"
+        new_strategy_entry = None
 
     reflections = state.get("reflections", [])
     reflection_str = ""
@@ -164,7 +205,8 @@ def planner_node(state: AgentState, config: RunnableConfig) -> Command[Literal["
         "messages": [response],
         "plan": content,
         "dom_skeleton": dom,
-        "locator_suggestions": suggestions_str,
+        # 只追加本轮新分析的策略（Reducer 会自动累积）
+        "locator_suggestions": [new_strategy_entry] if new_strategy_entry else [],
         "dom_hash": current_dom_hash, # [Optim] 保存当前 DOM Hash
         "loop_count": state.get("loop_count", 0) + 1,
         "is_complete": is_finished
@@ -183,8 +225,15 @@ def coder_node(state: AgentState, config: RunnableConfig) -> Command[Literal["Ex
     
     plan = state.get("plan", "")
     task = state.get("user_task", "")
-    xpath_plan = state.get("locator_suggestions", "")
-    # 大部分模型每次都会不按照planner给出的计划执行，所以这里先在prompt中去除用户task
+    
+    # 获取累积的定位策略列表，序列化为 JSON 字符串
+    accumulated_strategies = state.get("locator_suggestions", [])
+    if accumulated_strategies:
+        xpath_plan = json.dumps(accumulated_strategies, ensure_ascii=False, indent=2)
+        print(f"   -> Coder 收到 {len(accumulated_strategies)} 个页面的定位策略")
+    else:
+        xpath_plan = "无定位策略"
+    
     # 构建 Prompt
     base_prompt = ACTION_CODE_GEN_PROMPT.format(
         xpath_plan = xpath_plan,
@@ -192,13 +241,12 @@ def coder_node(state: AgentState, config: RunnableConfig) -> Command[Literal["Ex
     )
     
     prompt = f"""
-    {base_prompt}
-    
-    【Planner 的执行计划】
-    {plan}
-    
-    严格按照Planner的计划执行，请生成 Python 代码。
-    """
+⚠️ **【唯一任务】** - 你必须且只能完成以下计划，禁止做任何其他事情！
+{plan}
+
+---
+{base_prompt}
+"""
     response = _llm.invoke([HumanMessage(content=prompt)])
     
     # 代码提取逻辑
@@ -265,10 +313,12 @@ def verifier_node(state: AgentState, config: RunnableConfig) -> Command[Literal[
     log = state.get("execution_log", "")
     task = state.get("user_task", "")
     current_plan = state.get("plan", "Unknown Plan")
+    tab = _get_tab(config)
+    current_url = tab.url if tab else ""
 
-    # 1. 快速失败检查
-    error_keywords = ["Runtime Error:", "Traceback", "ElementNotFound", "TimeoutException", "Execution Failed"]
-    for kw in error_keywords:
+    # 1. 快速失败检查（仅致命错误）
+    fatal_keywords = ["Runtime Error:", "Traceback", "ElementNotFound", "TimeoutException", "Execution Failed", "Critical"]
+    for kw in fatal_keywords:
         if kw in log:
             print(f"⚡ [Verifier] Deterministic Fail: {kw}")
             return Command(
@@ -277,21 +327,27 @@ def verifier_node(state: AgentState, config: RunnableConfig) -> Command[Literal[
                     "reflections": [f"Step Failed: {current_plan}. Error: {kw}"],
                     "is_complete": False
                 },
-                goto="Planner" # 报错直接回 Planner 重试
+                goto="Planner"
             )
 
-    # 2. LLM 验收
+    # 2. LLM 验收（优化 Prompt）
     prompt = f"""
-    你是自动化测试验收员。
+    你是自动化测试验收员。请根据以下信息判断步骤是否成功。
+    
     【用户目标】{task}
     【当前计划】{current_plan}
+    【当前 URL】{current_url}
     【执行日志】{log[-2000:]}
     
-    请判断步骤状态。
+    【验收原则】
+    1. **Warning 不算失败**: "Warning:"、"Failed to wait"、"没有等到新标签页" 等提示只是警告，不影响整体成功
+    2. **关注操作结果**: 判断计划中的核心操作是否执行成功，忽略无关紧要的副作用
+    3. **宽容对待非致命错误**: 只有导致任务无法继续的错误才算失败
+    
     格式:
     Status: [STEP_SUCCESS | STEP_FAIL]
     TaskDone: [YES | NO]
-    Summary: [描述]
+    Summary: [简短描述]
     """
     response = _llm.invoke([HumanMessage(content=prompt)])
     content = response.content
@@ -303,10 +359,35 @@ def verifier_node(state: AgentState, config: RunnableConfig) -> Command[Literal[
     for line in content.split("\n"):
         if line.startswith("Summary:"):
             summary = line.replace("Summary:", "").strip()
+    
+    # 3. 显示验收结果，允许人工覆盖
+    print(f"\n📋 [Verifier] LLM 判定:")
+    print(f"   Status: {'SUCCESS' if is_success else 'FAIL'}")
+    print(f"   TaskDone: {'YES' if is_done else 'NO'}")
+    print(f"   Summary: {summary[:100]}")
+    
+    # 人工覆盖选项
+    print("\n   验收选项: [Enter=接受] [s=强制成功] [f=强制失败] [d=强制完成]")
+    try:
+        user_override = input("   👤 > ").strip().lower()
+        if user_override == "s":
+            print("   ✅ 人工覆盖: 强制成功")
+            is_success = True
+            is_done = False
+        elif user_override == "f":
+            print("   ❌ 人工覆盖: 强制失败")
+            is_success = False
+        elif user_override == "d":
+            print("   🎉 人工覆盖: 强制完成")
+            is_success = True
+            is_done = True
+    except:
+        pass  # 非交互环境，跳过
             
     updates = {
         "messages": [response],
-        "is_complete": is_done
+        "is_complete": is_done,
+        "current_url": current_url
     }
     
     if is_success:
@@ -321,3 +402,4 @@ def verifier_node(state: AgentState, config: RunnableConfig) -> Command[Literal[
         print("   ❌ Step Failed, retrying...")
         updates["reflections"] = [f"Step Failed: {summary}"]
         return Command(update=updates, goto="Planner")
+

@@ -86,36 +86,85 @@ def interactive_loop(app, browser_instance):
             
             if snapshot.next:
                  print(f"\n⏸️ 任务暂停于节点: {snapshot.next}")
-                 print("   等待人工确认... (输入 'c' 或 'continue' 继续，输入 'q' 退出，输入其他内容作为新指令)")
+                 
+                 # 显示当前生成的代码（如果有）
+                 current_code = snapshot.values.get("generated_code", "")
+                 if current_code:
+                     print("\n📝 当前生成的代码:")
+                     print("-" * 50)
+                     print(current_code[:500] + ("..." if len(current_code) > 500 else ""))
+                     print("-" * 50)
+                 
+                 print("\n   命令选项:")
+                 print("   'c' 或 'continue' - 批准执行")
+                 print("   'e' 或 'edit'     - 编辑代码后执行")
+                 print("   'q' 或 'quit'     - 退出")
+                 print("   其他内容          - 作为新指令")
                  user_input = input("\n👤 Admin > ").strip()
                  
                  if user_input.lower() in ("c", "continue", "yes", "y"):
                      print("   ✅ 批准执行，继续...")
-                     # 恢复执行 (传入 None 作为 input)
                      for event in app.stream(None, config=config, stream_mode="updates"):
                         print_step_output(event)
                      continue
+                 
+                 elif user_input.lower() in ("e", "edit"):
+                     # 将代码写入临时文件供用户编辑
+                     edit_file = "temp_code_edit.py"
+                     with open(edit_file, "w", encoding="utf-8") as f:
+                         f.write(current_code)
+                     print(f"   📝 代码已保存到 {edit_file}")
+                     print(f"   请使用编辑器修改文件，保存后按 Enter 继续...")
+                     input("   [按 Enter 继续]")
+                     
+                     # 读取修改后的代码
+                     with open(edit_file, "r", encoding="utf-8") as f:
+                         edited_code = f.read()
+                     
+                     if edited_code != current_code:
+                         print("   ✅ 检测到代码修改，正在更新状态...")
+                         # 使用 as_node="Coder" 来保留中断点，让 Executor 继续执行
+                         app.update_state(config, {"generated_code": edited_code}, as_node="Coder")
+                         print("   ⚡ 开始执行修改后的代码...")
+                     else:
+                         print("   ℹ️ 代码未修改，继续执行原代码...")
+                     
+                     # 继续执行（从 Executor 恢复）
+                     has_output = False
+                     for event in app.stream(None, config=config, stream_mode="updates"):
+                         has_output = True
+                         print_step_output(event)
+                     
+                     if not has_output:
+                         print("   ⚠️ 没有执行输出，正在重新触发执行...")
+                         # 如果没有输出，可能需要手动触发
+                         for event in app.stream({"generated_code": edited_code}, config=config, stream_mode="updates"):
+                             print_step_output(event)
                      
                  elif user_input.lower() in ("q", "quit", "exit"):
                      break
                  
                  elif user_input:
                      print(f"   🔄 收到新指令，正在更新状态并重规划: {user_input}")
-                     # 对于中断处的新指令，通常意味着修改计划或提供反馈
-                     # 这里我们简单地作为新消息传入，但这需要 Graph 能处理
-                     # 或者我们可以 update state
                      app.update_state(config, {"user_task": f"{user_input} (User Feedback)"})
-                     # 然后继续
                      for event in app.stream(None, config=config, stream_mode="updates"):
                         print_step_output(event)
                      continue
 
             # 正常的新任务输入
-            user_input = input("\n� User > ").strip()
+            user_input = input("\n👤 User > ").strip()
             if user_input.lower() in ("exit", "quit"):
                 print("👋 正在关闭浏览器资源...")
                 BrowserDriver.quit()
                 break
+            
+            # 新增：重置会话命令
+            if user_input.lower() in ("new", "reset"):
+                thread_id = str(uuid.uuid4())
+                config["configurable"]["thread_id"] = thread_id
+                print(f"🆕 新会话已创建: {thread_id[:8]}...")
+                print("   历史已清空，可以开始新任务。")
+                continue
             
             if not user_input:
                 continue

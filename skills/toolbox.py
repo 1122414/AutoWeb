@@ -169,41 +169,73 @@ def save_to_csv(data_list: List[Dict], filename: str):
         return False
 
 # 8. 💾 Unified Data Saver (The "Arm" for Coder)
-def save_data(data: Union[List[Dict], Dict], filename: str, format: str = "json"):
+def save_data(data: Union[List[Dict], Dict], filename: str, format: str = None):
     """
     [Data] 统一数据保存接口 (支持 json, jsonl, csv)
-    会自动创建父目录。
+    - 自动根据文件扩展名推断格式（优先于 format 参数）
+    - 自动添加时间戳防止覆盖
+    - 自动创建父目录
     """
+    import time as _time
+    
     if not data:
         print("⚠️ [Toolbox] No data to save.")
         return False
-        
-    print(f"💾 [Toolbox] Saving {format.upper()} -> {filename}")
+    
     try:
-        # 0. 自动补全后缀 (如果不包含)
-        if not filename.endswith(f".{format}"):
-            filename += f".{format}"
-            
-        # 1. 确保目录存在
-        os.makedirs(os.path.dirname(os.path.abspath(filename)), exist_ok=True)
+        # 0. 根据扩展名推断格式（优先）
+        basename = os.path.basename(filename)
+        name_part, ext = os.path.splitext(basename)
         
-        # 2. 根据格式保存
-        mode = 'w'
+        if ext:
+            # 有扩展名，从扩展名推断格式
+            inferred_format = ext[1:].lower()  # 去掉点号
+            if inferred_format in ("json", "jsonl", "csv"):
+                format = inferred_format
+        
+        # 如果还没有格式，使用默认值
+        if not format:
+            format = "json"
+        
+        # 1. 自动添加时间戳到文件名（防覆盖）
+        timestamp = _time.strftime("%H%M%S")
+        if ext:
+            # 有扩展名：name.csv -> name_133000.csv
+            new_filename = f"{name_part}_{timestamp}{ext}"
+        else:
+            # 无扩展名：自动补全
+            new_filename = f"{name_part}_{timestamp}.{format}"
+        
+        # 保留目录路径
+        dirname = os.path.dirname(filename)
+        if dirname:
+            filename = os.path.join(dirname, new_filename)
+        else:
+            filename = new_filename
+            
+        print(f"💾 [Toolbox] Saving {format.upper()} -> {filename}")
+        
+        # 2. 确保目录存在
+        abs_path = os.path.abspath(filename)
+        dir_path = os.path.dirname(abs_path)
+        if dir_path:
+            os.makedirs(dir_path, exist_ok=True)
+        
+        # 3. 根据格式保存
         encoding = 'utf-8'
         
         if format == "json":
-            with open(filename, mode, encoding=encoding) as f:
+            with open(filename, 'w', encoding=encoding) as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
                 
         elif format == "jsonl":
             data_list = data if isinstance(data, list) else [data]
-            with open(filename, "a", encoding=encoding) as f: # Append mode for JSONL usually
+            with open(filename, "a", encoding=encoding) as f:
                 for item in data_list:
                     f.write(json.dumps(item, ensure_ascii=False) + "\n")
                     
         elif format == "csv":
             data_list = data if isinstance(data, list) else [data]
-            # Reuse existing save_to_csv logic but better wrapped
             save_to_csv(data_list, filename)
             
         else:

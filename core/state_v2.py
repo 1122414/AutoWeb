@@ -10,7 +10,8 @@ class EnvState(TypedDict):
     """
     current_url: str
     dom_skeleton: str
-    locator_suggestions: Optional[str]  # Planner 分析过的定位建议 (JSON String)
+    # 累积的定位策略列表，每个元素包含 {page_context, url, strategies}
+    locator_suggestions: Annotated[List[Dict[str, Any]], operator.add]
     dom_hash: Optional[str]  # DOM MD5 哈希，用于检测页面变化 (Optimization)
 
 class TaskState(TypedDict):
@@ -22,7 +23,6 @@ class TaskState(TypedDict):
     plan: Optional[str]                 # Planner 生成的最新计划
     
     # 使用 Reducer 防止覆盖，记录完整的步骤历史
-    # 格式: "Step N: <summary>"
     finished_steps: Annotated[List[str], operator.add] 
     
     # 存储失败经验 (Reflexion)

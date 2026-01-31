@@ -21,16 +21,16 @@ COLLECTION_NAME = "spider_knowledge_base"
 # ==========================
 # 百炼
 # ==========================
-# MODEL_NAME = os.getenv('BAILIAN_MODEL_NAME')
-# OPENAI_API_KEY = os.getenv('BAILIAN_API_KEY')
-# OPENAI_BASE_URL = os.getenv('BAILIAN_BASE_URL')
+MODEL_NAME = os.getenv('BAILIAN_MODEL_NAME')
+OPENAI_API_KEY = os.getenv('BAILIAN_API_KEY')
+OPENAI_BASE_URL = os.getenv('BAILIAN_BASE_URL')
 
 # ==========================
-# 百炼
+# 火山方舟
 # ==========================
-MODEL_NAME = os.getenv('FANGZHOU_MODEL_NAME')
-OPENAI_API_KEY = os.getenv('FANGZHOU_API_KEY')
-OPENAI_BASE_URL = os.getenv('FANGZHOU_BASE_URL')
+# MODEL_NAME = os.getenv('FANGZHOU_MODEL_NAME')
+# OPENAI_API_KEY = os.getenv('FANGZHOU_API_KEY')
+# OPENAI_BASE_URL = os.getenv('FANGZHOU_BASE_URL')
 
 # ==========================
 # 本地Ollama

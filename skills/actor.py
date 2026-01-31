@@ -106,14 +106,13 @@ class BrowserActor:
             with contextlib.redirect_stdout(output_buffer):
                 exec(strategy_code, {}, local_scope)
             
-            # ... (Execution logic remains) ...
-            
             # 获取捕获的 print 内容
             stdout_content = output_buffer.getvalue()
             if stdout_content:
                 logs.append(f"--- [Code Output] ---\n{stdout_content.strip()}")
             
             # 3. 检查 URL 变化
+            self.tab.wait(5)
             end_url = self.tab.url
             if start_url != end_url:
                 logs.append(f"--- [System Log] ---\nURL Changed: {start_url} -> {end_url}")
