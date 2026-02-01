@@ -4,6 +4,7 @@
 *.csv
 *.json
 *.html
+logs
 test
 output
 chroma_data
