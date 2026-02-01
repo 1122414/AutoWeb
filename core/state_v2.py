@@ -44,5 +44,13 @@ class AgentState(EnvState, TaskState):
     generated_code: Optional[str]       # Coder 生成的最新代码
     execution_log: Optional[str]        # Executor 运行代码后的日志/返回值
     
+    # Verifier 验收结果（供 Human-in-the-Loop 覆盖）
+    verification_result: Optional[Dict[str, Any]]  # {is_success, is_done, summary}
+    
     # 错误处理
     error: Optional[str]
+    
+    # [V3] Executor 微循环控制
+    coder_retry_count: int              # Coder 重试计数（语法错误时微循环，最多3次）
+    error_type: Optional[str]           # 错误类型: "syntax" | "locator" | None
+

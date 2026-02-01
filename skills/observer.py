@@ -193,12 +193,21 @@ class BrowserObserver:
                 # 简单清洗
                 target_text = target_text.strip()
                 
-                if len(target_text) > 1 and "dom_json" not in requirement: # 避免误判
-                     # 尝试在 DOM String 中直接搜索该文本 (比解析 JSON 快)
-                     # 查找 "txt": "target_text" 或 "text=target_text"
-                     if f'"{target_text}"' in dom_skeleton:
-                         print(f"⚡ [Observer] Heuristic Hit! Found explicit text '{target_text}' in DOM.")
-                         return {"locator": f"text={target_text}", "reason": "Heuristic Match"}
+                # [V3 Fix] 检查是否有序号限定词（如"第一条"、"第二个"等），有则跳过启发式
+                ordinal_keywords = ["第一", "第二", "第三", "第1", "第2", "第3", "首个", "最后", "first", "second", "last"]
+                has_ordinal = any(kw in requirement for kw in ordinal_keywords)
+                
+                if len(target_text) > 1 and "dom_json" not in requirement and not has_ordinal:
+                    # 统计目标文本在 DOM 中出现的次数
+                    occurrence_count = dom_skeleton.count(f'"{target_text}"')
+                    
+                    if occurrence_count == 1:
+                        # 唯一出现，可以安全使用启发式匹配
+                        print(f"⚡ [Observer] Heuristic Hit! Found unique text '{target_text}' in DOM.")
+                        return {"locator": f"text={target_text}", "reason": "Heuristic Match (Unique)"}
+                    elif occurrence_count > 1:
+                        # 多次出现，需要 LLM 分析来选择正确的元素
+                        print(f"🔍 [Observer] Text '{target_text}' appears {occurrence_count} times, using LLM analysis...")
         except Exception as e:
             pass
 

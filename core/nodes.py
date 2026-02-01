@@ -2,37 +2,21 @@ import json
 import traceback
 from typing import Literal, Union
 from langchain_core.messages import HumanMessage, AIMessage
-from langchain_openai import ChatOpenAI
 from langchain_core.runnables import RunnableConfig
 from langgraph.types import Command
 
 from core.state_v2 import AgentState
-from skills.observer import BrowserObserver
 from skills.actor import BrowserActor
 from prompts.action_prompts import ACTION_CODE_GEN_PROMPT
 from prompts.planner_prompts import PLANNER_START_PROMPT, PLANNER_STEP_PROMPT, PLANNER_CONTINUE_PROMPT
-from config import MODEL_NAME, OPENAI_API_KEY, OPENAI_BASE_URL
 
-# 初始化共享组件
-_llm = ChatOpenAI(
-    model=MODEL_NAME,
-    temperature=0,
-    openai_api_key=OPENAI_API_KEY,
-    openai_api_base=OPENAI_BASE_URL,
-    streaming=True
-)
-_observer = BrowserObserver()
-
+# ====== 依赖注入辅助函数 ======
 def _get_tab(config: RunnableConfig):
+    """从 config 获取浏览器标签页"""
     browser = config["configurable"].get("browser")
-    if not browser:
-        # 在测试或特殊模式下可能没有 browser，这种情况下不应该 crash 除非节点必须使用它
-        # 这里我们更友好地提示
-        # raise ValueError("Browser instance not found in config")
-        pass
     return browser.latest_tab if browser else None
 
-def error_handler_node(state: AgentState, config: RunnableConfig) -> Command[Literal["Planner", "__end__"]]:
+def error_handler_node(state: AgentState, config: RunnableConfig, llm) -> Command[Literal["Observer", "__end__"]]:
     """
     [ErrorHandler] 全局错误处理与回退
     当其他节点发生不可恢复的错误时跳转至此
@@ -56,7 +40,7 @@ def error_handler_node(state: AgentState, config: RunnableConfig) -> Command[Lit
     Strategy: [策略描述]
     """
     
-    response = _llm.invoke([HumanMessage(content=prompt)])
+    response = llm.invoke([HumanMessage(content=prompt)])
     content = response.content
     
     is_terminate = "Status: TERMINATE" in content
@@ -72,18 +56,138 @@ def error_handler_node(state: AgentState, config: RunnableConfig) -> Command[Lit
         updates["is_complete"] = True # 虽然失败了，但也算结束
         return Command(update=updates, goto="__end__")
     else:
-        print("   🔄 ErrHandler: 尝试回退到 Planner 进行重规划。")
-        return Command(update=updates, goto="Planner")
+        print("   🔄 ErrHandler: 尝试回退到 Observer 重新感知环境。")
+        return Command(update=updates, goto="Observer")
+
+def observer_node(state: AgentState, config: RunnableConfig, observer) -> Command[Literal["Planner"]]:
+    """[Observer] 环境感知节点：捕获 DOM 并生成定位策略"""
+    print("\n👁️ [Observer] 正在感知环境...")
+    
+    # 获取浏览器实例
+    browser = config["configurable"].get("browser")
+    if not browser:
+        print("   ⚠️ 无浏览器实例，跳过观察")
+        return Command(update={}, goto="Planner")
+    
+    # [V3 Fix] 先等待新标签页稳定，再获取最新标签页
+    import time
+    time.sleep(0.3)  # 短暂等待，让新标签页有时间创建
+    
+    # 重新获取最新标签页（处理新标签页打开的情况）
+    tab = browser.latest_tab
+    
+    # 等待页面加载完成
+    try:
+        tab.wait.load_start()
+        tab.wait(0.5)  # 额外等待确保 DOM 稳定
+    except:
+        pass
+    
+    # [V3 Fix] 在页面加载后再获取 URL（确保是新页面的 URL）
+    current_url = tab.url if tab else ""
+    loop_count = state.get("loop_count", 0)
+    
+    print(f"   -> 当前标签页: {current_url[:60]}...")
+    
+    # [优化] 初始页面检测：空白页/Google首页无需 DOM 分析
+    is_blank = not current_url or current_url.startswith(("about:", "data:", "chrome://"))
+    is_google_home = "google.com" in current_url and "/search" not in current_url
+    
+    if loop_count == 0 and (is_blank or is_google_home):
+        print("   ⏩ [Observer] 初始页面，跳过 DOM 分析")
+        return Command(update={"current_url": current_url}, goto="Planner")
+    
+    task = state.get("user_task", "")
+    finished_steps = state.get("finished_steps", [])
+    
+    try:
+        # 捕获 DOM 骨架
+        dom = observer.capture_dom_skeleton(tab)[:50000]
+        
+        # DOM 变化检测
+        import hashlib
+        current_dom_hash = hashlib.md5(dom.encode()).hexdigest()
+        previous_dom_hash = state.get("dom_hash", "")
+        
+        # 获取历史累积的策略列表
+        accumulated_strategies = state.get("locator_suggestions", [])
+        
+        # [V3 Fix] 检查是否有失败记录，有则强制重新分析（之前的策略可能是错的）
+        reflections = state.get("reflections", [])
+        error_type = state.get("error_type")
+        has_failure = len(reflections) > 0 or error_type is not None
+        
+        # 只有当 DOM 发生变化 或 存在失败记录时，才进行视觉分析
+        should_analyze = (current_dom_hash != previous_dom_hash) or has_failure
+        new_strategy_entry = None
+        
+        if should_analyze:
+            if has_failure and current_dom_hash == previous_dom_hash:
+                print(f"   🔄 [Observer] 检测到失败记录，强制重新分析 DOM...")
+                # 清空之前可能错误的策略
+                accumulated_strategies = []
+            print(f"   -> 正在进行视觉定位分析 (Context: {len(finished_steps)} finished steps)...")
+            locator_suggestions = observer.analyze_locator_strategy(dom, task, previous_steps=finished_steps)
+            
+            if isinstance(locator_suggestions, dict):
+                locator_suggestions = [locator_suggestions]
+            
+            page_context = finished_steps[-1] if finished_steps else "初始页面"
+            new_strategy_entry = {
+                "page_context": page_context,
+                "url": current_url,
+                "strategies": locator_suggestions
+            }
+            print(f"   -> 新增策略条目: {page_context[:30]}...")
+        else:
+            print("   -> 页面无变化，复用历史策略 (Skipping Observer Analysis)...")
+        
+        # [V3 Fix] 重新分析后清空错误标记
+        update_dict = {
+            "dom_skeleton": dom,
+            "dom_hash": current_dom_hash,
+            "current_url": current_url,
+            "locator_suggestions": [new_strategy_entry] if new_strategy_entry else []
+        }
+        
+        # 如果刚做完重新分析（因为失败触发），清空错误标记
+        if has_failure and should_analyze:
+            update_dict["reflections"] = []  # 清空旧的反思
+            update_dict["error_type"] = None
+        
+        return Command(update=update_dict, goto="Planner")
+        
+    except Exception as e:
+        print(f"   ⚠️ 环境感知失败: {e}")
+        return Command(
+            update={
+                "dom_skeleton": f"DOM Capture Failed: {e}",
+                "current_url": current_url
+            },
+            goto="Planner"
+        )
 
 
-def planner_node(state: AgentState, config: RunnableConfig) -> Command[Literal["Coder", "__end__"]]:
-    """[Planner] 负责分析环境并制定下一步计划"""
+def planner_node(state: AgentState, config: RunnableConfig, llm) -> Command[Literal["Coder", "__end__"]]:
+    """[Planner] 负责制定下一步计划（环境感知已由 Observer 完成）"""
     print("\n🧠 [Planner] 正在制定计划...")
     tab = _get_tab(config)
     
     task = state["user_task"]
     loop_count = state.get("loop_count", 0)
     finished_steps = state.get("finished_steps", [])
+    
+    # [V3] 循环限制：防止死循环
+    MAX_LOOP_COUNT = 10
+    if loop_count >= MAX_LOOP_COUNT:
+        print(f"   ⚠️ 达到最大循环次数 ({MAX_LOOP_COUNT})，强制结束任务")
+        return Command(
+            update={
+                "messages": [AIMessage(content=f"【系统】达到最大循环次数 {MAX_LOOP_COUNT}，任务强制终止")],
+                "is_complete": True
+            },
+            goto="__end__"
+        )
     
     # 0. 检测当前页面状态，决定使用哪个 Prompt
     current_url = tab.url if tab else ""
@@ -95,7 +199,7 @@ def planner_node(state: AgentState, config: RunnableConfig) -> Command[Literal["
     if loop_count == 0 and is_initial_page:
         print("   ⏩ [Planner] 初始启动，跳过 DOM 分析，直接生成导航计划。")
         prompt = PLANNER_START_PROMPT.format(task=task)
-        response = _llm.invoke([HumanMessage(content=prompt)])
+        response = llm.invoke([HumanMessage(content=prompt)])
         
         return Command(
             update={
@@ -109,7 +213,6 @@ def planner_node(state: AgentState, config: RunnableConfig) -> Command[Literal["
         )
     
     # 0.2 新任务但在已有页面上（任务连续性）
-    # 重要：新任务需要清空旧任务的定位策略，避免 Coder 被误导
     if loop_count == 0 and not is_initial_page:
         print(f"   🔄 [Planner] 检测到已有页面: {current_url[:50]}..., 使用 CONTINUE Prompt。")
         print(f"   🔄 [Planner] 新任务开始，清空旧任务的定位策略...")
@@ -119,7 +222,7 @@ def planner_node(state: AgentState, config: RunnableConfig) -> Command[Literal["
             current_url=current_url,
             finished_steps_str=finished_steps_str
         )
-        response = _llm.invoke([HumanMessage(content=prompt)])
+        response = llm.invoke([HumanMessage(content=prompt)])
         
         return Command(
             update={
@@ -133,96 +236,35 @@ def planner_node(state: AgentState, config: RunnableConfig) -> Command[Literal["
             goto="Coder"
         )
 
-    # 1. 环境感知
-    # 重要：确保获取最新的标签页（处理新标签页打开的情况）
-    browser = config["configurable"].get("browser")
-    if browser:
-        tab = browser.latest_tab  # 每次都重新获取最新标签页
-        # 等待页面加载完成
-        try:
-            tab.wait.load_start()
-            tab.wait(0.5)  # 额外等待确保 DOM 稳定
-        except:
-            pass
-    
-    try:
-        dom = _observer.capture_dom_skeleton(tab)[:50000] 
-        finished_steps = state.get("finished_steps", [])
-
-        # [Optim] DOM Redundancy Check
-        import hashlib
-        current_dom_hash = hashlib.md5(dom.encode()).hexdigest()
-        previous_dom_hash = state.get("dom_hash", "")
-        
-        # 获取历史累积的策略列表
-        accumulated_strategies = state.get("locator_suggestions", [])
-        
-        # 只有当 DOM 发生变化时，才进行视觉分析
-        should_analyze = (current_dom_hash != previous_dom_hash)
-        new_strategy_entry = None  # 本轮新分析的策略
-
-        if should_analyze:
-            print(f"   -> 正在进行视觉定位分析 (Context: {len(finished_steps)} finished steps)...")
-            locator_suggestions = _observer.analyze_locator_strategy(dom, task, previous_steps=finished_steps)
-            
-            # [Fix] 兼容单字典返回的情况
-            if isinstance(locator_suggestions, dict):
-                locator_suggestions = [locator_suggestions]
-            
-            # 构建带上下文的策略条目
-            # 从最近完成的步骤提取页面上下文
-            page_context = finished_steps[-1] if finished_steps else "初始页面"
-            new_strategy_entry = {
-                "page_context": page_context,
-                "url": current_url,
-                "strategies": locator_suggestions
-            }
-            print(f"   -> 新增策略条目: {page_context[:30]}...")
-        else:
-            print("   -> 页面无变化，复用历史策略 (Skipping Observer Analysis)...")
-
-        # 构建完整的策略列表字符串（包含历史 + 本轮新增）
-        all_strategies = accumulated_strategies.copy() if accumulated_strategies else []
-        if new_strategy_entry:
-            all_strategies.append(new_strategy_entry)
-        
-        if all_strategies:
-            suggestions_str = json.dumps(all_strategies, ensure_ascii=False, indent=2)
-        else:
-            suggestions_str = "无特定定位建议，请自行分析 DOM。"
-    except Exception as e:
-        dom = f"DOM Capture Failed: {e}"
-        suggestions_str = f"视觉分析失败: {str(e)}"
-        new_strategy_entry = None
+    # 1. 从 State 读取 Observer 提供的定位策略（不再自己调用 observer）
+    accumulated_strategies = state.get("locator_suggestions", [])
+    if accumulated_strategies:
+        suggestions_str = json.dumps(accumulated_strategies, ensure_ascii=False, indent=2)
+    else:
+        suggestions_str = "无特定定位建议，请自行分析 DOM。"
 
     reflections = state.get("reflections", [])
     reflection_str = ""
     if reflections:
         reflection_str = "\n⚠️ **之前的失败教训 (请在规划时重点规避)**:\n" + "\n".join([f"- {r}" for r in reflections])
 
-    finished_steps = state.get("finished_steps", [])
     finished_steps_str = "\n".join([f"- {s}" for s in finished_steps]) if finished_steps else "(无)"
 
     # 2. 制定计划
-    # 改动：不需要再次把dom给Planner，仅把策略给他即可
     prompt = PLANNER_STEP_PROMPT.format(
         task=task,
         finished_steps_str=finished_steps_str,
         suggestions_str=suggestions_str,
         reflection_str=reflection_str
     )
-    response = _llm.invoke([HumanMessage(content=prompt)])
+    response = llm.invoke([HumanMessage(content=prompt)])
     content = response.content
     is_finished = "【任务已完成】" in content
     
     update_dict = {
         "messages": [response],
         "plan": content,
-        "dom_skeleton": dom,
-        # 只追加本轮新分析的策略（Reducer 会自动累积）
-        "locator_suggestions": [new_strategy_entry] if new_strategy_entry else [],
-        "dom_hash": current_dom_hash, # [Optim] 保存当前 DOM Hash
-        "loop_count": state.get("loop_count", 0) + 1,
+        "loop_count": loop_count + 1,
         "is_complete": is_finished
     }
     
@@ -233,7 +275,7 @@ def planner_node(state: AgentState, config: RunnableConfig) -> Command[Literal["
     else:
         return Command(update=update_dict, goto="Coder")
 
-def coder_node(state: AgentState, config: RunnableConfig) -> Command[Literal["Executor"]]:
+def coder_node(state: AgentState, config: RunnableConfig, llm) -> Command[Literal["Executor"]]:
     """[Coder] 编写代码"""
     print("\n💻 [Coder] 正在编写代码...")
     
@@ -255,13 +297,13 @@ def coder_node(state: AgentState, config: RunnableConfig) -> Command[Literal["Ex
     )
     
     prompt = f"""
-⚠️ **【唯一任务】** - 你必须且只能完成以下计划，禁止做任何其他事情！
-{plan}
+    ⚠️ **【唯一任务】** - 你必须且只能完成以下计划，禁止做任何其他事情！
+    {plan}
 
----
-{base_prompt}
-"""
-    response = _llm.invoke([HumanMessage(content=prompt)])
+    ---
+    {base_prompt}
+    """
+    response = llm.invoke([HumanMessage(content=prompt)])
     
     # 代码提取逻辑
     content = response.content
@@ -281,11 +323,15 @@ def coder_node(state: AgentState, config: RunnableConfig) -> Command[Literal["Ex
         goto="Executor"
     )
 
-def executor_node(state: AgentState, config: RunnableConfig) -> Command[Literal["Verifier", "Planner"]]:
-    """[Executor] 执行代码"""
+def executor_node(state: AgentState, config: RunnableConfig) -> Command[Literal["Verifier", "Coder", "ErrorHandler"]]:
+    """[Executor] 执行代码，并根据错误类型进行分类路由"""
     print("\n⚡ [Executor] 正在执行代码...")
     tab = _get_tab(config)
     code = state.get("generated_code", "")
+    
+    # [V3] 错误分类关键词
+    SYNTAX_ERRORS = ["SyntaxError", "IndentationError", "NameError", "TypeError", "AttributeError"]
+    LOCATOR_ERRORS = ["ElementNotFound", "TimeoutException", "NoSuchElement", "ElementNotInteractable", "StaleElement"]
     
     actor = BrowserActor(tab)
     
@@ -296,10 +342,69 @@ def executor_node(state: AgentState, config: RunnableConfig) -> Command[Literal[
         
         print(f"   -> Log Length: {len(execution_log)}")
         
+        # [V3] 检查执行日志中是否有错误（即使没有抛异常）
+        error_in_log = None
+        for kw in SYNTAX_ERRORS:
+            if kw in execution_log:
+                error_in_log = ("syntax", kw)
+                break
+        if not error_in_log:
+            for kw in LOCATOR_ERRORS:
+                if kw in execution_log:
+                    error_in_log = ("locator", kw)
+                    break
+        
+        if error_in_log:
+            error_type, error_kw = error_in_log
+            print(f"   ⚠️ 检测到 {error_type} 错误: {error_kw}")
+            
+            if error_type == "syntax":
+                # 语法错误：微循环回 Coder
+                coder_retry = state.get("coder_retry_count", 0)
+                if coder_retry < 3:
+                    print(f"   🔄 语法错误，回 Coder 重试 ({coder_retry + 1}/3)")
+                    return Command(
+                        update={
+                            "messages": [AIMessage(content=f"【语法错误】{error_kw}\n{execution_log[-500:]}")],
+                            "execution_log": execution_log,
+                            "coder_retry_count": coder_retry + 1,
+                            "error_type": "syntax",
+                            "reflections": [f"语法错误: {error_kw}，需要修复代码"]
+                        },
+                        goto="Coder"
+                    )
+                else:
+                    print(f"   ❌ 语法错误重试次数已达上限，转 ErrorHandler")
+                    return Command(
+                        update={
+                            "messages": [AIMessage(content=f"【语法错误超限】{execution_log[-500:]}")],
+                            "execution_log": execution_log,
+                            "error": f"Syntax error after 3 retries: {error_kw}",
+                            "error_type": "syntax_max_retry"
+                        },
+                        goto="ErrorHandler"
+                    )
+            else:
+                # 定位错误：走 ErrorHandler
+                print(f"   ❌ 定位错误，转 ErrorHandler")
+                return Command(
+                    update={
+                        "messages": [AIMessage(content=f"【定位错误】{error_kw}\n{execution_log[-500:]}")],
+                        "execution_log": execution_log,
+                        "error": f"Locator error: {error_kw}",
+                        "error_type": "locator",
+                        "reflections": [f"定位错误: {error_kw}，需要重新分析页面"]
+                    },
+                    goto="ErrorHandler"
+                )
+        
+        # 执行成功
         return Command(
             update={
                 "messages": [AIMessage(content=f"【执行报告】\n{execution_log}")],
-                "execution_log": execution_log
+                "execution_log": execution_log,
+                "coder_retry_count": 0,  # 重置重试计数
+                "error_type": None
             },
             goto="Verifier"
         )
@@ -315,12 +420,13 @@ def executor_node(state: AgentState, config: RunnableConfig) -> Command[Literal[
                 "messages": [AIMessage(content=f"【执行崩溃】\n{error_msg}")],
                 "execution_log": error_msg,
                 "error": str(e),
+                "error_type": "critical",
                 "reflections": [f"Execution crashed: {str(e)}"]
             },
             goto="ErrorHandler"
         )
 
-def verifier_node(state: AgentState, config: RunnableConfig) -> Command[Literal["Planner", "__end__"]]:
+def verifier_node(state: AgentState, config: RunnableConfig, llm) -> Command[Literal["Observer", "__end__"]]:
     """[Verifier] 验收并决定下一步"""
     print("\n🔍 [Verifier] 正在验收...")
     
@@ -341,7 +447,7 @@ def verifier_node(state: AgentState, config: RunnableConfig) -> Command[Literal[
                     "reflections": [f"Step Failed: {current_plan}. Error: {kw}"],
                     "is_complete": False
                 },
-                goto="Planner"
+                goto="Observer"
             )
 
     # 2. LLM 验收（优化 Prompt）
@@ -363,7 +469,7 @@ def verifier_node(state: AgentState, config: RunnableConfig) -> Command[Literal[
     TaskDone: [YES | NO]
     Summary: [简短描述]
     """
-    response = _llm.invoke([HumanMessage(content=prompt)])
+    response = llm.invoke([HumanMessage(content=prompt)])
     content = response.content
     
     is_success = "Status: STEP_SUCCESS" in content
@@ -374,34 +480,23 @@ def verifier_node(state: AgentState, config: RunnableConfig) -> Command[Literal[
         if line.startswith("Summary:"):
             summary = line.replace("Summary:", "").strip()
     
-    # 3. 显示验收结果，允许人工覆盖
+    # 3. 返回验收结果（不再阻塞，由 main.py 通过 interrupt 处理人工覆盖）
     print(f"\n📋 [Verifier] LLM 判定:")
     print(f"   Status: {'SUCCESS' if is_success else 'FAIL'}")
     print(f"   TaskDone: {'YES' if is_done else 'NO'}")
     print(f"   Summary: {summary[:100]}")
     
-    # 人工覆盖选项
-    print("\n   验收选项: [Enter=接受] [s=强制成功] [f=强制失败] [d=强制完成]")
-    try:
-        user_override = input("   👤 > ").strip().lower()
-        if user_override == "s":
-            print("   ✅ 人工覆盖: 强制成功")
-            is_success = True
-            is_done = False
-        elif user_override == "f":
-            print("   ❌ 人工覆盖: 强制失败")
-            is_success = False
-        elif user_override == "d":
-            print("   🎉 人工覆盖: 强制完成")
-            is_success = True
-            is_done = True
-    except:
-        pass  # 非交互环境，跳过
-            
+    # 将验收结果存入 State，供 main.py 读取和覆盖
     updates = {
         "messages": [response],
         "is_complete": is_done,
-        "current_url": current_url
+        "current_url": current_url,
+        # 新增：存储验收元数据，供人工覆盖时使用
+        "verification_result": {
+            "is_success": is_success,
+            "is_done": is_done,
+            "summary": summary
+        }
     }
     
     if is_success:
@@ -410,10 +505,10 @@ def verifier_node(state: AgentState, config: RunnableConfig) -> Command[Literal[
             print("   🎉 Task Done!")
             return Command(update=updates, goto="__end__")
         else:
-            print("   🔄 Step OK, next...")
-            return Command(update=updates, goto="Planner")
+            print("   🔄 Step OK, 继续下一步...")
+            return Command(update=updates, goto="Observer")
     else:
         print("   ❌ Step Failed, retrying...")
         updates["reflections"] = [f"Step Failed: {summary}"]
-        return Command(update=updates, goto="Planner")
+        return Command(update=updates, goto="Observer")
 
