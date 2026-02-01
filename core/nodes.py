@@ -433,9 +433,25 @@ def verifier_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lit
     log = state.get("execution_log", "")
     task = state.get("user_task", "")
     current_plan = state.get("plan", "Unknown Plan")
-    tab = _get_tab(config)
-    current_url = tab.url if tab else ""
-
+    
+    # [V3 Fix] 获取最新标签页（处理新标签页打开的情况）
+    browser = config["configurable"].get("browser")
+    if browser:
+        import time
+        time.sleep(0.3)  # 短暂等待，让新标签页有时间创建
+        tab = browser.latest_tab
+        # 等待页面加载
+        try:
+            tab.wait.load_start()
+            tab.wait(0.3)
+        except:
+            pass
+        current_url = tab.url if tab else ""
+    else:
+        tab = None
+        current_url = ""
+    
+    print(f"   -> 当前验收 URL: {current_url[:60]}...")
     # 1. 快速失败检查（仅致命错误）
     fatal_keywords = ["Runtime Error:", "Traceback", "ElementNotFound", "TimeoutException", "Execution Failed", "Critical"]
     for kw in fatal_keywords:

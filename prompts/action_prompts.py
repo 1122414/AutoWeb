@@ -56,7 +56,10 @@ ACTION_CODE_GEN_PROMPT = """
    - **方法1 (推荐)**: `new_tab = el.click.for_new_tab()` 点击并获取新标签页
    - **方法2**: `el.click(by_js=True); tab.wait(1); new_tab = browser.latest_tab` 获取最新标签页
    - **操作新页**: 在新标签页上操作时用 `new_tab.ele()` 而非 `tab.ele()`
-   - **关闭返回**: 完成后 `new_tab.close()` 关闭新页，焦点自动回到原页
+   - ⚠️ **关闭时机判断 (CRITICAL)**:
+     - **循环爬取场景** (计划中有"遍历"/"循环"/"批量"等词)：每次迭代完成后必须 `new_tab.close()` 返回列表
+     - **单次进入场景** (计划只是"进入详情页"/"打开页面"等)：**禁止关闭**，保持新页面打开给后续步骤使用
+   - ⚠️ **核心原则**: 只在**当前步骤**完成了**所有需要的操作**后才能关闭。如果只是"点击进入"，后续还需要爬取，则不能关闭！
    - ⚠️ **切换全局 tab**: 如果后续流程需要在新页面继续，使用 `tab = browser.latest_tab`
 4. **流程控制**: 仅在 Explicit Loop 时使用 `for`。禁止 `while True`。
 5. **数据安全 (Data Saving - CRITICAL)**: 
