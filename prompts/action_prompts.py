@@ -67,10 +67,11 @@ ACTION_CODE_GEN_PROMPT = """
    - **必须**使用 `toolbox.save_data(results, 'data/movies.json')`。
    - `toolbox` 对象已内置，直接调用即可。它会自动处理目录创建、格式转换(json/csv)和异常捕获。
 6. **工具箱**: 优先用 `skills.toolbox` (HTTP/RAG/DB) 替代浏览器操作。
-7. **日志留痕**: **必须**对每一步关键操作进行 print 输出，供验收员检查，包括但不限于以下示例。
+7. **日志留痕**: **必须**对每一步**关键**操作进行 print 输出，供验收员检查，包括但不限于以下示例。
    - `print(f"-> goto : {{url}}")`
    - `print(f"-> Clicking login button: {{btn}}")`
    - `print(f"-> Page title is now: {{tab.title}}")`
+   - **注意**：无需将循环中的内容print出来！这会给verifier造成很大压力！会浪费很多token！
 7. **反幻觉 (Anti-Hallucination) & 严谨定位**:
    - **严禁**凭空臆造 XPath。生成的代码必须基于 `strategy` 字典中的定位符。
    - **原样使用**: 如果 `strategy` 中包含 `@@class=...` 或长字符串定位符，**必须原封不动**地写入代码 (`ele('@@class=...')`)。
@@ -117,22 +118,20 @@ ACTION_CODE_GEN_PROMPT = """
      try:
          player_data["name"] = player.ele("x:.//h3[@class='name']").text
      except Exception as e:
-         print(f"Warning: Name extraction failed - {e}")
+         print(f"Warning: Name extraction failed - {{e}}")
      ```
    - **原因**: Python 推崇 EAFP (Easier to Ask Forgiveness than Permission)，直接尝试并捕获异常比预先检查更 Pythonic 且更健壮。
 4. **元素失效防护 (Stale Element Prevention)**: 
-   - 当需要"点击进入详情 -> 采集 -> 返回列表 -> 继续下一个"时，**严禁**先获取所有元素再循环！
-   - **正确做法**: 用索引循环，每次迭代重新获取元素列表：
+   - 当需要"点击进入详情 -> 采集 -> 返回列表 -> 继续下一个"时，先获取所有元素再循环！
+   - **正确做法**: 
      ```
-     count = len(tab.eles('.item'))
-     for i in range(count):
-         item = tab.eles('.item')[i]  # 每次重新获取！
-         item.click()
-         # ... 采集 ...
-         tab.back()
-         tab.wait(1)
+     items = tab.eles('.item');
+     for item in items: 
+        item.click()
+        # ... 采集 ...
+        tab.back()
+        tab.wait(1)
      ```
-   - **错误做法**: `items = tab.eles('.item'); for item in items: item.click()` ← 返回后 item 失效！
 
 # 示例 (Few-Shot)
 ## Ex1: 爬取列表并保存数据 (完整流程)
@@ -146,7 +145,6 @@ for item in items:
         title = item.ele('.title').text
         link = item.ele('tag:a').link
         results.append({{"title": title, "link": link}})
-        print(f"-> Collected: {{title}}")
     except Exception as e:
         print(f"Warning: {{e}}")
 print(f"-> Total collected: {{len(results)}}")

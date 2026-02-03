@@ -53,21 +53,21 @@ def print_step_output(event):
     for node_name, updates in event.items():
         print(f"\n🔄 [Node: {node_name}] 执行完成")
         
-        if "plan" in updates:
+        if "plan" in updates and updates['plan']:
             print(f"   🧠 Plan: {updates['plan']}")
         
-        if "generated_code" in updates:
+        if "generated_code" in updates and updates['generated_code']:
             code_preview = updates['generated_code'][:100].replace('\n', ' ')
             print(f"   💻 Generated Code: {code_preview}...")
             
-        if "execution_log" in updates:
+        if "execution_log" in updates and updates['execution_log']:
             log = updates['execution_log']
             if "Error" in log or "Exception" in log:
                  print(f"   ❌ \033[1;31mExecution Failed\033[0m: {log[:200]}...")
             else:
                  print(f"   ✅ Execution Success: {log[:200]}...")
                  
-        if "finished_steps" in updates:
+        if "finished_steps" in updates and updates['finished_steps']:
              last_step = updates['finished_steps'][-1] if updates['finished_steps'] else "Unknown"
              print(f"   ✅ \033[1;32mVerification Passed\033[0m: {last_step}")
              

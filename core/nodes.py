@@ -16,6 +16,53 @@ def _get_tab(config: RunnableConfig):
     browser = config["configurable"].get("browser")
     return browser.latest_tab if browser else None
 
+def _detect_task_continuity(new_task: str, current_url: str, old_task: str = "") -> bool:
+    """
+    [任务连续性检测] 判断新任务是否是旧任务的延续
+    
+    返回:
+    - True: 延续任务（保留旧状态）
+    - False: 全新任务（清空旧状态）
+    
+    判断逻辑:
+    1. 快速关键词匹配: 包含"继续"/"接着"/"下一页"等词 → 延续
+    2. URL 域名匹配: 新任务中明确提到的 URL 与当前 URL 同域 → 延续
+    3. 默认: 全新任务
+    """
+    from urllib.parse import urlparse
+    
+    # 1. 延续关键词检测
+    CONTINUE_KEYWORDS = ["继续", "接着", "下一页", "翻页", "再爬", "追加", "补充", "当前页面"]
+    for kw in CONTINUE_KEYWORDS:
+        if kw in new_task:
+            print(f"   🔗 [TaskContinuity] 检测到延续关键词: '{kw}' → 保留旧状态")
+            return True
+    
+    # 2. URL 域名匹配
+    if current_url:
+        try:
+            current_domain = urlparse(current_url).netloc
+            # 检查新任务是否提到当前域名
+            if current_domain and current_domain in new_task:
+                print(f"   🔗 [TaskContinuity] 任务中包含当前域名 '{current_domain}' → 保留旧状态")
+                return True
+            
+            # 检查新任务是否提到其他 URL（全新任务标志）
+            import re
+            urls_in_task = re.findall(r'https?://[^\s<>"\']+', new_task)
+            for url in urls_in_task:
+                task_domain = urlparse(url).netloc
+                if task_domain and task_domain != current_domain:
+                    print(f"   🆕 [TaskContinuity] 任务指向新域名 '{task_domain}' (当前: '{current_domain}') → 全新任务")
+                    return False
+        except Exception as e:
+            print(f"   ⚠️ [TaskContinuity] URL 解析失败: {e}")
+    
+    # 3. 默认: 全新任务（保守策略，避免旧状态污染）
+    print(f"   🆕 [TaskContinuity] 无明确延续标志 → 视为全新任务，清空旧状态")
+    return False
+
+
 # ==============================================================================
 # [V4] 代码缓存检索节点
 # ==============================================================================
@@ -347,29 +394,70 @@ def planner_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lite
             goto="CacheLookup"
         )
     
-    # 0.2 新任务但在已有页面上（任务连续性）
+    # 0.2 新任务但在已有页面上（任务连续性检测）
     if loop_count == 0 and not is_initial_page:
-        print(f"   🔄 [Planner] 检测到已有页面: {current_url[:50]}..., 使用 CONTINUE Prompt。")
-        print(f"   🔄 [Planner] 新任务开始，清空旧任务的定位策略...")
-        finished_steps_str = "\n".join([f"- {s}" for s in finished_steps]) if finished_steps else "(无历史步骤)"
-        prompt = PLANNER_CONTINUE_PROMPT.format(
-            task=task,
-            current_url=current_url,
-            finished_steps_str=finished_steps_str
-        )
-        response = llm.invoke([HumanMessage(content=prompt)])
+        print(f"   🔄 [Planner] 检测到已有页面: {current_url[:50]}...")
         
-        return Command(
-            update={
-                "messages": [response],
-                "plan": response.content,
-                "current_url": current_url,
-                "locator_suggestions": [],  # 清空旧任务的定位策略！
-                "loop_count": loop_count + 1,
-                "is_complete": False
-            },
-            goto="CacheLookup"
-        )
+        # [V5] 任务连续性检测：判断是延续任务还是全新任务
+        is_continuation = _detect_task_continuity(task, current_url)
+        
+        if is_continuation:
+            # 延续任务：保留旧状态
+            print(f"   ✅ [Planner] 延续任务，保留历史状态")
+            finished_steps_str = "\n".join([f"- {s}" for s in finished_steps]) if finished_steps else "(无历史步骤)"
+            prompt = PLANNER_CONTINUE_PROMPT.format(
+                task=task,
+                current_url=current_url,
+                finished_steps_str=finished_steps_str
+            )
+            response = llm.invoke([HumanMessage(content=prompt)])
+            
+            return Command(
+                update={
+                    "messages": [response],
+                    "plan": response.content,
+                    "current_url": current_url,
+                    # 保留 locator_suggestions, finished_steps 等
+                    "loop_count": loop_count + 1,
+                    "is_complete": False
+                },
+                goto="CacheLookup"
+            )
+        else:
+            # 全新任务：清空所有旧状态
+            print(f"   🆕 [Planner] 全新任务，清空旧任务的所有状态...")
+            prompt = PLANNER_CONTINUE_PROMPT.format(
+                task=task,
+                current_url=current_url,
+                finished_steps_str="(新任务，无历史步骤)"
+            )
+            response = llm.invoke([HumanMessage(content=prompt)])
+            
+            return Command(
+                update={
+                    "messages": [response],
+                    "plan": response.content,
+                    "current_url": current_url,
+                    # [V5] 全新任务：重置所有旧状态（使用 None 触发 clearable_list_reducer 清空）
+                    "locator_suggestions": None,    # 清空定位策略
+                    "finished_steps": None,         # 清空历史步骤
+                    "reflections": None,            # 清空反思记录
+                    "generated_code": None,         # 清空生成的代码
+                    "execution_log": None,          # 清空执行日志
+                    "verification_result": None,    # 清空验收结果
+                    "error": None,                  # 清空错误信息
+                    "error_type": None,             # 清空错误类型
+                    "coder_retry_count": 0,         # 重置重试计数
+                    "_code_source": None,           # 清空代码来源
+                    "_cache_failed_this_round": False,  # 重置缓存标记
+                    "dom_skeleton": "",             # 清空 DOM（Observer 会重新获取）
+                    "dom_hash": None,               # 清空 DOM 哈希
+                    "loop_count": 1,                # 从 1 开始（因为这是第一次规划）
+                    "is_complete": False
+                },
+                goto="CacheLookup"
+            )
+
 
     # 1. 从 State 读取 Observer 提供的定位策略（不再自己调用 observer）
     accumulated_strategies = state.get("locator_suggestions", [])

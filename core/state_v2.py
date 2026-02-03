@@ -3,6 +3,24 @@ from typing import Annotated, List, Optional, TypedDict, Union, Dict, Any
 from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
 
+# =============================================================================
+# [V5] 自定义 Reducer：支持清空列表
+# =============================================================================
+def clearable_list_reducer(existing: List, update: Any) -> List:
+    """
+    可清空的列表 Reducer
+    
+    行为:
+    - update 为 None → 返回空列表（清空）
+    - update 为列表 → 追加到现有列表（与 operator.add 相同）
+    - update 为其他 → 直接替换
+    """
+    if update is None:
+        return []  # 清空
+    if isinstance(update, list):
+        return (existing or []) + update  # 追加
+    return update  # 替换
+
 class EnvState(TypedDict):
     """
     [环境感知状态]
@@ -10,8 +28,8 @@ class EnvState(TypedDict):
     """
     current_url: str
     dom_skeleton: str
-    # 累积的定位策略列表，每个元素包含 {page_context, url, strategies}
-    locator_suggestions: Annotated[List[Dict[str, Any]], operator.add]
+    # [V5] 使用支持清空的 reducer
+    locator_suggestions: Annotated[List[Dict[str, Any]], clearable_list_reducer]
     dom_hash: Optional[str]  # DOM MD5 哈希，用于检测页面变化 (Optimization)
 
 class TaskState(TypedDict):
@@ -22,11 +40,11 @@ class TaskState(TypedDict):
     user_task: str                      # 原始任务
     plan: Optional[str]                 # Planner 生成的最新计划
     
-    # 使用 Reducer 防止覆盖，记录完整的步骤历史
-    finished_steps: Annotated[List[str], operator.add] 
+    # [V5] 使用支持清空的 reducer
+    finished_steps: Annotated[List[str], clearable_list_reducer] 
     
-    # 存储失败经验 (Reflexion)
-    reflections: Annotated[List[str], operator.add] 
+    # [V5] 使用支持清空的 reducer
+    reflections: Annotated[List[str], clearable_list_reducer] 
     
     is_complete: bool                   # 总体任务能否认为已完成
     loop_count: int                     # 防死循环步数控制
