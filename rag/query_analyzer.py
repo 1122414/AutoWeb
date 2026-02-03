@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 from config import (
     MODEL_NAME, OPENAI_API_KEY, OPENAI_BASE_URL
 )
-from agent.prompt_template import QUERY_ANALYZER_PROMPT
+from prompts.rag_prompt import RAG_PROMPT
 
 # 定义元数据过滤的 Schema
 class MetadataFilter(BaseModel):

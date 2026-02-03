@@ -53,4 +53,8 @@ class AgentState(EnvState, TaskState):
     # [V3] Executor 微循环控制
     coder_retry_count: int              # Coder 重试计数（语法错误时微循环，最多3次）
     error_type: Optional[str]           # 错误类型: "syntax" | "locator" | None
+    
+    # [V4] 代码缓存控制
+    _code_source: Optional[str]         # 代码来源: "cache" | "llm" | None
+    _cache_failed_this_round: bool      # 本轮缓存代码是否已失败（用于防止死循环）
 

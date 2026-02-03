@@ -8,7 +8,8 @@ load_dotenv()
 # 基础配置
 # ==========================
 MILVUS_URI = os.getenv("MILVUS_URI", "http://localhost:19530")
-COLLECTION_NAME = "spider_knowledge_base"
+KNOWLEDGE_COLLECTION_NAME = "spider_knowledge_base"
+CODE_COLLECTION_NAME = "code_cache"
 
 # ==========================
 # 魔搭模型参数配置（不加Ollama的全是魔搭、线上API）
@@ -88,3 +89,16 @@ OUTPUT_DIR = os.getenv("OUTPUT_DIR", "./output")
 # 关系型数据库连接串 (PostgreSQL)
 # 格式示例: postgresql://user:password@localhost:5432/dbname
 # POSTGRES_CONNECTION_STRING = os.getenv("POSTGRES_CONNECTION_STRING")
+
+# ==============================================================================
+# [新增] 代码缓存配置 (Code Cache System)
+# ==============================================================================
+
+# 是否启用代码缓存复用 (True=复用历史代码，False=始终重新生成)
+CODE_CACHE_ENABLED = os.getenv("CODE_CACHE_ENABLED", "True").lower() == "true"
+
+# 代码缓存相似度阈值 (0-1，越高越严格)
+CODE_CACHE_THRESHOLD = float(os.getenv("CODE_CACHE_THRESHOLD", "0.85"))
+
+# 代码缓存 Collection 名称 (与知识库分开)
+CODE_CACHE_COLLECTION = os.getenv("CODE_CACHE_COLLECTION", "code_cache")

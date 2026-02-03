@@ -16,6 +16,141 @@ def _get_tab(config: RunnableConfig):
     browser = config["configurable"].get("browser")
     return browser.latest_tab if browser else None
 
+# ==============================================================================
+# [V4] 代码缓存检索节点
+# ==============================================================================
+def cache_lookup_node(state: AgentState, config: RunnableConfig) -> Command[Literal["Coder", "Executor"]]:
+    """
+    [CacheLookup] 尝试从缓存中检索可复用的代码
+    
+    策略:
+    - 检查 _cache_failed_this_round，若为 True 则强制跳过
+    - 使用 plan + task + dom_skeleton + url 构建检索 Query
+    - 命中时设置 _code_source = "cache"，跳到 Executor
+    - 未命中时设置 _code_source = "llm"，跳到 Coder
+    """
+    from config import CODE_CACHE_ENABLED, CODE_CACHE_THRESHOLD
+    
+    # [V4] 检查本轮是否已有缓存失败（防止死循环）
+    if state.get("_cache_failed_this_round"):
+        print("⚠️ [CacheLookup] 本轮缓存已失败，强制跳过")
+        return Command(
+            update={"_code_source": "llm"},
+            goto="Coder"
+        )
+    
+    # 检查是否启用缓存
+    if not CODE_CACHE_ENABLED:
+        print("⏭️ [CacheLookup] 代码缓存已禁用，跳过检索")
+        return Command(
+            update={"_code_source": "llm"},
+            goto="Coder"
+        )
+    
+    print("\n🔍 [CacheLookup] 正在检索可复用代码...")
+    
+    task = state.get("user_task", "")
+    plan = state.get("plan", "")  # [V4] 新增 plan 作为查询条件
+    dom_skeleton = state.get("dom_skeleton", "")
+    current_url = state.get("current_url", "")
+    
+    # 空白页/初始页面，跳过缓存检索
+    if not current_url or current_url.startswith(("about:", "data:", "chrome://")):
+        print("   ⏭️ 初始页面，跳过缓存检索")
+        return Command(
+            update={"_code_source": "llm"},
+            goto="Coder"
+        )
+    
+    try:
+        from skills.code_cache import code_cache_manager
+        
+        # [V4] 使用 plan + task 组合查询
+        combined_task = f"{task}\n当前计划: {plan}" if plan else task
+        
+        hits = code_cache_manager.search(
+            task=combined_task,
+            dom_skeleton=dom_skeleton,
+            url=current_url,
+            top_k=3
+        )
+        
+        if hits and hits[0].score >= CODE_CACHE_THRESHOLD:
+            best_hit = hits[0]
+            print(f"   ✅ 命中缓存! Score: {best_hit.score:.4f}, URL: {best_hit.url_pattern}")
+            print(f"   📋 原任务: {best_hit.goal[:50]}...")
+            
+            # 直接使用缓存代码，跳到 Executor
+            return Command(
+                update={
+                    "generated_code": best_hit.code,
+                    "messages": [AIMessage(content=f"【缓存命中】复用历史代码 (Score: {best_hit.score:.4f})")],
+                    "_code_source": "cache",  # [V4] 标记代码来源
+                    "_cache_hit_id": best_hit.id,
+                },
+                goto="Executor"
+            )
+        else:
+            if hits:
+                print(f"   ❌ 最高分 {hits[0].score:.4f} 低于阈值 {CODE_CACHE_THRESHOLD}")
+            else:
+                print("   ❌ 无匹配缓存")
+            return Command(
+                update={"_code_source": "llm"},
+                goto="Coder"
+            )
+            
+    except Exception as e:
+        print(f"   ⚠️ [CacheLookup] 检索异常: {e}")
+        return Command(
+            update={"_code_source": "llm"},
+            goto="Coder"
+        )
+
+def _save_code_to_cache(state: AgentState, current_url: str):
+    """
+    [辅助函数] 将验证通过的代码存入缓存
+    
+    存储条件:
+    - 步骤成功
+    - 非缓存命中执行 (避免重复存储)
+    - 代码长度足够 (>50 字符)
+    """
+    from config import CODE_CACHE_ENABLED
+    
+    if not CODE_CACHE_ENABLED:
+        return
+    
+    # [V4] 如果是缓存代码执行成功，不重复存储
+    code_source = state.get("_code_source")
+    if code_source == "cache":
+        print("   ⏭️ [CodeCache] 缓存代码执行，跳过存储")
+        return
+    
+    code = state.get("generated_code", "")
+    if not code or len(code) < 50:
+        print("   ⏭️ [CodeCache] 代码过短，跳过存储")
+        return
+    
+    # [V4] 使用 plan 作为 goal
+    goal = state.get("plan", "")
+    dom_skeleton = state.get("dom_skeleton", "")
+    
+    try:
+        from skills.code_cache import code_cache_manager
+        
+        cache_id = code_cache_manager.save(
+            goal=goal,  # [V4] 改为 goal
+            dom_skeleton=dom_skeleton,
+            url=current_url,
+            code=code
+        )
+        
+        if cache_id:
+            print(f"   💾 [CodeCache] 代码已缓存: {cache_id}")
+    except Exception as e:
+        print(f"   ⚠️ [CodeCache] 存储失败: {e}")
+
 def error_handler_node(state: AgentState, config: RunnableConfig, llm) -> Command[Literal["Observer", "__end__"]]:
     """
     [ErrorHandler] 全局错误处理与回退
@@ -63,11 +198,14 @@ def observer_node(state: AgentState, config: RunnableConfig, observer) -> Comman
     """[Observer] 环境感知节点：捕获 DOM 并生成定位策略"""
     print("\n👁️ [Observer] 正在感知环境...")
     
+    # [V4] 新一轮开始，重置缓存失败标记
+    base_update = {"_cache_failed_this_round": False}
+    
     # 获取浏览器实例
     browser = config["configurable"].get("browser")
     if not browser:
         print("   ⚠️ 无浏览器实例，跳过观察")
-        return Command(update={}, goto="Planner")
+        return Command(update=base_update, goto="Planner")
     
     # [V3 Fix] 先等待新标签页稳定，再获取最新标签页
     import time
@@ -95,7 +233,8 @@ def observer_node(state: AgentState, config: RunnableConfig, observer) -> Comman
     
     if loop_count == 0 and (is_blank or is_google_home):
         print("   ⏩ [Observer] 初始页面，跳过 DOM 分析")
-        return Command(update={"current_url": current_url}, goto="Planner")
+        base_update["current_url"] = current_url
+        return Command(update=base_update, goto="Planner")
     
     task = state.get("user_task", "")
     finished_steps = state.get("finished_steps", [])
@@ -142,8 +281,9 @@ def observer_node(state: AgentState, config: RunnableConfig, observer) -> Comman
         else:
             print("   -> 页面无变化，复用历史策略 (Skipping Observer Analysis)...")
         
-        # [V3 Fix] 重新分析后清空错误标记
+        # [V4] 合并基础更新
         update_dict = {
+            **base_update,
             "dom_skeleton": dom,
             "dom_hash": current_dom_hash,
             "current_url": current_url,
@@ -159,16 +299,11 @@ def observer_node(state: AgentState, config: RunnableConfig, observer) -> Comman
         
     except Exception as e:
         print(f"   ⚠️ 环境感知失败: {e}")
-        return Command(
-            update={
-                "dom_skeleton": f"DOM Capture Failed: {e}",
-                "current_url": current_url
-            },
-            goto="Planner"
-        )
+        base_update["dom_skeleton"] = f"DOM Capture Failed: {e}"
+        base_update["current_url"] = current_url
+        return Command(update=base_update, goto="Planner")
 
-
-def planner_node(state: AgentState, config: RunnableConfig, llm) -> Command[Literal["Coder", "__end__"]]:
+def planner_node(state: AgentState, config: RunnableConfig, llm) -> Command[Literal["CacheLookup", "__end__"]]:
     """[Planner] 负责制定下一步计划（环境感知已由 Observer 完成）"""
     print("\n🧠 [Planner] 正在制定计划...")
     tab = _get_tab(config)
@@ -209,7 +344,7 @@ def planner_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lite
                 "loop_count": loop_count + 1,
                 "is_complete": False
             },
-            goto="Coder"
+            goto="CacheLookup"
         )
     
     # 0.2 新任务但在已有页面上（任务连续性）
@@ -233,7 +368,7 @@ def planner_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lite
                 "loop_count": loop_count + 1,
                 "is_complete": False
             },
-            goto="Coder"
+            goto="CacheLookup"
         )
 
     # 1. 从 State 读取 Observer 提供的定位策略（不再自己调用 observer）
@@ -273,7 +408,7 @@ def planner_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lite
         print("🏁 [Planner] 判定任务完成，流程结束。")
         return Command(update=update_dict, goto="__end__")
     else:
-        return Command(update=update_dict, goto="Coder")
+        return Command(update=update_dict, goto="CacheLookup")
 
 def coder_node(state: AgentState, config: RunnableConfig, llm) -> Command[Literal["Executor"]]:
     """[Coder] 编写代码"""
@@ -318,16 +453,20 @@ def coder_node(state: AgentState, config: RunnableConfig, llm) -> Command[Litera
     return Command(
         update={
             "messages": [AIMessage(content=f"【代码生成】\n{response.content}")],
-            "generated_code": code
+            "generated_code": code,
+            "_code_source": "llm"  # [V4] 明确标记为 LLM 生成
         },
         goto="Executor"
     )
 
-def executor_node(state: AgentState, config: RunnableConfig) -> Command[Literal["Verifier", "Coder", "ErrorHandler"]]:
-    """[Executor] 执行代码，并根据错误类型进行分类路由"""
+def executor_node(state: AgentState, config: RunnableConfig) -> Command[Literal["Verifier", "Coder", "Planner", "ErrorHandler"]]:
+    """[Executor] 执行代码，并根据 _code_source 和错误类型进行分类路由"""
     print("\n⚡ [Executor] 正在执行代码...")
     tab = _get_tab(config)
     code = state.get("generated_code", "")
+    code_source = state.get("_code_source", "llm")  # [V4] 获取代码来源
+    
+    print(f"   📦 代码来源: {code_source}")
     
     # [V3] 错误分类关键词
     SYNTAX_ERRORS = ["SyntaxError", "IndentationError", "NameError", "TypeError", "AttributeError"]
@@ -358,6 +497,20 @@ def executor_node(state: AgentState, config: RunnableConfig) -> Command[Literal[
             error_type, error_kw = error_in_log
             print(f"   ⚠️ 检测到 {error_type} 错误: {error_kw}")
             
+            # [V4] 缓存代码失败：直接跳 Planner，不尝试 Coder 修复
+            if code_source == "cache":
+                print(f"   ⚠️ 缓存代码失败，标记 _cache_failed_this_round，跳 Planner")
+                return Command(
+                    update={
+                        "messages": [AIMessage(content=f"【缓存代码失败】{error_kw}，重新规划")],
+                        "execution_log": execution_log,
+                        "_cache_failed_this_round": True,
+                        "reflections": [f"缓存代码失败: {error_kw}，需要重新生成"]
+                    },
+                    goto="Planner"
+                )
+            
+            # LLM 代码的错误处理逻辑保持不变
             if error_type == "syntax":
                 # 语法错误：微循环回 Coder
                 coder_retry = state.get("coder_retry_count", 0)
@@ -426,13 +579,14 @@ def executor_node(state: AgentState, config: RunnableConfig) -> Command[Literal[
             goto="ErrorHandler"
         )
 
-def verifier_node(state: AgentState, config: RunnableConfig, llm) -> Command[Literal["Observer", "__end__"]]:
-    """[Verifier] 验收并决定下一步"""
+def verifier_node(state: AgentState, config: RunnableConfig, llm) -> Command[Literal["Observer", "Planner"]]:
+    """[Verifier] 验收并决定下一步 (V4: Planner 是唯一出口)"""
     print("\n🔍 [Verifier] 正在验收...")
     
     log = state.get("execution_log", "")
     task = state.get("user_task", "")
     current_plan = state.get("plan", "Unknown Plan")
+    code_source = state.get("_code_source", "llm")  # [V4] 获取代码来源
     
     # [V3 Fix] 获取最新标签页（处理新标签页打开的情况）
     browser = config["configurable"].get("browser")
@@ -452,11 +606,27 @@ def verifier_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lit
         current_url = ""
     
     print(f"   -> 当前验收 URL: {current_url[:60]}...")
+    print(f"   📦 代码来源: {code_source}")
+    
     # 1. 快速失败检查（仅致命错误）
     fatal_keywords = ["Runtime Error:", "Traceback", "ElementNotFound", "TimeoutException", "Execution Failed", "Critical"]
     for kw in fatal_keywords:
         if kw in log:
             print(f"⚡ [Verifier] Deterministic Fail: {kw}")
+            
+            # [V4] 缓存代码失败：跳 Planner，标记失败
+            if code_source == "cache":
+                return Command(
+                    update={
+                        "messages": [AIMessage(content=f"【缓存验收失败】{kw}")],
+                        "_cache_failed_this_round": True,
+                        "reflections": [f"缓存代码验收失败: {kw}"],
+                        "is_complete": False
+                    },
+                    goto="Planner"
+                )
+            
+            # LLM 代码失败：回 Observer
             return Command(
                 update={
                     "messages": [AIMessage(content=f"Status: STEP_FAIL ({kw})")],
@@ -482,49 +652,52 @@ def verifier_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lit
     
     格式:
     Status: [STEP_SUCCESS | STEP_FAIL]
-    TaskDone: [YES | NO]
     Summary: [简短描述]
     """
     response = llm.invoke([HumanMessage(content=prompt)])
     content = response.content
     
     is_success = "Status: STEP_SUCCESS" in content
-    is_done = "TaskDone: YES" in content
     
     summary = "Step executed."
     for line in content.split("\n"):
         if line.startswith("Summary:"):
             summary = line.replace("Summary:", "").strip()
     
-    # 3. 返回验收结果（不再阻塞，由 main.py 通过 interrupt 处理人工覆盖）
+    # 3. 返回验收结果
     print(f"\n📋 [Verifier] LLM 判定:")
     print(f"   Status: {'SUCCESS' if is_success else 'FAIL'}")
-    print(f"   TaskDone: {'YES' if is_done else 'NO'}")
     print(f"   Summary: {summary[:100]}")
     
     # 将验收结果存入 State，供 main.py 读取和覆盖
     updates = {
         "messages": [response],
-        "is_complete": is_done,
+        "is_complete": False,  # [V4] Verifier 不再判断任务完成，交给 Planner
         "current_url": current_url,
-        # 新增：存储验收元数据，供人工覆盖时使用
         "verification_result": {
             "is_success": is_success,
-            "is_done": is_done,
+            "is_done": False,  # [V4] 由 Planner 判断
             "summary": summary
         }
     }
     
     if is_success:
         updates["finished_steps"] = [summary]
-        if is_done:
-            print("   🎉 Task Done!")
-            return Command(update=updates, goto="__end__")
-        else:
-            print("   🔄 Step OK, 继续下一步...")
-            return Command(update=updates, goto="Observer")
+        
+        # [V4] 成功时存入缓存（无论 cache 还是 llm 来源都存）
+        _save_code_to_cache(state, current_url)
+        
+        print("   🔄 Step OK, 继续下一步...")
+        return Command(update=updates, goto="Observer")
     else:
-        print("   ❌ Step Failed, retrying...")
+        print("   ❌ Step Failed")
         updates["reflections"] = [f"Step Failed: {summary}"]
+        
+        # [V4] 缓存代码验收失败：跳 Planner
+        if code_source == "cache":
+            updates["_cache_failed_this_round"] = True
+            return Command(update=updates, goto="Planner")
+        
+        # LLM 代码失败：回 Observer 重试
         return Command(update=updates, goto="Observer")
 

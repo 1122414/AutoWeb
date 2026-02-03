@@ -26,7 +26,7 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 # 项目内部模块
 from config import *
 from rag.query_analyzer import query_analyzer
-from agent.prompt_template import RAG_PROMPT
+from prompts.rag_prompt import RAG_PROMPT
 
 # ==============================================================================
 # 0. 全局配置与设备检测

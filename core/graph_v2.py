@@ -3,11 +3,14 @@ from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.memory import MemorySaver
 
 from core.state_v2 import AgentState
-from core.nodes import observer_node, planner_node, coder_node, executor_node, verifier_node, error_handler_node
+from core.nodes import (
+    observer_node, planner_node, coder_node, executor_node, 
+    verifier_node, error_handler_node, cache_lookup_node
+)
 
 def build_graph(checkpointer=None, llm=None, observer=None):
     """
-    构建 AutoWeb V2 Graph (Command Pattern Edition)
+    构建 AutoWeb V4 Graph (Code Cache Edition)
     
     Args:
         checkpointer: LangGraph 检查点器
@@ -17,6 +20,11 @@ def build_graph(checkpointer=None, llm=None, observer=None):
     由于 Nodes 现在直接返回 Command(goto="NextNode")，
     图的定义变得非常简洁，只需要添加节点和边即可。
     LangGraph 会自动遵守 Command 中的 goto 指令。
+    
+    V4 流程：
+    START -> Observer -> Planner -> CacheLookup -> (Coder | Executor)
+    Coder -> Executor -> Verifier -> (Observer | Planner)
+    Planner 是唯一的 __end__ 出口
     """
     if llm is None:
         raise ValueError("LLM instance is required for build_graph")
@@ -28,6 +36,7 @@ def build_graph(checkpointer=None, llm=None, observer=None):
     # 1. Add Nodes - 使用 functools.partial 预绑定依赖
     # 这样 LangGraph 运行时只需传 state 和 config，llm/observer 已被绑定
     workflow.add_node("Observer", partial(observer_node, observer=observer))
+    workflow.add_node("CacheLookup", cache_lookup_node)  # [新增] 代码缓存检索
     workflow.add_node("Planner", partial(planner_node, llm=llm))
     workflow.add_node("Coder", partial(coder_node, llm=llm))
     workflow.add_node("Executor", executor_node)  # Executor 不需要 LLM
