@@ -46,7 +46,7 @@ def save_to_knowledge_base(content: str, source: str = "auto_web_spider") -> boo
         from langchain_milvus import Milvus
         from langchain_core.documents import Document
         from rag.retriever_qa import get_embedding_model
-        from config import MILVUS_URI, COLLECTION_NAME
+        from config import MILVUS_URI, KNOWLEDGE_COLLECTION_NAME
         
         embeddings = get_embedding_model()
         
@@ -54,7 +54,7 @@ def save_to_knowledge_base(content: str, source: str = "auto_web_spider") -> boo
         vector_store = Milvus(
             embedding_function=embeddings,
             connection_args={"uri": MILVUS_URI},
-            collection_name=COLLECTION_NAME,
+            collection_name=KNOWLEDGE_COLLECTION_NAME,
             consistency_level="Bounded",
             auto_id=True,
         )

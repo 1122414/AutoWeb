@@ -13,7 +13,7 @@ from langchain_milvus import Milvus
 from config import (
     POSTGRES_CONNECTION_STRING, 
     MILVUS_URI, 
-    COLLECTION_NAME, 
+    KNOWLEDGE_COLLECTION_NAME, 
     OUTPUT_DIR
 )
 
@@ -100,7 +100,7 @@ class AgentMemory:
             vector_store = Milvus(
                 embedding_function=embeddings,
                 connection_args={"uri": MILVUS_URI},
-                collection_name=COLLECTION_NAME,
+                collection_name=KNOWLEDGE_COLLECTION_NAME,
                 auto_id=True
             )
             

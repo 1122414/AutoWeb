@@ -314,7 +314,7 @@ def qa_interaction(question: str) -> str:
         vector_store = Milvus(
             embedding_function=embeddings,
             connection_args={"uri": MILVUS_URI},
-            collection_name=COLLECTION_NAME,
+            collection_name=KNOWLEDGE_COLLECTION_NAME,
             consistency_level="Bounded",
             auto_id=True,
         )
