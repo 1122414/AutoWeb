@@ -83,8 +83,44 @@ ACTION_CODE_GEN_PROMPT = """
 
 # 输出与稳健性 (Output & Robustness)
 1. **纯粹代码**: 严禁包含Markdown标记，严禁 `import`(除toolbox)，严禁 `tab = ChromiumPage()`，严禁注释，仅输出函数体逻辑
-2. **防崩溃**: 对可能不存在的元素或不稳定的步骤，**必须**使用 `try...except` 捕获并打印异常 (`print(f"Warning: {{e}}")`。
-3. **元素失效防护 (Stale Element Prevention)**: 
+2. **防崩溃 (CRITICAL - 分层保护)**:
+   - **核心流程**: 主要数据采集逻辑，失败之后报错让 Verifier 介入即可，然后注意根据反馈内容和日志修改代码
+   - **非核心流程** (翻页、可选元素、辅助功能): **必须**用 `try...except` 包裹！
+   - ⚠️ **翻页/循环控制是典型的非核心流程**，定位失败应优雅退出而非崩溃：
+     ```
+     # ✅ 正确: 翻页用 try 包裹
+     try:
+         next_btn = tab.ele("x://button[@class='next']")
+         if next_btn and next_btn.states.is_enabled:
+             next_btn.click(by_js=True)
+         else:
+             print("-> No more pages")
+             break
+     except Exception as e:
+         print(f"-> Pagination ended: {{e}}")
+         break
+     ```
+   - **原则**: 一个翻页按钮找不到，不应该让已采集的数据功亏一篑！
+3. **元素提取简洁原则 (EAFP Style - CRITICAL)**:
+   - **严禁**先用 `if ele:` 检查元素存在性再取值，这种写法多此一举且容易报错！
+   - **必须**直接用 `try...except` 包裹元素提取操作。
+   - ❌ 错误做法 (LBYL - 啰嗦且易错):
+     ```
+     name_ele = player.ele("x:.//h3[@class='name']")
+     if name_ele:
+         player_data["name"] = name_ele.text  # 如果后续定位失败，这里会报 AttributeError
+     else:
+         print(f"Warning: Name not found")
+     ```
+   - ✅ 正确做法 (EAFP - 简洁健壮):
+     ```
+     try:
+         player_data["name"] = player.ele("x:.//h3[@class='name']").text
+     except Exception as e:
+         print(f"Warning: Name extraction failed - {e}")
+     ```
+   - **原因**: Python 推崇 EAFP (Easier to Ask Forgiveness than Permission)，直接尝试并捕获异常比预先检查更 Pythonic 且更健壮。
+4. **元素失效防护 (Stale Element Prevention)**: 
    - 当需要"点击进入详情 -> 采集 -> 返回列表 -> 继续下一个"时，**严禁**先获取所有元素再循环！
    - **正确做法**: 用索引循环，每次迭代重新获取元素列表：
      ```
