@@ -21,6 +21,8 @@ ACTION_CODE_GEN_PROMPT = """
 | 工具 | 用途 | 调用示例 |
 |------|------|---------|
 | `toolbox.save_data(data, filename)` | **保存数据到文件** (JSON/CSV) | `toolbox.save_data(results, "data/movies.json")` |
+| `toolbox.save_to_kb(data, source)` | **存入向量知识库** (Milvus) | `toolbox.save_to_kb(results, "douban_movies")` |
+| `toolbox.flush_kb()` | **刷新知识库缓冲区** | `toolbox.flush_kb()` |
 | `toolbox.http_request(url)` | **发送 HTTP 请求** (绕过浏览器) | `html = toolbox.http_request("https://api.example.com/data")` |
 | `toolbox.download_file(url, path)` | **下载文件** (图片/PDF等) | `toolbox.download_file(img_url, "data/cover.jpg")` |
 | `toolbox.db_insert(table, data)` | **插入数据库** (SQLite) | `toolbox.db_insert("movies", {{"title": "xxx", "year": 2024}})` |
@@ -33,13 +35,17 @@ ACTION_CODE_GEN_PROMPT = """
 
 ## 🚨 工具使用铁律
 1. **爬取数据后必须保存**: 每当你采集到数据 (`results` 列表非空)，**必须调用 `toolbox.save_data(results, "output/xxx.json")`**！
-2. **尊重用户格式偏好**: 
+2. **存入知识库**: 如果用户明确要求"存入向量库/知识库/Milvus"，使用 `toolbox.save_to_kb(results, "source_name")`
+   - `data` 可以是 List[Dict]、Dict 或字符串
+   - `source` 是来源标识，如 "douban_movies"
+   - 批量存储完成后建议调用 `toolbox.flush_kb()` 确保数据落盘
+3. **尊重用户格式偏好**: 
    - 用户说"保存为CSV" → 使用 `toolbox.save_data(results, "output/data.csv")`
    - 用户说"保存为JSON" → 使用 `toolbox.save_data(results, "output/data.json")`
    - 扩展名会自动决定格式，无需传 format 参数
-3. **描述性文件名**: 文件名应反映内容，如 `douban_movies.csv` 而非 `data.csv`（系统会自动加时间戳防覆盖）
-4. **下载文件用 toolbox**: 需要下载图片/文件时，**必须用 `toolbox.download_file(url, path)`**，严禁用浏览器下载。
-5. **API 优先**: 如果目标有 API 接口，优先用 `toolbox.http_request()` 而非浏览器渲染。
+4. **描述性文件名**: 文件名应反映内容，如 `douban_movies.csv` 而非 `data.csv`（系统会自动加时间戳防覆盖）
+5. **下载文件用 toolbox**: 需要下载图片/文件时，**必须用 `toolbox.download_file(url, path)`**，严禁用浏览器下载。
+6. **API 优先**: 如果目标有 API 接口，优先用 `toolbox.http_request()` 而非浏览器渲染。
 
 # 核心铁律 (Critical Rules)
 1. **禁止实例化**: 严禁 `ChromiumPage()`。只能用 `tab`。
@@ -51,16 +57,27 @@ ACTION_CODE_GEN_PROMPT = """
    - **等待**: `tab.wait.load_start()`, `tab.wait.ele_displayed('x://...')`
    - **状态**: `if el.states.is_displayed:`, `if el.states.is_enabled:`
    - **新页**: `new_tab = el.click.for_new_tab()`; 操作 `new_tab`; `new_tab.close()`
-3. **新标签页处理 (CRITICAL)**:
-   - **检测新标签页**: 点击后如果打开了新标签页，必须切换焦点！
-   - **方法1 (推荐)**: `new_tab = el.click.for_new_tab()` 点击并获取新标签页
-   - **方法2**: `el.click(by_js=True); tab.wait(1); new_tab = browser.latest_tab` 获取最新标签页
-   - **操作新页**: 在新标签页上操作时用 `new_tab.ele()` 而非 `tab.ele()`
-   - ⚠️ **关闭时机判断 (CRITICAL)**:
-     - **循环爬取场景** (计划中有"遍历"/"循环"/"批量"等词)：每次迭代完成后必须 `new_tab.close()` 返回列表
-     - **单次进入场景** (计划只是"进入详情页"/"打开页面"等)：**禁止关闭**，保持新页面打开给后续步骤使用
-   - ⚠️ **核心原则**: 只在**当前步骤**完成了**所有需要的操作**后才能关闭。如果只是"点击进入"，后续还需要爬取，则不能关闭！
-   - ⚠️ **切换全局 tab**: 如果后续流程需要在新页面继续，使用 `tab = browser.latest_tab`
+3. **点击跳转处理 (CRITICAL - 健壮模式)**:
+   - ⚠️ **不要盲目使用 `click.for_new_tab()`**！很多网站点击后是**当前页跳转**而非新标签页！
+   - ⚠️ **禁止二次点击**！try中使用el.click.for_new_tab()之后，就不要在except中使用el.click()！
+   - **健壮模式（推荐）**：先尝试新标签页，失败则回退到当前页：
+     ```
+     old_url = tab.url
+     try:
+         new_tab = el.click.for_new_tab()
+         print(f"-> Opened new tab: {{new_tab.url}}")
+         # 操作 new_tab...
+     except Exception as e:
+         # Fallback: 可能是当前页跳转
+         tab.wait(2)
+         if tab.url != old_url:
+             print(f"-> Page navigated: {{old_url}} -> {{tab.url}}")
+             # 继续在 tab 上操作...
+         else:
+             print(f"-> Click may have failed: {{e}}")
+     ```
+   - **循环爬取场景**：每次迭代完成后 `new_tab.close()` 返回列表（仅当确实打开了新标签页时）
+   - **单次进入场景**：如果页面已跳转（无论新标签页还是当前页），无需额外操作
 4. **流程控制**: 仅在 Explicit Loop 时使用 `for`。禁止 `while True`。
 5. **数据安全 (Data Saving - CRITICAL)**: 
    - **严禁**手动编写 `open()`/`csv.writer()` 代码保存数据！
@@ -121,17 +138,29 @@ ACTION_CODE_GEN_PROMPT = """
          print(f"Warning: Name extraction failed - {{e}}")
      ```
    - **原因**: Python 推崇 EAFP (Easier to Ask Forgiveness than Permission)，直接尝试并捕获异常比预先检查更 Pythonic 且更健壮。
-4. **元素失效防护 (Stale Element Prevention)**: 
-   - 当需要"点击进入详情 -> 采集 -> 返回列表 -> 继续下一个"时，先获取所有元素再循环！
-   - **正确做法**: 
+4. **元素失效防护 (Stale Element Prevention - CRITICAL)**: 
+   - ⚠️ **核心问题**: 当执行 `tab.back()` 或关闭标签页后，页面刷新，**之前获取的元素引用会全部失效** (Stale Element)！
+   - ⚠️ **致命错误**: 预先获取元素列表然后循环 (`items = tab.eles(); for item in items: ...`)，在第一次 `back()` 后所有 `items` 都失效！
+   - ✅ **正确做法**: 使用**索引循环**，每次迭代**重新获取**元素列表：
      ```
-     items = tab.eles('.item');
-     for item in items: 
-        item.click()
-        # ... 采集 ...
-        tab.back()
-        tab.wait(1)
+     # 索引循环 + 每次重新获取
+     for idx in range(len(tab.eles('.item'))):
+         items = tab.eles('.item')  # 每次都重新获取！
+         item = items[idx]
+         old_url = tab.url
+         try:
+             new_tab = item.click.for_new_tab()
+             # ... 在 new_tab 上采集 ...
+             new_tab.close()
+         except Exception as e:
+             tab.wait(2)
+             if tab.url != old_url:
+                 # ... 在 tab 上采集 ...
+                 tab.back()
+                 tab.wait(2)
+                 tab = browser.latest_tab  # 刷新 tab 引用
      ```
+   - **关键点**: `tab.eles()` 必须放在循环**内部**，确保每次都拿到新鲜的元素引用。
 
 # 示例 (Few-Shot)
 ## Ex1: 爬取列表并保存数据 (完整流程)

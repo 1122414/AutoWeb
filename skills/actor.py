@@ -7,21 +7,22 @@ from typing import Dict, Any, List, Optional
 from DrissionPage.common import Settings
 from drivers.drission_driver import BrowserDriver
 import skills.toolbox as toolbox
+from skills.logger import logger, save_code_log
+
 
 class BrowserActor:
     """
     [行动执行单元]
     负责：点击、输入、滚动、导航、JavaScript代码执行
     """
-    
-    def __init__(self, tab):
-        self.tab = tab
-        # 设置 DrissionPage 的一些全局行为，例如不加载图片以加速（可选）
-        # Settings.load_mode = 'eager' 
 
-    def navigate(self, url: str):
+    def __init__(self, tab, browser):
+        self.tab = tab
+        self.browser = browser
+
+    def navigate(self, url: str) -> None:
         """打开指定 URL"""
-        print(f"🚶 [Actor] Navigating to: {url}")
+        logger.info(f"🚶 [Actor] Navigating to: {url}")
         self.tab.get(url)
         self.tab.wait.load_start()
 
@@ -33,18 +34,16 @@ class BrowserActor:
         action_type = action_plan.get("action", "").lower()
         locator = action_plan.get("locator")
         value = action_plan.get("value")
-        
+
         try:
             target_ele = None
             if locator:
                 target_ele = self.tab.ele(locator)
-            
+
             if action_type == "click":
                 if target_ele:
-                    # 优先使用 JS 点击，穿透力更强
                     target_ele.click(by_js=True)
-                    # 智能等待：如果点击导致页面跳转
-                    self.tab.wait.load_start() 
+                    self.tab.wait.load_start()
                     return {"status": "success", "msg": f"Clicked {locator}"}
                 else:
                     return {"status": "failed", "msg": "Element not found"}
@@ -53,7 +52,7 @@ class BrowserActor:
                 if target_ele:
                     target_ele.input(value)
                     return {"status": "success", "msg": f"Input '{value}' to {locator}"}
-                
+
             elif action_type == "scroll":
                 self.tab.scroll.to_bottom()
                 return {"status": "success", "msg": "Scrolled to bottom"}
@@ -64,110 +63,88 @@ class BrowserActor:
 
             else:
                 return {"status": "error", "msg": f"Unknown action: {action_type}"}
-                
+
         except Exception as e:
+            logger.warning(f"[Actor] Action failed: {e}")
             return {"status": "error", "msg": str(e)}
 
     def execute_python_strategy(self, strategy_code: str, context: Dict = None) -> Dict[str, Any]:
         """
-        [高危能力] 执行 LLM 生成的 Python 代码 (原 main.py 的沙箱逻辑)
-        
+        [高危能力] 执行 LLM 生成的 Python 代码
+
         Returns:
             Dict: {
-                "result_data": List[Dict],  # 爬取的数据 results
-                "execution_log": str        # 捕获的 print 日志 + 系统日志
+                "result_data": List[Dict],
+                "execution_log": str
             }
         """
-        print("⚡ [Actor] Executing dynamic strategy...")
-        
+        logger.info("⚡ [Actor] Executing dynamic strategy...")
+
         local_scope = {
             "tab": self.tab,
             "results": [],
             "strategy": context or {},
             "time": time,
             "json": json,
-            "toolbox": toolbox, # Inject the "Arms"
-            "save_data": toolbox.save_data, # [Fix] Fail-safe alias
-            "save_to_csv": toolbox.save_to_csv, # [Fix] Fail-safe alias for legacy calls
-            "http_request": toolbox.http_request # [Fix] Fail-safe alias
+            "toolbox": toolbox,
+            "browser": self.browser,
         }
-        
-        # 1. 记录初始状态
+
         start_url = self.tab.url
         logs = []
-        
-        # [Log Code Content] - ONLY for file, not for UI
-        # logs.append(f"--- [Generated Code] ---\n{strategy_code}\n") 
-        
         output_buffer = io.StringIO()
-        
+
         try:
-            # 2. 执行代码并捕获 print 输出
+            # 执行代码并捕获 print 输出
             with contextlib.redirect_stdout(output_buffer):
                 exec(strategy_code, {}, local_scope)
-            
+
             # 获取捕获的 print 内容
             stdout_content = output_buffer.getvalue()
             if stdout_content:
                 logs.append(f"--- [Code Output] ---\n{stdout_content.strip()}")
-            
-            # 3. 检查 URL 变化
+
+            # 检查 URL 变化
             self.tab.wait(5)
             end_url = self.tab.url
             if start_url != end_url:
-                logs.append(f"--- [System Log] ---\nURL Changed: {start_url} -> {end_url}")
+                logs.append(
+                    f"--- [System Log] ---\nURL Changed: {start_url} -> {end_url}")
             else:
                 logs.append(f"--- [System Log] ---\nURL Unchanged: {end_url}")
-            
-            # [Added] Persistent Logging
-            log_dir = "logs"
-            try:
-                if not os.path.exists(log_dir):
-                    os.makedirs(log_dir)
-                timestamp = time.strftime("%Y%m%d_%H%M%S")
-                log_file = os.path.join(log_dir, f"exec_{timestamp}.log")
-                
-                # [Crucial Change] Prepend Code ONLY to the file content
-                file_content = f"--- [Generated Code] ---\n{strategy_code}\n\n" + "\n".join(logs)
-                
-                with open(log_file, "w", encoding="utf-8") as f:
-                    f.write(file_content)
-                    
-                print(f"📄 [Actor] Log saved to: {log_file}")
-                # Append log path to execution_log so user can see it in UI too
-                logs.append(f"--- [System Log] ---\nLog saved to: {os.path.abspath(log_file)}")
-            except Exception as e:
-                print(f"⚠️ Failed to save log file: {e}")
+
+            # 保存代码执行日志到 code_log 目录
+            log_path = save_code_log(
+                code=strategy_code,
+                output="\n".join(logs),
+                is_error=False,
+                extra_info=f"URL: {start_url} -> {end_url}"
+            )
+            if log_path:
+                logger.info(f"📄 [Actor] Log saved to: {log_path}")
+                logs.append(f"--- [System Log] ---\nLog saved to: {log_path}")
 
             return {
                 "result_data": local_scope.get("results", []),
                 "execution_log": "\n".join(logs)
             }
-            
+
         except Exception as e:
             error_msg = f"❌ Execution Error: {e}"
-            print(error_msg)
-            # 即使出错，也要把已打印的内容返回
-            logs.append(f"--- [Code Output (Partial)] ---\n{output_buffer.getvalue()}")
-            logs.append(error_msg)
-            
-            # [Added] Save Error Log
+            logger.error(error_msg)
 
-            try:
-                log_dir = "logs"
-                if not os.path.exists(log_dir):
-                    os.makedirs(log_dir)
-                timestamp = time.strftime("%Y%m%d_%H%M%S")
-                log_file = os.path.join(log_dir, f"error_{timestamp}.log")
-                
-                # [Crucial Change] Prepend Code to error log too
-                file_content = f"--- [Generated Code] ---\n{strategy_code}\n\n" + "\n".join(logs)
-                
-                with open(log_file, "w", encoding="utf-8") as f:
-                    f.write(file_content)
-                print(f"📄 [Actor] Error Log saved to: {log_file}")
-            except:
-                pass
+            logs.append(
+                f"--- [Code Output (Partial)] ---\n{output_buffer.getvalue()}")
+            logs.append(error_msg)
+
+            # 保存错误日志
+            log_path = save_code_log(
+                code=strategy_code,
+                output="\n".join(logs),
+                is_error=True
+            )
+            if log_path:
+                logger.info(f"📄 [Actor] Error Log saved to: {log_path}")
 
             return {
                 "result_data": local_scope.get("results", []),

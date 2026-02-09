@@ -13,55 +13,64 @@ from config import MODEL_NAME, OPENAI_API_KEY, OPENAI_BASE_URL
 # 引入 Compressor
 from skills.dom_compressor import DOMCompressor
 
+
 class BrowserObserver:
     """
     [视觉感知单元]
     负责：页面结构分析、元素定位策略生成、非结构化数据清洗
     """
+
     def __init__(self):
         self.llm = ChatOpenAI(
-            model=MODEL_NAME, 
-            temperature=0, 
-            openai_api_key=OPENAI_API_KEY, 
+            model=MODEL_NAME,
+            temperature=0,
+            openai_api_key=OPENAI_API_KEY,
             openai_api_base=OPENAI_BASE_URL,
             streaming=True
         )
         # [Optimization] DOM Cache
         self._dom_cache = {"hash": None, "analysis": None}
         # [Optimization] Compressor (Default Lite)
-        self.compressor = DOMCompressor(mode="lite") 
+        self.compressor = DOMCompressor(mode="lite")
 
     # ================= 工具函数 (原 dom_helper/extractor_utils) =================
-    
+
     def _clean_text(self, text: str) -> str:
         """基础文本清洗：去除多余空白"""
-        if not text: return ""
+        if not text:
+            return ""
         return re.sub(r'\s+', ' ', text).strip()
 
     def _parse_json_safely(self, text: str) -> Union[Dict, list]:
         """[核心能力] 鲁棒的 JSON 解析器，能处理 LLM 返回的不规范 JSON"""
         text = text.strip()
         # 尝试直接解析
-        try: return json.loads(text)
-        except: pass
-        
+        try:
+            return json.loads(text)
+        except:
+            pass
+
         # 尝试清洗 Markdown 标记
         cleaned = text.replace("```json", "").replace("```", "").strip()
-        try: return json.loads(cleaned)
-        except: pass
-        
+        try:
+            return json.loads(cleaned)
+        except:
+            pass
+
         # 尝试正则提取 {} 或 []
         try:
-            match = re.search(r'\{[\s\S]*\}', text) 
-            if match: return json.loads(match.group(0))
-        except: pass
+            match = re.search(r'\{[\s\S]*\}', text)
+            if match:
+                return json.loads(match.group(0))
+        except:
+            pass
 
         # 2. 尝试直接解析 (Best Case)
-        try: 
+        try:
             return json.loads(text)
         except json.JSONDecodeError:
             pass
-        
+
         # 3. 针对“多个 JSON 对象堆叠”的补救 (即你遇到的情况)
         # 现象：text 是 '{"a":1}\n{"b":2}' 或 '{"a":1}{"b":2}'
         # 对策：正则查找 `} <空白> {`，替换为 `}, {`，然后两头加 []
@@ -85,10 +94,10 @@ class BrowserObserver:
             # 匹配最外层的 {}
             # 注意：这个正则可能处理不了嵌套很深且格式极其混乱的情况，但在大多数 LLM 输出场景下足够用
             matches = re.findall(r'(\{[\s\S]*?\})(?=\s*\{|\s*$)', text)
-            
+
             # 如果上面的正则没匹配到，尝试更简单的贪婪匹配
             if not matches:
-                 matches = re.findall(r'\{[\s\S]*?\}', text)
+                matches = re.findall(r'\{[\s\S]*?\}', text)
 
             valid_objs = []
             for m in matches:
@@ -98,7 +107,7 @@ class BrowserObserver:
                     valid_objs.append(obj)
                 except:
                     continue
-            
+
             if valid_objs:
                 print(f"🔧 [Observer] 暴力提取成功，回收了 {len(valid_objs)} 个对象")
                 # 如果只有一个对象且原意可能不是列表，视情况返回（但为了统一，返回列表通常更安全）
@@ -106,7 +115,7 @@ class BrowserObserver:
                 return valid_objs
         except:
             pass
-        
+
         # 如果所有尝试都失败了
         return {"error": "Failed to parse JSON", "raw": text}
 
@@ -123,60 +132,67 @@ class BrowserObserver:
             try:
                 # 注入 JS
                 tab.run_js(DOM_SKELETON_JS)
-            
+
                 # 轮询等待 JS 结果
                 start_time = time.time()
-                timeout = 10  
+                timeout = 10
                 dom_json_str = None
-                
+
                 while time.time() - start_time < timeout:
                     status = tab.run_js("return window.__dom_status;")
                     if status == 'success':
-                        dom_json_str = tab.run_js("return window.__dom_result;")
+                        dom_json_str = tab.run_js(
+                            "return window.__dom_result;")
                         break
                     elif status == 'error':
                         error_msg = tab.run_js("return window.__dom_result;")
-                        print(f"   ⚠️ JS 内部报错 (Attempt {attempt+1}): {error_msg}")
+                        print(
+                            f"   ⚠️ JS 内部报错 (Attempt {attempt+1}): {error_msg}")
                         break
                     time.sleep(0.5)
-                
+
                 # 清理全局变量
-                tab.run_js("delete window.__dom_result; delete window.__dom_status;")
-                
+                tab.run_js(
+                    "delete window.__dom_result; delete window.__dom_status;")
+
                 # 检查结果有效性
                 if dom_json_str:
                     if isinstance(dom_json_str, str) and "Empty DOM" in dom_json_str:
-                         print(f"   ⚠️ 检测到 Empty DOM (Attempt {attempt+1})，等待 1s 后重试...")
-                         time.sleep(1.0)
-                         continue
-                    
+                        print(
+                            f"   ⚠️ 检测到 Empty DOM (Attempt {attempt+1})，等待 1s 后重试...")
+                        time.sleep(1.0)
+                        continue
+
                     # 1. 解析原始 JSON
                     raw_dom = dom_json_str
                     if isinstance(dom_json_str, str):
                         try:
                             raw_dom = json.loads(dom_json_str)
                         except:
-                            return dom_json_str # Fallback
-                    
+                            return dom_json_str  # Fallback
+
                     # 2. 调用压缩器 (Compress)
-                    print(f"   📉 [Observer] Compressing DOM (Original Size: {len(str(raw_dom))} chars)...")
-                    with open ("raw_dom.json", "w", encoding="utf-8") as f:
+                    print(
+                        f"   📉 [Observer] Compressing DOM (Original Size: {len(str(raw_dom))} chars)...")
+                    with open("raw_dom.json", "w", encoding="utf-8") as f:
                         json.dump(raw_dom, f, ensure_ascii=False, indent=4)
                     compressed_dom = self.compressor.compress(raw_dom)
-                    compressed_str = json.dumps(compressed_dom, ensure_ascii=False)
-                    print(f"   📉 [Observer] Compression Done (New Size: {len(compressed_str)} chars).")
-                    
+                    compressed_str = json.dumps(
+                        compressed_dom, ensure_ascii=False)
+                    print(
+                        f"   📉 [Observer] Compression Done (New Size: {len(compressed_str)} chars).")
+
                     return compressed_str
                 else:
                     print(f"   ⚠️ JS 执行超时 (Attempt {attempt+1})")
-                
+
             except Exception as e:
                 print(f"   ⚠️ DOM Capture Failed (Attempt {attempt+1}): {e}")
                 time.sleep(1.0)
-        
+
         return json.dumps({"error": "Failed to capture DOM after retries"})
 
-    def analyze_locator_strategy(self, dom_skeleton: str, requirement: str, previous_steps: list = []) -> Union[Dict, list]:
+    def analyze_locator_strategy(self, dom_skeleton: str, requirement: str, current_url: str, previous_steps: list = []) -> Union[Dict, list]:
         """
         [推理] 基于 DOM 骨架和用户需求，生成操作定位策略
         [Optimization] 增加 MD5 缓存机制 & 启发式搜索
@@ -192,22 +208,25 @@ class BrowserObserver:
                 target_text = match_req.group(1)
                 # 简单清洗
                 target_text = target_text.strip()
-                
+
                 # [V3 Fix] 检查是否有序号限定词（如"第一条"、"第二个"等），有则跳过启发式
-                ordinal_keywords = ["第一", "第二", "第三", "第1", "第2", "第3", "首个", "最后", "first", "second", "last"]
+                ordinal_keywords = ["第一", "第二", "第三", "第1", "第2",
+                                    "第3", "首个", "最后", "first", "second", "last"]
                 has_ordinal = any(kw in requirement for kw in ordinal_keywords)
-                
+
                 if len(target_text) > 1 and "dom_json" not in requirement and not has_ordinal:
                     # 统计目标文本在 DOM 中出现的次数
                     occurrence_count = dom_skeleton.count(f'"{target_text}"')
-                    
+
                     if occurrence_count == 1:
                         # 唯一出现，可以安全使用启发式匹配
-                        print(f"⚡ [Observer] Heuristic Hit! Found unique text '{target_text}' in DOM.")
+                        print(
+                            f"⚡ [Observer] Heuristic Hit! Found unique text '{target_text}' in DOM.")
                         return {"locator": f"text={target_text}", "reason": "Heuristic Match (Unique)"}
                     elif occurrence_count > 1:
                         # 多次出现，需要 LLM 分析来选择正确的元素
-                        print(f"🔍 [Observer] Text '{target_text}' appears {occurrence_count} times, using LLM analysis...")
+                        print(
+                            f"🔍 [Observer] Text '{target_text}' appears {occurrence_count} times, using LLM analysis...")
         except Exception as e:
             pass
 
@@ -216,41 +235,46 @@ class BrowserObserver:
             # 计算 Hash (Include previous_steps in hash to distinguish context)
             context_str = f"{dom_skeleton}|{requirement}|{str(previous_steps)}"
             current_hash = hashlib.md5(context_str.encode('utf-8')).hexdigest()
-            
+
             # 检查缓存: 如果 DOM Hash 一致，且缓存中有有效结果，直接返回
             if self._dom_cache["hash"] == current_hash and self._dom_cache["analysis"]:
-                print(f"⏩ [Observer] DOM Cache Hit! ({current_hash[:8]}) - Skipping LLM Analysis")
+                print(
+                    f"⏩ [Observer] DOM Cache Hit! ({current_hash[:8]}) - Skipping LLM Analysis")
                 return self._dom_cache["analysis"]
-                
+
         except Exception as e:
             print(f"⚠️ Cache Check Failed: {e}")
 
         # Formatted previous steps
-        prev_steps_str = "\n".join([f"- {s}" for s in previous_steps]) if previous_steps else "(无 - 初始状态)"
+        prev_steps_str = "\n".join(
+            [f"- {s}" for s in previous_steps]) if previous_steps else "(无 - 初始状态)"
 
         # Cache Miss - Call LLM
         prompt = DRISSION_LOCATOR_PROMPT.format(
             requirement=requirement,
+            current_url=current_url,  # [V6] 添加当前 URL 用于页面类型判断
             previous_steps=prev_steps_str,
-            dom_json=dom_skeleton[:50000] # 防止 Token 溢出
+            dom_json=dom_skeleton[:50000]  # 防止 Token 溢出
         )
-        
+
         response = self.llm.invoke(prompt)
         strategy = self._parse_json_safely(response.content)
-        
+
         # Update Cache
         try:
             self._dom_cache["hash"] = current_hash
             self._dom_cache["analysis"] = strategy
-        except: pass
-        
+        except:
+            pass
+
         if isinstance(strategy, dict):
             print(f"🧠 [Observer] 定位策略生成: {strategy.get('locator', 'N/A')}")
         elif isinstance(strategy, list) and len(strategy) > 0:
-            print(f"🧠 [Observer] 定位策略生成 (List): {len(strategy)} items, First: {strategy[0].get('locator', 'N/A')}")
+            print(
+                f"🧠 [Observer] 定位策略生成 (List): {len(strategy)} items, First: {strategy[0].get('locator', 'N/A')}")
         else:
             print(f"🧠 [Observer] 定位策略生成: {strategy}")
-            
+
         return strategy
 
     def extract_structured_data(self, html_snippet: str, schema_desc: str) -> Dict:
