@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 from config import (
     MODEL_NAME, OPENAI_API_KEY, OPENAI_BASE_URL
 )
-from prompts.rag_prompt import RAG_PROMPT
+from prompts.rag_prompts import RAG_PROMPT, QUERY_ANALYZE_PROMPT
 
 # 定义元数据过滤的 Schema
 class MetadataFilter(BaseModel):
@@ -79,7 +79,7 @@ class QueryAnalyzer:
         print(f"🕵️ Analyzing query: {question}")
         try:
             # 1. 调用 LLM 提取元数据
-            prompt_text = QUERY_ANALYZER_PROMPT.format(question=question)
+            prompt_text = QUERY_ANALYZE_PROMPT.format(question=question)
             filter_params: MetadataFilter = self.structured_llm.invoke(prompt_text)
             
             print(f"   📋 Raw Intent: {filter_params.model_dump(exclude_none=True)}")

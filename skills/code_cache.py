@@ -323,15 +323,10 @@ DOM:
         """
         # ========== 同步过滤（轻量级，立即执行）==========
 
-        # 过滤1: 代码长度检查（放在导航检查前）
-        if not code or len(code) < 50:
-            print("⚠️ [CodeCache] Code too short, skip caching.")
-            return
-
-        # 过滤2: 跳过纯导航类代码（短代码 + 只有 tab.get）
+        # 过滤: 跳过纯导航类代码（短代码 + 只有 tab.get）
         if self._is_navigation_task(goal, code):
             print(f"⏭️ [CodeCache] 跳过纯导航代码 ({len(code)} chars)")
-            return
+            return False
 
         # 超长代码警告
         if len(code) > self.MAX_CODE_WARN:
@@ -341,6 +336,7 @@ DOM:
         print(f"📤 [CodeCache] 提交后台存储任务 (code: {len(code)} chars)")
         self._executor.submit(self._do_save_async, goal,
                               dom_skeleton, url, code)
+        return True
 
     def update_stats(self, cache_id: str, success: bool) -> bool:
         """
