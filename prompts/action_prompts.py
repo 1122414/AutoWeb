@@ -21,8 +21,6 @@ ACTION_CODE_GEN_PROMPT = """
 | 工具 | 用途 | 调用示例 |
 |------|------|---------|
 | `toolbox.save_data(data, filename)` | **保存数据到文件** (JSON/CSV) | `toolbox.save_data(results, "data/movies.json")` |
-| `toolbox.save_to_kb(data, source)` | **存入向量知识库** (Milvus) | `toolbox.save_to_kb(results, "douban_movies")` |
-| `toolbox.flush_kb()` | **刷新知识库缓冲区** | `toolbox.flush_kb()` |
 | `toolbox.http_request(url)` | **发送 HTTP 请求** (绕过浏览器) | `html = toolbox.http_request("https://api.example.com/data")` |
 | `toolbox.download_file(url, path)` | **下载文件** (图片/PDF等) | `toolbox.download_file(img_url, "data/cover.jpg")` |
 | `toolbox.db_insert(table, data)` | **插入数据库** (SQLite) | `toolbox.db_insert("movies", {{"title": "xxx", "year": 2024}})` |
@@ -35,10 +33,17 @@ ACTION_CODE_GEN_PROMPT = """
 
 ## 🚨 工具使用铁律
 1. **爬取数据后必须保存**: 每当你采集到数据 (`results` 列表非空)，**必须调用 `toolbox.save_data(results, "output/xxx.json")`**！
-2. **存入知识库**: 如果用户明确要求"存入向量库/知识库/Milvus"，使用 `toolbox.save_to_kb(results, "source_name")`
-   - `data` 可以是 List[Dict]、Dict 或字符串
-   - `source` 是来源标识，如 "douban_movies"
-   - 批量存储完成后建议调用 `toolbox.flush_kb()` 确保数据落盘
+2. **数据结构化要求 (CRITICAL)**：采集到的数据**必须**是 **List[Dict]** 格式，且每条 Dict **应尽量包含以下字段**（有则填写，缺失则留空 `""`）：
+   - `title`: 标题/名称
+   - `category`: 分类 (如 "movie", "guide", "article")
+   - `platform`: 来源平台 (如 "douban", "ctrip")
+   - `text` 或 `content`: 主要文本内容
+   - 其他爬取到的字段也一并写入（如 rating, director, year, price 等）
+   - ⚠️ **禁止**将所有内容拼成一个大字符串！必须保留字段结构！
+   - **示例**：
+     ```
+     results.append({{"title": title, "category": "movie", "platform": "douban", "text": detail_text, "rating": rating}})
+     ```
 3. **尊重用户格式偏好**: 
    - 用户说"保存为CSV" → 使用 `toolbox.save_data(results, "output/data.csv")`
    - 用户说"保存为JSON" → 使用 `toolbox.save_data(results, "output/data.json")`

@@ -189,10 +189,10 @@ DOM:
 
             if hits:
                 print(
-                    f"   ✅ Found {len(hits)} cache hits (best score: {hits[0].score:.4f})")
+                    f"✅ Found {len(hits)} cache hits (best score: {hits[0].score:.4f})")
             else:
                 print(
-                    f"   ❌ No cache hit above threshold ({self.SIMILARITY_THRESHOLD})")
+                    f"❌ No cache hit above threshold ({self.SIMILARITY_THRESHOLD})")
 
             return hits
 

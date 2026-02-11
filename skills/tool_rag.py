@@ -63,22 +63,65 @@ class KnowledgeBaseManager:
         if self._embeddings is None:
             print("🔌 [KnowledgeBaseManager] 建立 Embedding 和 Milvus 连接...")
             try:
-                from langchain_milvus import Milvus
                 from rag.retriever_qa import get_embedding_model
-                from config import MILVUS_URI, KNOWLEDGE_COLLECTION_NAME
+                from rag.milvus_schema import get_vector_store
 
                 self._embeddings = get_embedding_model()
-                self._vector_store = Milvus(
-                    embedding_function=self._embeddings,
-                    connection_args={"uri": MILVUS_URI},
-                    collection_name=KNOWLEDGE_COLLECTION_NAME,
-                    consistency_level="Bounded",
-                    auto_id=True,
-                )
-                print("   ✅ 连接建立成功")
+                self._vector_store = get_vector_store(self._embeddings)
+                print("   ✅ 连接建立成功（Schema 已验证）")
             except Exception as e:
                 print(f"   ❌ 连接失败: {e}")
                 raise
+
+    # 高频字段名列表（与 milvus_schema.py 中的固定字段保持一致）
+    HIGH_FREQ_FIELDS = ["source", "title", "category",
+                        "data_type", "platform", "crawled_at"]
+
+    def _extract_metadata(self, item: Dict, source: str) -> Dict:
+        """
+        从字典数据中提取 metadata
+
+        高频字段放入对应 key，其他字段也放入 metadata（动态字段），
+        自动注入 crawled_at 时间戳。
+        """
+        from datetime import datetime
+        metadata = {}
+
+        # 注入高频字段（有则取值，无则留空让 Schema 默认值处理）
+        metadata["source"] = item.get("source", source)
+        metadata["title"] = item.get("title", item.get("name", ""))
+        metadata["category"] = item.get("category", item.get("type", ""))
+        metadata["data_type"] = item.get("data_type", "crawled")
+        metadata["platform"] = item.get("platform", "")
+        metadata["crawled_at"] = item.get(
+            "crawled_at", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+
+        # 其他字段也放入 metadata（利用 Milvus 动态字段）
+        for key, value in item.items():
+            if key not in self.HIGH_FREQ_FIELDS and key not in ("text", "content", "page_content"):
+                # 只存标量值，跳过嵌套结构
+                if isinstance(value, (str, int, float, bool)):
+                    metadata[key] = value
+
+        return metadata
+
+    def _get_text_content(self, item) -> str:
+        """
+        从数据中提取 page_content 文本
+
+        优先级：text > content > page_content > JSON 序列化
+        """
+        import json
+        if isinstance(item, str):
+            return item
+        if isinstance(item, dict):
+            # 优先取专用文本字段
+            for key in ("text", "content", "page_content", "description", "summary"):
+                if key in item and item[key]:
+                    return str(item[key])
+            # 没有专用字段，序列化整个 dict
+            return json.dumps(item, ensure_ascii=False, indent=2)
+        return str(item)
 
     def add(self, content: Union[str, Dict, List], source: str = "auto_crawl") -> bool:
         """
@@ -92,45 +135,59 @@ class KnowledgeBaseManager:
             bool: 是否成功加入缓冲
         """
         from langchain_core.documents import Document
+        from rag.field_registry import register_fields
+        from datetime import datetime
 
         try:
-            # 统一转换为文本列表
-            texts = []
+            # 统一转换为列表
+            items = []
             if isinstance(content, str):
-                texts = [content]
+                items = [content]
             elif isinstance(content, dict):
-                # 字典转为 JSON 字符串或拼接值
-                import json
-                texts = [json.dumps(content, ensure_ascii=False, indent=2)]
+                items = [content]
             elif isinstance(content, list):
-                for item in content:
-                    if isinstance(item, str):
-                        texts.append(item)
-                    elif isinstance(item, dict):
-                        import json
-                        texts.append(json.dumps(
-                            item, ensure_ascii=False, indent=2))
+                items = content
 
-            # 过滤空内容和过长内容
             docs = []
-            for text in texts:
+            all_field_names = set()
+
+            for item in items:
+                # 提取文本（内容）
+                text = self._get_text_content(item)
                 if len(text) < 10:
                     continue
                 if len(text) > self.MAX_CONTENT_LENGTH:
                     text = text[:self.MAX_CONTENT_LENGTH] + "...[截断]"
-                docs.append(Document(
-                    page_content=text,
-                    metadata={"source": source, "type": "crawled"}
-                ))
+
+                # 构建 metadata
+                if isinstance(item, dict):
+                    metadata = self._extract_metadata(item, source)
+                    all_field_names.update(metadata.keys())
+                else:
+                    metadata = {
+                        "source": source,
+                        "title": "",
+                        "category": "",
+                        "data_type": "crawled",
+                        "platform": "",
+                        "crawled_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    }
+
+                docs.append(Document(page_content=text, metadata=metadata))
 
             if not docs:
                 return False
+
+            # 注册字段到注册表
+            if all_field_names:
+                register_fields(list(all_field_names))
 
             with self.lock:
                 self.buffer.extend(docs)
                 buffer_size = len(self.buffer)
 
-            print(f"📥 [KB] 已加入缓冲 ({buffer_size} 条待写入)")
+            print(
+                f"📥 [KB] 已加入缓冲 ({buffer_size} 条待写入, 字段: {len(all_field_names)} 个)")
 
             # 达到阈值自动刷新
             if buffer_size >= self.BUFFER_THRESHOLD:

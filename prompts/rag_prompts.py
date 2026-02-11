@@ -51,34 +51,39 @@ QUERY_ANALYZE_PROMPT = """分析用户问题，提取关键信息用于过滤检
 """
 
 QUERY_ANALYZER_PROMPT = """
-你是一个精准的搜索意图识别专家。请将用户的自然语言转化为结构化的数据库查询条件。
+你是一个精准的数据库查询构建专家。请根据用户问题，构建 Milvus 数据库的过滤表达式 (expr)。
 
-【核心任务】
-你需要区分用户意图中的 **"大类范畴" (Category)** 和 **"具体检索词" (Object)**。
+【当前知识库中可用的过滤字段】
+{available_fields}
 
-【提取逻辑】
-1. **Category**: 识别用户限定的领域（如电影、书、攻略）。
-2. **Object**: 识别用户想要匹配的具体标题关键词或实体名。
-   - ⚠️ 注意：不要把 Category 的词重复提取到 Object 中。
+【构建规则】
+1. **只能使用上面列出的字段名**，严禁编造不存在的字段
+2. 字符串模糊匹配用 `like '%关键词%'`，精确匹配用 `==`
+3. 多条件用 `and` 连接
+4. 如果用户问题没有明确的过滤条件，返回空字符串
+5. 不要把"大类范畴"和"具体检索词"搞混：
+   - "电影" → category 过滤
+   - "肖申克的救赎" → title 过滤
 
-【少样本示例 (Few-Shot Examples)】
+【少样本示例】
 --------------------------------------------------
 User: "查询包含有'王'字的电影"
-Expected: {{"category": "电影", "object": "王", "platform": null}}
-(分析: "电影"是分类，"王"是具体的标题过滤词。)
+Expected: {{"expr": "category == 'movie' and title like '%王%'", "search_query": "王 电影"}}
 
 User: "搜索肖申克的救赎"
-Expected: {{"category": null, "object": "肖申克的救赎", "platform": null}}
-(分析: 没有明确说是电影还是书，Category 为空，直接搜名称。)
-
-User: "给我看下所有的动作片"
-Expected: {{"category": "电影", "object": "动作", "platform": null}}
-(分析: "动作"是具体的流派标签，这里作为 Object 或 Tag 处理，视具体业务而定。如果作为标题关键词，提取为 Object。)
+Expected: {{"expr": "title like '%肖申克的救赎%'", "search_query": "肖申克的救赎"}}
 
 User: "找一下携程上关于日本的攻略"
-Expected: {{"category": "攻略", "object": "日本", "platform": "ctrip"}}
+Expected: {{"expr": "category == '攻略' and platform like '%携程%'", "search_query": "日本 攻略"}}
+
+User: "给我看下所有的动作片"
+Expected: {{"expr": "category == 'movie'", "search_query": "动作片"}}
+
+User: "最近爬取的数据有哪些"
+Expected: {{"expr": "", "search_query": "最近爬取的数据"}}
 --------------------------------------------------
 
 User Query: {question}
-请基于以上逻辑，严格按照 JSON 格式输出结果。
+
+请严格按照 JSON 格式输出：{{"expr": "过滤表达式或空字符串", "search_query": "优化后的向量检索查询"}}
 """
