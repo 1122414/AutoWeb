@@ -391,7 +391,8 @@ def observer_node(state: AgentState, config: RunnableConfig, observer) -> Comman
                 if DOM_CACHE_ENABLED:
                     from skills.dom_cache import dom_cache_manager
                     dom_cache_manager.invalidate(dom_cache_hit_id)
-                    logger.info(f"   🗑️ [DomCache] 已失效失败缓存: {dom_cache_hit_id}")
+                    logger.info(
+                        f"   🗑️ [DomCache] 已失效失败缓存: {dom_cache_hit_id}")
             except Exception as e:
                 logger.info(f"   ⚠️ [DomCache] 失效失败缓存异常: {e}")
 
@@ -770,6 +771,10 @@ def planner_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lite
         reflection_str = "\n⚠️ **之前的失败教训 (请在规划时重点规避)**:\n" + \
             "\n".join([f"- {r}" for r in reflections])
 
+    verification = state.get("verification_result", {})
+    last_verification = verification.get(
+        "summary", "(无)") if verification else "(无)"
+
     finished_steps_str = "\n".join(
         [f"- {s}" for s in finished_steps]) if finished_steps else "(无)"
 
@@ -779,7 +784,8 @@ def planner_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lite
         current_url=current_url,
         finished_steps_str=finished_steps_str,
         suggestions_str=suggestions_str,
-        reflection_str=reflection_str
+        reflection_str=reflection_str,
+        last_verification=last_verification
     )
     response = llm.invoke([HumanMessage(content=prompt)])
     content = response.content
