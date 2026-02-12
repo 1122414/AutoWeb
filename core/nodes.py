@@ -425,26 +425,25 @@ def observer_node(state: AgentState, config: RunnableConfig, observer) -> Comman
                     "url": current_url,
                     "strategies": dom_cache_hit.locator_suggestions,
                 }
-                should_analyze = False
-            elif has_failure and current_dom_hash == previous_dom_hash:
-                logger.info(f"   🔄 [Observer] 检测到失败记录，强制重新分析 DOM...")
-                # 清空之前可能错误的策略
-                accumulated_strategies = []
-            logger.info(
-                f"   -> 正在进行视觉定位分析 (Context: {len(finished_steps)} finished steps)...")
-            locator_suggestions = observer.analyze_locator_strategy(
-                dom, task, current_url, previous_steps=finished_steps)
+                logger.info("   ⏭️ [Observer] DomCache 命中，跳过视觉定位分析")
+            else:
+                if has_failure and current_dom_hash == previous_dom_hash:
+                    logger.info(f"   🔄 [Observer] 检测到失败记录，强制重新分析 DOM...")
+                logger.info(
+                    f"   -> 正在进行视觉定位分析 (Context: {len(finished_steps)} finished steps)...")
+                locator_suggestions = observer.analyze_locator_strategy(
+                    dom, task, current_url, previous_steps=finished_steps)
 
-            if isinstance(locator_suggestions, dict):
-                locator_suggestions = [locator_suggestions]
+                if isinstance(locator_suggestions, dict):
+                    locator_suggestions = [locator_suggestions]
 
-            page_context = finished_steps[-1] if finished_steps else "初始页面"
-            new_strategy_entry = {
-                "page_context": page_context,
-                "url": current_url,
-                "strategies": locator_suggestions
-            }
-            logger.info(f"   -> 新增策略条目: {page_context[:30]}...")
+                page_context = finished_steps[-1] if finished_steps else "初始页面"
+                new_strategy_entry = {
+                    "page_context": page_context,
+                    "url": current_url,
+                    "strategies": locator_suggestions
+                }
+                logger.info(f"   -> 新增策略条目: {page_context[:30]}...")
         else:
             logger.info("   -> 页面无变化，复用历史策略 (Skipping Observer Analysis)...")
 

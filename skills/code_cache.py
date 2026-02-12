@@ -21,7 +21,6 @@ from pymilvus import (
     DataType,
     FieldSchema,
     WeightedRanker,
-    connections,
     utility,
 )
 
@@ -32,6 +31,13 @@ from config import (
     CODE_CACHE_WEIGHT_URL,
     CODE_CACHE_WEIGHT_USER_TASK,
     MILVUS_URI,
+)
+from skills.vector_gateway import (
+    connect_milvus,
+    hybrid_search,
+    insert_and_flush,
+    normalize_weights,
+    read_hit_field,
 )
 
 
@@ -93,29 +99,19 @@ class CodeCacheManager:
         self._collection: Optional[Collection] = None
         self._embeddings = None
         self._vector_dim: Optional[int] = None
-        self._weights = self._normalize_weights(
+        self._weights = normalize_weights(
             (
                 CODE_CACHE_WEIGHT_GOAL,
                 CODE_CACHE_WEIGHT_LOCATOR,
                 CODE_CACHE_WEIGHT_USER_TASK,
                 CODE_CACHE_WEIGHT_URL,
-            )
+            ),
+            defaults=(0.6, 0.2, 0.1, 0.1),
+            tag="CodeCache",
         )
         self._executor = ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="CodeCache")
         atexit.register(self._shutdown)
-
-    def _normalize_weights(self, weights: Tuple[float, float, float, float]) -> Tuple[float, float, float, float]:
-        safe = [max(0.0, float(w)) for w in weights]
-        total = sum(safe)
-        if total <= 0:
-            return (0.6, 0.2, 0.1, 0.1)
-        if abs(total - 1.0) > 1e-6:
-            print(
-                f"⚠️ [CodeCache] Weight sum is {total:.4f}, auto-normalizing "
-                "(goal/locator/user_task/url)."
-            )
-        return tuple(w / total for w in safe)  # type: ignore[return-value]
 
     def _get_embeddings(self):
         if self._embeddings is None:
@@ -129,13 +125,6 @@ class CodeCacheManager:
             vec = self._get_embeddings().embed_query("code_cache_dimension_probe")
             self._vector_dim = len(vec)
         return self._vector_dim
-
-    def _parse_milvus_uri(self) -> Tuple[str, str]:
-        raw = (MILVUS_URI or "").strip()
-        parsed = urlparse(raw if "://" in raw else f"http://{raw}")
-        host = parsed.hostname or "localhost"
-        port = str(parsed.port or 19530)
-        return host, port
 
     def _schema_fields(self, dim: int) -> List[FieldSchema]:
         return [
@@ -220,8 +209,7 @@ class CodeCacheManager:
         if self._collection is not None:
             return self._collection
 
-        host, port = self._parse_milvus_uri()
-        connections.connect(alias="default", host=host, port=port)
+        connect_milvus(MILVUS_URI, alias="default", tag="CodeCache")
 
         dim = self._get_vector_dim()
         if utility.has_collection(CODE_CACHE_COLLECTION):
@@ -231,6 +219,7 @@ class CodeCacheManager:
                     f"⚠️ [CodeCache] Found incompatible schema in '{CODE_CACHE_COLLECTION}', "
                     "dropping and recreating."
                 )
+                # 自动版本/结构兼容性校验
                 utility.drop_collection(CODE_CACHE_COLLECTION)
                 current = self._create_collection(dim)
             else:
@@ -324,12 +313,14 @@ class CodeCacheManager:
             requests = self._build_ann_requests(vectors, limit=ann_limit)
             ranker = WeightedRanker(*self._weights)
 
-            search_res = collection.hybrid_search(
+            search_res = hybrid_search(
+                collection=collection,
                 reqs=requests,
                 rerank=ranker,
                 limit=top_k,
                 output_fields=["cache_id", "code", "url_pattern",
                                "goal", "success_count", "user_task"],
+                tag="CodeCache",
             )
 
             raw_hits = search_res[0] if search_res else []
@@ -341,21 +332,14 @@ class CodeCacheManager:
                 if sim < self.SIMILARITY_THRESHOLD:
                     continue
 
-                metadata = {}
-                for field in ("cache_id", "code", "url_pattern", "goal", "success_count", "user_task"):
-                    value = None
-                    try:
-                        # pymilvus Hit supports get in most versions
-                        value = item.get(field)
-                    except Exception:
-                        pass
-                    if value is None and hasattr(item, "entity") and item.entity is not None:
-                        try:
-                            value = item.entity.get(field)
-                        except Exception:
-                            pass
-                    if value is not None:
-                        metadata[field] = value
+                metadata = {
+                    "cache_id": read_hit_field(item, "cache_id"),
+                    "code": read_hit_field(item, "code"),
+                    "url_pattern": read_hit_field(item, "url_pattern"),
+                    "goal": read_hit_field(item, "goal"),
+                    "success_count": read_hit_field(item, "success_count"),
+                    "user_task": read_hit_field(item, "user_task"),
+                }
 
                 hits.append(
                     CacheHit(
@@ -443,26 +427,25 @@ class CodeCacheManager:
                 url_pattern=url_pattern,
             )
 
-            collection.insert(
-                [
-                    [vectors["goal_vector"]],
-                    [vectors["locator_vector"]],
-                    [vectors["user_task_vector"]],
-                    [vectors["url_vector"]],
-                    [(goal or "")[:2000]],
-                    [(locator_info or "")[:6400]],
-                    [(user_task or "")[:6400]],
-                    [url_pattern[:512]],
-                    [(code or "")[:16000]],
-                    [cache_id],
-                    [dom_hash],
-                    [1],
-                    [0],
-                    [now],
-                    [now],
-                ]
-            )
-            collection.flush()
+            payload = [
+                [vectors["goal_vector"]],
+                [vectors["locator_vector"]],
+                [vectors["user_task_vector"]],
+                [vectors["url_vector"]],
+                [(goal or "")[:2000]],
+                [(locator_info or "")[:6400]],
+                [(user_task or "")[:6400]],
+                [url_pattern[:512]],
+                [(code or "")[:16000]],
+                [cache_id],
+                [dom_hash],
+                [1],
+                [0],
+                [now],
+                [now],
+            ]
+            insert_and_flush(collection=collection,
+                             data=payload, tag="CodeCache")
             print(f"   ✅ [CodeCache] Saved: {cache_id}")
         except Exception as exc:
             print(f"❌ [CodeCache] Background save failed: {exc}")

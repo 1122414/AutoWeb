@@ -63,9 +63,13 @@ class KnowledgeBaseManager:
         if self._embeddings is None:
             print("🔌 [KnowledgeBaseManager] 建立 Embedding 和 Milvus 连接...")
             try:
+                from config import MILVUS_URI
                 from rag.retriever_qa import get_embedding_model
                 from rag.milvus_schema import get_vector_store
+                from skills.vector_gateway import connect_milvus
 
+                connect_milvus(MILVUS_URI, alias="default",
+                               tag="KnowledgeBaseManager")
                 self._embeddings = get_embedding_model()
                 self._vector_store = get_vector_store(self._embeddings)
                 print("   ✅ 连接建立成功（Schema 已验证）")
@@ -225,8 +229,9 @@ class KnowledgeBaseManager:
     def _save_batch(self, docs: List) -> bool:
         """批量写入（在线程池中执行）"""
         try:
+            from skills.vector_gateway import add_documents
             self._ensure_connection()
-            self._vector_store.add_documents(docs)
+            add_documents(self._vector_store, docs, tag="KnowledgeBaseManager")
             print(f"   ✅ [KB] 成功写入 {len(docs)} 条数据")
             return True
         except Exception as e:

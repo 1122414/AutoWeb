@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 from typing import Dict, List, NamedTuple, Optional, Tuple
 from urllib.parse import urlparse
 
+import numpy as np
 from pymilvus import (
     AnnSearchRequest,
     Collection,
@@ -14,7 +15,6 @@ from pymilvus import (
     DataType,
     FieldSchema,
     WeightedRanker,
-    connections,
     utility,
 )
 
@@ -26,6 +26,14 @@ from config import (
     DOM_CACHE_WEIGHT_TASK,
     DOM_CACHE_WEIGHT_URL,
     MILVUS_URI,
+)
+from skills.vector_gateway import (
+    connect_milvus,
+    filter_not_expired,
+    hybrid_search,
+    insert_and_flush,
+    normalize_weights,
+    read_hit_field,
 )
 
 
@@ -47,22 +55,15 @@ class DomCacheManager:
         self._embeddings = None
         self._vector_dim: Optional[int] = None
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="DomCache")
-        self._weights = self._normalize_weights(
-            (DOM_CACHE_WEIGHT_URL, DOM_CACHE_WEIGHT_DOM, DOM_CACHE_WEIGHT_TASK)
+        self._weights = normalize_weights(
+            (DOM_CACHE_WEIGHT_URL, DOM_CACHE_WEIGHT_DOM, DOM_CACHE_WEIGHT_TASK),
+            defaults=(0.2, 0.7, 0.1),
+            tag="DomCache",
         )
         atexit.register(self._shutdown)
 
     def _shutdown(self):
         self._executor.shutdown(wait=True)
-
-    def _normalize_weights(self, weights: Tuple[float, float, float]) -> Tuple[float, float, float]:
-        safe = [max(0.0, float(w)) for w in weights]
-        total = sum(safe)
-        if total <= 0:
-            return (0.2, 0.7, 0.1)
-        if abs(total - 1.0) > 1e-6:
-            print(f"⚠️ [DomCache] Weight sum={total:.4f}, auto-normalized")
-        return tuple(w / total for w in safe)  # type: ignore[return-value]
 
     def _get_embeddings(self):
         if self._embeddings is None:
@@ -76,13 +77,6 @@ class DomCacheManager:
             vec = self._get_embeddings().embed_query("dom_cache_dim_probe")
             self._vector_dim = len(vec)
         return self._vector_dim
-
-    def _parse_milvus_uri(self) -> Tuple[str, str]:
-        raw = (MILVUS_URI or "").strip()
-        parsed = urlparse(raw if "://" in raw else f"http://{raw}")
-        host = parsed.hostname or "localhost"
-        port = str(parsed.port or 19530)
-        return host, port
 
     def _schema_fields(self, dim: int) -> List[FieldSchema]:
         return [
@@ -152,8 +146,7 @@ class DomCacheManager:
     def _ensure_collection(self) -> Collection:
         if self._collection is not None:
             return self._collection
-        host, port = self._parse_milvus_uri()
-        connections.connect(alias="default", host=host, port=port)
+        connect_milvus(MILVUS_URI, alias="default", tag="DomCache")
         dim = self._get_vector_dim()
 
         if utility.has_collection(DOM_CACHE_COLLECTION):
@@ -217,41 +210,15 @@ class DomCacheManager:
         except Exception:
             return []
 
-    def _is_not_expired(self, expire_at: str, now_dt: datetime) -> bool:
-        if not expire_at:
-            return False
-        try:
-            exp_dt = datetime.strptime(expire_at, "%Y-%m-%dT%H:%M:%S")
-            return exp_dt >= now_dt
-        except Exception:
-            return False
-
-    def _read_hit_field(self, hit, field: str):
-        value = None
-        try:
-            value = hit.get(field)
-        except Exception:
-            pass
-        if value is None and hasattr(hit, "entity") and hit.entity is not None:
-            try:
-                value = hit.entity.get(field)
-            except Exception:
-                pass
-        return value
-
     def _cosine_similarity(self, a: List[float], b: List[float]) -> float:
         if not a or not b or len(a) != len(b):
             return 0.0
-        dot = 0.0
-        norm_a = 0.0
-        norm_b = 0.0
-        for x, y in zip(a, b):
-            dot += x * y
-            norm_a += x * x
-            norm_b += y * y
-        if norm_a <= 0.0 or norm_b <= 0.0:
+        va = np.asarray(a, dtype=np.float32)
+        vb = np.asarray(b, dtype=np.float32)
+        denom = float(np.linalg.norm(va) * np.linalg.norm(vb))
+        if denom <= 0.0:
             return 0.0
-        return dot / ((norm_a ** 0.5) * (norm_b ** 0.5))
+        return float(np.dot(va, vb) / denom)
 
     def search(
         self,
@@ -269,7 +236,8 @@ class DomCacheManager:
 
             requests = self._build_requests(vectors, max(top_k, 8))
             ranker = WeightedRanker(*self._weights)
-            res = collection.hybrid_search(
+            res = hybrid_search(
+                collection=collection,
                 reqs=requests,
                 rerank=ranker,
                 limit=max(top_k, 8),
@@ -281,17 +249,21 @@ class DomCacheManager:
                     "locator_suggestions",
                     "expire_at",
                 ],
+                tag="DomCache",
             )
 
             hits = []
             query_task_vec = vectors["task_vector"]
-            for item in (res[0] if res else []):
+            raw_hits = filter_not_expired(
+                hits=(res[0] if res else []),
+                expire_field="expire_at",
+                now_dt=now_dt,
+                tag="DomCache",
+            )
+            for item in raw_hits:
                 score = float(getattr(item, "score", getattr(item, "distance", 0.0)))
-                locator_raw = self._read_hit_field(item, "locator_suggestions") or "[]"
-                expire_at = self._read_hit_field(item, "expire_at") or ""
-                if not self._is_not_expired(expire_at, now_dt):
-                    continue
-                hit_task_intent = (self._read_hit_field(item, "task_intent") or "").strip()
+                locator_raw = read_hit_field(item, "locator_suggestions") or "[]"
+                hit_task_intent = (read_hit_field(item, "task_intent") or "").strip()
                 # Hard gate: task intent similarity must pass threshold, even if hybrid score is high.
                 task_vec = self._get_embeddings().embed_query(hit_task_intent or "")
                 task_sim = self._cosine_similarity(query_task_vec, task_vec)
@@ -303,12 +275,12 @@ class DomCacheManager:
                     continue
                 hits.append(
                     DomCacheHit(
-                        id=(self._read_hit_field(item, "cache_id") or ""),
+                        id=(read_hit_field(item, "cache_id") or ""),
                         score=score,
                         locator_suggestions=self._decode_locator_suggestions(locator_raw),
-                        url_pattern=(self._read_hit_field(item, "url_pattern") or ""),
-                        dom_hash=(self._read_hit_field(item, "dom_hash") or ""),
-                        task_intent=(self._read_hit_field(item, "task_intent") or ""),
+                        url_pattern=(read_hit_field(item, "url_pattern") or ""),
+                        dom_hash=(read_hit_field(item, "dom_hash") or ""),
+                        task_intent=(read_hit_field(item, "task_intent") or ""),
                     )
                 )
             return hits[:top_k]
@@ -341,24 +313,22 @@ class DomCacheManager:
             # url_vector, dom_vector, task_vector, cache_id, url_pattern, task_intent,
             # dom_hash, locator_suggestions, created_at, updated_at, expire_at, hit_count, fail_count
             # 其中 created_at/updated_at 初始都用 now_iso；hit_count/fail_count 初始都为 0。
-            collection.insert(
-                [
-                    [vectors["url_vector"]],
-                    [vectors["dom_vector"]],
-                    [vectors["task_vector"]],
-                    [cache_id],
-                    [url_pattern[:512]],
-                    [task_intent[:2000]],
-                    [dom_hash],
-                    [json.dumps(locator_suggestions, ensure_ascii=False)[:65535]],
-                    [now_iso],
-                    [now_iso],
-                    [exp_iso],
-                    [0],
-                    [0],
-                ]
-            )
-            collection.flush()
+            payload = [
+                [vectors["url_vector"]],
+                [vectors["dom_vector"]],
+                [vectors["task_vector"]],
+                [cache_id],
+                [url_pattern[:512]],
+                [task_intent[:2000]],
+                [dom_hash],
+                [json.dumps(locator_suggestions, ensure_ascii=False)[:65535]],
+                [now_iso],
+                [now_iso],
+                [exp_iso],
+                [0],
+                [0],
+            ]
+            insert_and_flush(collection=collection, data=payload, tag="DomCache")
             print(
                 f"✅ [DomCache] Saved cache_id={cache_id}, url={url_pattern}, "
                 f"ttl_hours={max(1, DOM_CACHE_TTL_HOURS)}"

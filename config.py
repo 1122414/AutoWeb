@@ -138,3 +138,20 @@ CODE_CACHE_WEIGHT_LOCATOR = float(
 CODE_CACHE_WEIGHT_USER_TASK = float(
     os.getenv("CODE_CACHE_WEIGHT_USER_TASK", "0.1"))
 CODE_CACHE_WEIGHT_URL = float(os.getenv("CODE_CACHE_WEIGHT_URL", "0.1"))
+
+# ==============================================================================
+# [V7] DOM 缓存配置 (Milvus Hybrid Search)
+# ==============================================================================
+DOM_CACHE_ENABLED = os.getenv("DOM_CACHE_ENABLED", "True").lower() == "true"
+DOM_CACHE_COLLECTION = os.getenv("DOM_CACHE_COLLECTION", "dom_cache")
+DOM_CACHE_THRESHOLD = float(os.getenv("DOM_CACHE_THRESHOLD", "0.9"))
+DOM_CACHE_TOP_K = int(os.getenv("DOM_CACHE_TOP_K", "3"))
+DOM_CACHE_TTL_HOURS = int(os.getenv("DOM_CACHE_TTL_HOURS", f"{24 * 7}"))
+DOM_CACHE_TASK_MIN_SIM = float(os.getenv("DOM_CACHE_TASK_MIN_SIM", "0.8"))
+DOM_CACHE_REQUIRE_URL_MATCH = os.getenv(
+    "DOM_CACHE_REQUIRE_URL_MATCH", "True").lower() == "true"
+
+# DOM Cache 融合权重 (url + dom + task)
+DOM_CACHE_WEIGHT_URL = float(os.getenv("DOM_CACHE_WEIGHT_URL", "0.2"))
+DOM_CACHE_WEIGHT_DOM = float(os.getenv("DOM_CACHE_WEIGHT_DOM", "0.5"))
+DOM_CACHE_WEIGHT_TASK = float(os.getenv("DOM_CACHE_WEIGHT_TASK", "0.3"))

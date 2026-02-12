@@ -8,10 +8,11 @@ Milvus Collection Schema 管理
 """
 from config import MILVUS_URI, KNOWLEDGE_COLLECTION_NAME
 from pymilvus import (
-    connections, utility, Collection,
+    utility, Collection,
     CollectionSchema, FieldSchema, DataType,
     MilvusException
 )
+from skills.vector_gateway import connect_milvus
 import os
 import sys
 
@@ -85,15 +86,6 @@ def _create_scalar_indexes(collection: Collection):
                 print(f"   ⚠️ 标量索引创建失败 ({field_name}): {e}")
 
 
-def _parse_milvus_uri(uri: str):
-    """从 MILVUS_URI 中解析 host 和 port"""
-    uri = uri.replace("http://", "").replace("https://", "")
-    parts = uri.split(":")
-    host = parts[0]
-    port = int(parts[1]) if len(parts) > 1 else 19530
-    return host, port
-
-
 def ensure_collection(embeddings) -> Collection:
     """
     确保 collection 存在且 Schema 正确。
@@ -107,11 +99,9 @@ def ensure_collection(embeddings) -> Collection:
     Returns:
         pymilvus.Collection 实例
     """
-    host, port = _parse_milvus_uri(MILVUS_URI)
-
-    # 连接 Milvus
+    # 连接 Milvus（统一走 vector_gateway）
     try:
-        connections.connect(alias="default", host=host, port=port)
+        connect_milvus(MILVUS_URI, alias="default", tag="RAGSchema")
     except MilvusException:
         pass  # 可能已连接
 
