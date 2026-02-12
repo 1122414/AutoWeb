@@ -13,8 +13,13 @@ from core.graph_v2 import build_graph
 from langgraph.checkpoint.memory import MemorySaver
 
 # 导入配置和依赖
-from config import MODEL_NAME, OPENAI_API_KEY, OPENAI_BASE_URL
-from langchain_openai import ChatOpenAI
+from config import (
+    MODEL_NAME, OPENAI_API_KEY, OPENAI_BASE_URL,
+    CODER_MODEL_NAME, CODER_API_KEY, CODER_BASE_URL,
+    PLANNER_MODEL_NAME, PLANNER_API_KEY, PLANNER_BASE_URL,
+    VERIFIER_MODEL_NAME, VERIFIER_API_KEY, VERIFIER_BASE_URL,
+)
+from core.llm_factory import create_llm
 from skills.observer import BrowserObserver
 
 # 加载环境变量
@@ -27,22 +32,32 @@ def setup_agent():
     browser_instance = BrowserDriver.get_browser()
 
     print(">>> 正在初始化 LLM 和 Observer...")
-    # 依赖注入：创建共享组件
-    llm = ChatOpenAI(
-        model=MODEL_NAME,
-        temperature=0,
-        openai_api_key=OPENAI_API_KEY,
-        openai_api_base=OPENAI_BASE_URL,
-        streaming=True
-    )
+    # 依赖注入：为各节点创建独立 LLM（相同配置会自动复用同一实例）
+    llm = create_llm(MODEL_NAME, OPENAI_API_KEY, OPENAI_BASE_URL)
+    coder_llm = create_llm(CODER_MODEL_NAME, CODER_API_KEY, CODER_BASE_URL)
+    planner_llm = create_llm(
+        PLANNER_MODEL_NAME, PLANNER_API_KEY, PLANNER_BASE_URL)
+    verifier_llm = create_llm(
+        VERIFIER_MODEL_NAME, VERIFIER_API_KEY, VERIFIER_BASE_URL)
+
     observer = BrowserObserver()
 
     print(">>> 正在构建 AutoWeb V2 大脑 (LangGraph)...")
     memory = MemorySaver()
-    # 依赖注入：在构建图时通过 partial 绑定 LLM 和 Observer
-    app = build_graph(checkpointer=memory, llm=llm, observer=observer)
+    # 依赖注入：在构建图时通过 partial 绑定各节点独立 LLM
+    app = build_graph(
+        checkpointer=memory, llm=llm, observer=observer,
+        coder_llm=coder_llm, planner_llm=planner_llm, verifier_llm=verifier_llm
+    )
 
-    print(f">>> 系统就绪 (Model: {MODEL_NAME})")
+    # 打印各节点模型配置
+    print(f">>> 系统就绪")
+    print(f"    Default : {MODEL_NAME}")
+    print(f"    Coder   : {CODER_MODEL_NAME}")
+    print(f"    Planner : {PLANNER_MODEL_NAME}")
+    print(f"    Verifier: {VERIFIER_MODEL_NAME}")
+    from config import OBSERVER_MODEL_NAME
+    print(f"    Observer: {OBSERVER_MODEL_NAME}")
 
     # 返回应用、浏览器和依赖对象
     return app, browser_instance, llm, observer

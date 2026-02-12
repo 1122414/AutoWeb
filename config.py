@@ -94,6 +94,31 @@ OUTPUT_DIR = os.getenv("OUTPUT_DIR", "./output")
 # POSTGRES_CONNECTION_STRING = os.getenv("POSTGRES_CONNECTION_STRING")
 
 # ==============================================================================
+# [新增] 各节点独立模型配置（不设置则使用全局默认值）
+# ==============================================================================
+
+# Coder 节点（代码生成，可使用专用代码模型如 DeepSeek-Coder）
+# 默认使用上面的
+CODER_MODEL_NAME = os.getenv('CODER_MODEL_NAME') or MODEL_NAME
+CODER_API_KEY = os.getenv('CODER_API_KEY') or OPENAI_API_KEY
+CODER_BASE_URL = os.getenv('CODER_BASE_URL') or OPENAI_BASE_URL
+
+# Observer 节点（DOM 分析 + 定位策略生成）
+OBSERVER_MODEL_NAME = os.getenv('OBSERVER_MODEL_NAME') or MODEL_NAME
+OBSERVER_API_KEY = os.getenv('OBSERVER_API_KEY') or OPENAI_API_KEY
+OBSERVER_BASE_URL = os.getenv('OBSERVER_BASE_URL') or OPENAI_BASE_URL
+
+# Planner 节点（任务规划）
+PLANNER_MODEL_NAME = os.getenv('PLANNER_MODEL_NAME') or MODEL_NAME
+PLANNER_API_KEY = os.getenv('PLANNER_API_KEY') or OPENAI_API_KEY
+PLANNER_BASE_URL = os.getenv('PLANNER_BASE_URL') or OPENAI_BASE_URL
+
+# Verifier 节点（验收判断）
+VERIFIER_MODEL_NAME = os.getenv('VERIFIER_MODEL_NAME') or MODEL_NAME
+VERIFIER_API_KEY = os.getenv('VERIFIER_API_KEY') or OPENAI_API_KEY
+VERIFIER_BASE_URL = os.getenv('VERIFIER_BASE_URL') or OPENAI_BASE_URL
+
+# ==============================================================================
 # [新增] 代码缓存配置 (Code Cache System)
 # ==============================================================================
 
@@ -105,3 +130,9 @@ CODE_CACHE_THRESHOLD = float(os.getenv("CODE_CACHE_THRESHOLD", "0.85"))
 
 # 代码缓存 Collection 名称 (与知识库分开)
 CODE_CACHE_COLLECTION = os.getenv("CODE_CACHE_COLLECTION", "code_cache")
+
+# [V6] Code Cache 多向量融合权重 (goal + locator + url)
+CODE_CACHE_WEIGHT_GOAL = float(os.getenv("CODE_CACHE_WEIGHT_GOAL", "0.6"))
+CODE_CACHE_WEIGHT_LOCATOR = float(
+    os.getenv("CODE_CACHE_WEIGHT_LOCATOR", "0.3"))
+CODE_CACHE_WEIGHT_URL = float(os.getenv("CODE_CACHE_WEIGHT_URL", "0.1"))

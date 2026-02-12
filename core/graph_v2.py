@@ -9,14 +9,18 @@ from core.nodes import (
 )
 
 
-def build_graph(checkpointer=None, llm=None, observer=None):
+def build_graph(checkpointer=None, llm=None, observer=None,
+                coder_llm=None, planner_llm=None, verifier_llm=None):
     """
-    构建 AutoWeb V4 Graph (Code Cache Edition)
+    构建 AutoWeb V5 Graph (Code Cache Edition)
 
     Args:
         checkpointer: LangGraph 检查点器
-        llm: ChatOpenAI 实例，用于所有节点的 LLM 调用
+        llm: 默认 ChatOpenAI 实例（ErrorHandler 等节点的 LLM）
         observer: BrowserObserver 实例，用于环境感知
+        coder_llm: Coder 节点专用 LLM（不传则使用 llm）
+        planner_llm: Planner 节点专用 LLM（不传则使用 llm）
+        verifier_llm: Verifier 节点专用 LLM（不传则使用 llm）
 
     由于 Nodes 现在直接返回 Command(goto="NextNode")，
     图的定义变得非常简洁，只需要添加节点和边即可。
@@ -35,13 +39,14 @@ def build_graph(checkpointer=None, llm=None, observer=None):
     workflow = StateGraph(AgentState)
 
     # 1. Add Nodes - 使用 functools.partial 预绑定依赖
-    # 这样 LangGraph 运行时只需传 state 和 config，llm/observer 已被绑定
+    # 各节点可使用独立 LLM，不传则回退到默认 llm
     workflow.add_node("Observer", partial(observer_node, observer=observer))
     workflow.add_node("CacheLookup", cache_lookup_node)  # [代码缓存检索]
-    workflow.add_node("Planner", partial(planner_node, llm=llm))
-    workflow.add_node("Coder", partial(coder_node, llm=llm))
+    workflow.add_node("Planner", partial(planner_node, llm=planner_llm or llm))
+    workflow.add_node("Coder", partial(coder_node, llm=coder_llm or llm))
     workflow.add_node("Executor", executor_node)  # Executor 不需要 LLM
-    workflow.add_node("Verifier", partial(verifier_node, llm=llm))
+    workflow.add_node("Verifier", partial(
+        verifier_node, llm=verifier_llm or llm))
     workflow.add_node("RAGNode", rag_node)  # [V5] RAG 向量库操作节点
     workflow.add_node("ErrorHandler", partial(error_handler_node, llm=llm))
 

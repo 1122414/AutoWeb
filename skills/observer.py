@@ -8,7 +8,7 @@ from langchain_core.documents import Document
 # 引入 Prompt
 from prompts.dom_prompts import DOM_ANALYSIS_PROMPT, DRISSION_LOCATOR_PROMPT
 from drivers.js_loader import DOM_SKELETON_JS  # 假设你把 JS 放在了这里
-from config import MODEL_NAME, OPENAI_API_KEY, OPENAI_BASE_URL
+from config import OBSERVER_MODEL_NAME, OBSERVER_API_KEY, OBSERVER_BASE_URL
 
 # 引入 Compressor
 from skills.dom_compressor import DOMCompressor
@@ -22,10 +22,10 @@ class BrowserObserver:
 
     def __init__(self):
         self.llm = ChatOpenAI(
-            model=MODEL_NAME,
+            model=OBSERVER_MODEL_NAME,
             temperature=0,
-            openai_api_key=OPENAI_API_KEY,
-            openai_api_base=OPENAI_BASE_URL,
+            openai_api_key=OBSERVER_API_KEY,
+            openai_api_base=OBSERVER_BASE_URL,
             streaming=True
         )
         # [Optimization] DOM Cache
