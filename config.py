@@ -126,13 +126,15 @@ VERIFIER_BASE_URL = os.getenv('VERIFIER_BASE_URL') or OPENAI_BASE_URL
 CODE_CACHE_ENABLED = os.getenv("CODE_CACHE_ENABLED", "True").lower() == "true"
 
 # 代码缓存相似度阈值 (0-1，越高越严格)
-CODE_CACHE_THRESHOLD = float(os.getenv("CODE_CACHE_THRESHOLD", "0.85"))
+CODE_CACHE_THRESHOLD = float(os.getenv("CODE_CACHE_THRESHOLD", "0.90"))
 
 # 代码缓存 Collection 名称 (与知识库分开)
 CODE_CACHE_COLLECTION = os.getenv("CODE_CACHE_COLLECTION", "code_cache")
 
-# [V6] Code Cache 多向量融合权重 (goal + locator + url)
+# [V6] Code Cache 多向量融合权重 (goal + locator + user_task + url)
 CODE_CACHE_WEIGHT_GOAL = float(os.getenv("CODE_CACHE_WEIGHT_GOAL", "0.6"))
 CODE_CACHE_WEIGHT_LOCATOR = float(
-    os.getenv("CODE_CACHE_WEIGHT_LOCATOR", "0.3"))
+    os.getenv("CODE_CACHE_WEIGHT_LOCATOR", "0.2"))
+CODE_CACHE_WEIGHT_USER_TASK = float(
+    os.getenv("CODE_CACHE_WEIGHT_USER_TASK", "0.1"))
 CODE_CACHE_WEIGHT_URL = float(os.getenv("CODE_CACHE_WEIGHT_URL", "0.1"))

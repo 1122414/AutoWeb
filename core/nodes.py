@@ -166,8 +166,8 @@ def cache_lookup_node(state: AgentState, config: RunnableConfig) -> Command[Lite
         if hits and hits[0].score >= CODE_CACHE_THRESHOLD:
             best_hit = hits[0]
             logger.info(
-                f"   ✅ 命中缓存! Score: {best_hit.score:.4f}, URL: {best_hit.url_pattern}")
-            logger.info(f"   📋 原任务: {best_hit.goal[:50]}...")
+                f"✅ 命中缓存! Score: {best_hit.score:.4f}, URL: {best_hit.url_pattern}")
+            logger.info(f"📋 原任务: {best_hit.goal[:50]}...")
 
             # [V5] 参数感知：检测任务差异，做程序化替换
             final_code = best_hit.code
@@ -179,7 +179,7 @@ def cache_lookup_node(state: AgentState, config: RunnableConfig) -> Command[Lite
                 diffs = extract_param_diffs(cached_task, user_task)
 
             if diffs:
-                logger.info(f"   🔄 [ParamSubst] 检测到参数差异: {diffs}")
+                logger.info(f"🔄 [ParamSubst] 检测到参数差异: {diffs}")
                 final_code = apply_param_substitution(best_hit.code, diffs)
                 logger.info(
                     f"✅ [ParamSubst] 已替换 {len(diffs)} 个参数，零 LLM Token")

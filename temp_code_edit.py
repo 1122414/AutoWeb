@@ -1,82 +1,66 @@
-print("-> Starting search for 'sea'")
-search_input = tab.ele("#txtInput")
-search_input.input("sea")
-print("-> Input 'sea' in search box")
-search_btn = tab.ele("#btnSearch")
-search_btn.click(by_js=True)
-tab.wait(3)
-print(f"-> Search submitted, current URL: {tab.url}")
-
 results = []
 page_num = 1
 
 while True:
     print(f"-> Processing page {page_num}")
-
-    try:
-        items = tab.eles(
-            "x://*[@id='ctl00_ctl41_g_7de359f1_b708_4e31_8bbd_2cd87ec3690c']/div[2]/div[1]/div/div")
-        print(f"-> Found {len(items)} items on page {page_num}")
-    except Exception as e:
-        print(f"Warning: Failed to get items - {e}")
-        break
-
-    for idx in range(len(items)):
+    
+    # Find all news items on current page
+    news_items = tab.eles("x://div[@id='ctl00_ctl41_g_7de359f1_b708_4e31_8bbd_2cd87ec3690c']/div[2]/div[1]/div")
+    
+    print(f"-> Found {len(news_items)} items on page {page_num}")
+    
+    for item in news_items:
         try:
-            items = tab.eles(
-                "x://*[@id='ctl00_ctl41_g_7de359f1_b708_4e31_8bbd_2cd87ec3690c']/div[2]/div[1]/div/div")
-            item = items[idx]
-
-            data = {}
-
-            try:
-                title_ele = item.ele("x:.//h4[@class='titlenews']/a")
-                data["title"] = title_ele.text
-                data["link"] = title_ele.link
-            except Exception as e:
-                print(f"Warning: Title extraction failed - {e}")
-                data["title"] = ""
-                data["link"] = ""
-
-            try:
-                data["date"] = item.ele("x:.//i[@class='datetime']").text
-            except Exception as e:
-                data["date"] = ""
-
-            try:
-                data["summary"] = item.ele("x:.//p").text
-            except Exception as e:
-                data["summary"] = ""
-
-            try:
-                img_src = item.ele(
-                    "x:.//img[@class='img-reponsive']").attr("src")
-                data["image"] = img_src if img_src else ""
-            except Exception as e:
-                data["image"] = ""
-
-            results.append(data)
-        except Exception as e:
-            print(f"Warning: Item {idx} extraction failed - {e}")
-
-    print(f"-> Page {page_num} completed, total collected: {len(results)}")
-
+            title = item.ele("x:.//h4[@class='titlenews']/a").text
+        except:
+            title = ""
+        
+        try:
+            date = item.ele("x:.//h4[@class='titlenews']/i[@class='datetime']").text
+        except:
+            date = ""
+        
+        try:
+            summary = item.ele("x:.//p").text
+        except:
+            summary = ""
+        
+        try:
+            link = item.ele("x:.//h4[@class='titlenews']/a").link
+        except:
+            link = ""
+        
+        results.append({
+            "title": title,
+            "date": date,
+            "summary": summary,
+            "link": link
+        })
+    
+    # Try to find next page button
     try:
-        next_page = page_num + 1
-        next_link = tab.ele(
-            f"x://*[@id='ctl00_ctl41_g_7de359f1_b708_4e31_8bbd_2cd87ec3690c']/div[3]/div[1]/div[1]/ul[1]/li/a[@href='?keyword=sea&p={next_page}']")
-
-        if next_link and next_link.states.is_displayed:
-            next_link.click(by_js=True)
-            tab.wait(3)
-            page_num += 1
-            print(f"-> Navigated to page {page_num}")
-        else:
-            print("-> No more pages available")
+        next_page_elements = tab.eles("x://div[@id='ctl00_ctl41_g_7de359f1_b708_4e31_8bbd_2cd87ec3690c']/div[3]//ul[@class='pagination']/li/a")
+        next_page_clicked = False
+        
+        for next_btn in next_page_elements:
+            # Check if this is a next page link (not current page)
+            if "active" not in next_btn.parent().attr("class", ""):
+                btn_text = next_btn.text.strip()
+                if btn_text.isdigit() and int(btn_text) > page_num:
+                    print(f"-> Clicking next page: {btn_text}")
+                    next_btn.click(by_js=True)
+                    tab.wait(2)
+                    page_num += 1
+                    next_page_clicked = True
+                    break
+        
+        if not next_page_clicked:
+            print("-> No more pages to navigate")
             break
+            
     except Exception as e:
         print(f"-> Pagination ended: {e}")
         break
 
-print(f"-> All pages processed. Total results: {len(results)}")
-toolbox.save_data(results, "output/mard_sea_search_results.csv")
+print(f"-> Total collected: {len(results)} items")
+toolbox.save_data(results, "output/search_results.csv")
