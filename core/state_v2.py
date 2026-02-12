@@ -83,6 +83,10 @@ class AgentState(EnvState, TaskState):
     _code_source: Optional[str]         # 代码来源: "cache" | "llm" | None
     _cache_failed_this_round: bool      # 本轮缓存代码是否已失败（用于防止死循环）
 
+    # [V7] DOM 缓存控制
+    _observer_source: Optional[str]     # 观察来源: "dom_cache" | "observer" | None
+    _dom_cache_hit_id: Optional[str]    # DomCache 命中记录 ID（用于失败失效）
+
     # [V5] RAG Node 控制
     # RAG 任务类型: "store_kb" | "store_code" | "qa" | None
     rag_task_type: Optional[str]

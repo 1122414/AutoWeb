@@ -314,7 +314,11 @@ def observer_node(state: AgentState, config: RunnableConfig, observer) -> Comman
     logger.info("\n👁️ [Observer] 正在感知环境...")
 
     # [V4] 新一轮开始，重置缓存失败标记
-    base_update = {"_cache_failed_this_round": False}
+    base_update = {
+        "_cache_failed_this_round": False,
+        "_observer_source": None,
+        "_dom_cache_hit_id": None,
+    }
 
     # 获取浏览器实例
     browser = config["configurable"].get("browser")
@@ -378,8 +382,51 @@ def observer_node(state: AgentState, config: RunnableConfig, observer) -> Comman
         should_analyze = (current_dom_hash != previous_dom_hash) or has_failure
         new_strategy_entry = None
 
+        # [V7] DOM Cache: 如果上轮是 DomCache 命中且后续失败，先失效该缓存，避免重复命中坏样本
+        observer_source = state.get("_observer_source", "")
+        dom_cache_hit_id = state.get("_dom_cache_hit_id", "")
+        if has_failure and observer_source == "dom_cache" and dom_cache_hit_id:
+            try:
+                from config import DOM_CACHE_ENABLED
+                if DOM_CACHE_ENABLED:
+                    from skills.dom_cache import dom_cache_manager
+                    dom_cache_manager.invalidate(dom_cache_hit_id)
+                    logger.info(f"   🗑️ [DomCache] 已失效失败缓存: {dom_cache_hit_id}")
+            except Exception as e:
+                logger.info(f"   ⚠️ [DomCache] 失效失败缓存异常: {e}")
+
+        # [V7] DOM Cache: 仅在需要分析且无失败记录时尝试命中
+        dom_cache_hit = None
+        if should_analyze and not has_failure:
+            try:
+                from config import DOM_CACHE_ENABLED, DOM_CACHE_THRESHOLD, DOM_CACHE_TOP_K
+                if DOM_CACHE_ENABLED:
+                    from skills.dom_cache import dom_cache_manager
+                    cache_hits = dom_cache_manager.search(
+                        user_task=task,
+                        current_url=current_url,
+                        dom_skeleton=dom,
+                        top_k=DOM_CACHE_TOP_K,
+                    )
+                    if cache_hits and cache_hits[0].score >= DOM_CACHE_THRESHOLD:
+                        dom_cache_hit = cache_hits[0]
+                        logger.info(
+                            f"   ✅ [DomCache] 命中缓存 score={dom_cache_hit.score:.4f}, "
+                            f"url={dom_cache_hit.url_pattern}"
+                        )
+            except Exception as e:
+                logger.info(f"   ⚠️ [DomCache] 检索异常: {e}")
+
         if should_analyze:
-            if has_failure and current_dom_hash == previous_dom_hash:
+            if dom_cache_hit and dom_cache_hit.locator_suggestions:
+                page_context = finished_steps[-1] if finished_steps else "初始页面"
+                new_strategy_entry = {
+                    "page_context": page_context,
+                    "url": current_url,
+                    "strategies": dom_cache_hit.locator_suggestions,
+                }
+                should_analyze = False
+            elif has_failure and current_dom_hash == previous_dom_hash:
                 logger.info(f"   🔄 [Observer] 检测到失败记录，强制重新分析 DOM...")
                 # 清空之前可能错误的策略
                 accumulated_strategies = []
@@ -407,8 +454,30 @@ def observer_node(state: AgentState, config: RunnableConfig, observer) -> Comman
             "dom_skeleton": dom,
             "dom_hash": current_dom_hash,
             "current_url": current_url,
-            "locator_suggestions": [new_strategy_entry] if new_strategy_entry else []
+            "locator_suggestions": [new_strategy_entry] if new_strategy_entry else [],
+            "_observer_source": "dom_cache" if dom_cache_hit else "observer",
+            "_dom_cache_hit_id": dom_cache_hit.id if dom_cache_hit else None,
         }
+
+        # [V7] 新分析结果写入 DomCache
+        if new_strategy_entry and not dom_cache_hit:
+            try:
+                from config import DOM_CACHE_ENABLED
+                if DOM_CACHE_ENABLED:
+                    from skills.dom_cache import dom_cache_manager
+                    strategies = new_strategy_entry.get("strategies", [])
+                    if isinstance(strategies, dict):
+                        strategies = [strategies]
+                    if isinstance(strategies, list) and strategies:
+                        dom_cache_manager.save(
+                            user_task=task,
+                            current_url=current_url,
+                            dom_skeleton=dom,
+                            locator_suggestions=strategies,
+                        )
+                        logger.info("   💾 [DomCache] 已提交缓存写入任务")
+            except Exception as e:
+                logger.info(f"   ⚠️ [DomCache] 写入异常: {e}")
 
         # 如果刚做完重新分析（因为失败触发），清空错误标记
         if has_failure and should_analyze:
@@ -678,6 +747,8 @@ def planner_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lite
                     "coder_retry_count": 0,         # 重置重试计数
                     "_code_source": None,           # 清空代码来源
                     "_cache_failed_this_round": False,  # 重置缓存标记
+                    "_observer_source": None,       # 清空观察来源
+                    "_dom_cache_hit_id": None,      # 清空 DomCache 命中 ID
                     "dom_skeleton": "",             # 清空 DOM（Observer 会重新获取）
                     "dom_hash": None,               # 清空 DOM 哈希
                     "loop_count": 1,                # 从 1 开始（因为这是第一次规划）
