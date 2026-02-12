@@ -74,6 +74,31 @@ def _detect_task_continuity(new_task: str, current_url: str, old_task: str = "")
 
 
 # ==============================================================================
+# [V5] Locator 摘要提取（用于 CodeCache embedding）
+# ==============================================================================
+def _extract_locator_info(state: dict) -> str:
+    """从 state 的 locator_suggestions 中提取 locator 摘要字符串"""
+    suggestions = state.get("locator_suggestions", [])
+    if not suggestions:
+        return ""
+    parts = []
+    for entry in suggestions:
+        strategies = entry.get("strategies", [])
+        if isinstance(strategies, list):
+            for s in strategies:
+                if isinstance(s, dict):
+                    loc = s.get("locator", "")
+                    reason = s.get("reason", "")
+                    if loc:
+                        parts.append(f"{loc} ({reason})" if reason else loc)
+        elif isinstance(strategies, dict):
+            loc = strategies.get("locator", "")
+            if loc:
+                parts.append(loc)
+    return " | ".join(parts) if parts else ""
+
+
+# ==============================================================================
 # [V4] 代码缓存检索节点
 # ==============================================================================
 def cache_lookup_node(state: AgentState, config: RunnableConfig) -> Command[Literal["Coder", "Executor"]]:
@@ -96,6 +121,8 @@ def cache_lookup_node(state: AgentState, config: RunnableConfig) -> Command[Lite
             goto="Coder"
         )
 
+    # [V5] 提取 locator 摘要的辅助函数已移至模块级
+
     # 检查是否启用缓存
     if not CODE_CACHE_ENABLED:
         logger.info("⏭️ [CacheLookup] 代码缓存已禁用，跳过检索")
@@ -106,10 +133,12 @@ def cache_lookup_node(state: AgentState, config: RunnableConfig) -> Command[Lite
 
     logger.info("\n🔍 [CacheLookup] 正在检索可复用代码...")
 
-    task = state.get("user_task", "")
+    user_task = state.get("user_task", "")
     plan = state.get("plan", "")  # [V4] 新增 plan 作为查询条件
-    dom_skeleton = state.get("dom_skeleton", "")
     current_url = state.get("current_url", "")
+
+    # [V5] 提取 Observer 的定位策略摘要
+    locator_info = _extract_locator_info(state)
 
     # 空白页/初始页面，跳过缓存检索
     if not current_url or current_url.startswith(("about:", "data:", "chrome://")):
@@ -123,12 +152,14 @@ def cache_lookup_node(state: AgentState, config: RunnableConfig) -> Command[Lite
         from skills.code_cache import code_cache_manager
 
         # [V4] 使用 plan + task 组合查询
-        combined_task = f"{task}\n当前计划: {plan}" if plan else task
+        # combined_task = f"{user_task}\n当前计划: {plan}" if plan else task
 
+        # [V5] user_task与plan分开
         hits = code_cache_manager.search(
-            task=combined_task,
-            dom_skeleton=dom_skeleton,
+            user_task=user_task,
+            goal=plan,
             url=current_url,
+            locator_info=locator_info,
             top_k=3
         )
 
@@ -138,12 +169,27 @@ def cache_lookup_node(state: AgentState, config: RunnableConfig) -> Command[Lite
                 f"   ✅ 命中缓存! Score: {best_hit.score:.4f}, URL: {best_hit.url_pattern}")
             logger.info(f"   📋 原任务: {best_hit.goal[:50]}...")
 
-            # 直接使用缓存代码，跳到 Executor
+            # [V5] 参数感知：检测任务差异，做程序化替换
+            final_code = best_hit.code
+            cached_task = best_hit.user_task
+            from skills.code_cache import extract_param_diffs, apply_param_substitution
+
+            diffs = []
+            if cached_task and cached_task != user_task:
+                diffs = extract_param_diffs(cached_task, user_task)
+
+            if diffs:
+                logger.info(f"   🔄 [ParamSubst] 检测到参数差异: {diffs}")
+                final_code = apply_param_substitution(best_hit.code, diffs)
+                logger.info(
+                    f"✅ [ParamSubst] 已替换 {len(diffs)} 个参数，零 LLM Token")
+
+            # 直接使用缓存代码（替换后），跳到 Executor
             return Command(
                 update={
-                    "generated_code": best_hit.code,
+                    "generated_code": final_code,
                     "messages": [AIMessage(content=f"【缓存命中】复用历史代码 (Score: {best_hit.score:.4f})")],
-                    "_code_source": "cache",  # [V4] 标记代码来源
+                    "_code_source": "cache",
                     "_cache_hit_id": best_hit.id,
                 },
                 goto="Executor"
@@ -200,15 +246,17 @@ def _save_code_to_cache(state: AgentState, current_url: str):
         from skills.code_cache import code_cache_manager
 
         is_submitted = code_cache_manager.save(
-            goal=goal,  # [V4] 改为 goal
+            goal=goal,
             dom_skeleton=dom_skeleton,
             url=current_url,
-            code=code
+            code=code,
+            user_task=state.get("user_task", ""),
+            locator_info=_extract_locator_info(state),
         )
 
         if is_submitted:
             logger.info(f" 💾 [CodeCache] 存储任务已提交后台")
-            return {"true": "[CodeCache] 任务已提交"} # 这里不再返回具体的 ID
+            return {"true": "[CodeCache] 任务已提交"}  # 这里不再返回具体的 ID
         else:
             logger.info("   ⚠️ [CodeCache] 存储失败，纯导航代码")
             return {"false": "[CodeCache] 存储失败，纯导航代码"}
@@ -431,9 +479,10 @@ def _rag_store_kb(state: AgentState) -> str:
     import csv
     import sqlite3
 
-    # 1. 查找 output 目录下最新的数据文件（JSON / CSV）
-    files = glob.glob("output/*.json") + \
-        glob.glob("output/*.csv") + glob.glob("output/*.jsonl")
+    # 1. 查找 output 目录下最新的数据文件（支持域名子目录）
+    files = glob.glob("output/**/*.json", recursive=True) + \
+        glob.glob("output/**/*.csv", recursive=True) + \
+        glob.glob("output/**/*.jsonl", recursive=True)
 
     # 同时检查 SQLite 数据库
     db_files = glob.glob("*.db") + glob.glob("output/*.db")
@@ -754,6 +803,11 @@ def executor_node(state: AgentState, config: RunnableConfig) -> Command[Literal[
     code_source = state.get("_code_source", "llm")  # [V4] 获取代码来源
 
     logger.info(f"   📦 代码来源: {code_source}")
+
+    # 设置当前 URL，供 save_data 自动按域名分目录
+    from skills.toolbox import set_current_url
+    current_url = state.get("current_url", "")
+    set_current_url(current_url)
 
     # [V3] 错误分类关键词
     SYNTAX_ERRORS = ["SyntaxError", "IndentationError",

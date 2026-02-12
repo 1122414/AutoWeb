@@ -5,7 +5,35 @@ import sqlite3
 import httpx
 import re
 from typing import List, Dict, Union, Optional
+from urllib.parse import urlparse
 from skills.tool_rag import kb_manager  # RAG Ingestion
+
+# ==============================================================================
+# 全局上下文：当前任务的 URL（由 Executor 在执行前设置）
+# ==============================================================================
+_current_url: str = ""
+
+
+def set_current_url(url: str):
+    """设置当前任务 URL（供 save_data 自动按域名分目录）"""
+    global _current_url
+    _current_url = url or ""
+
+
+def _get_domain_folder() -> str:
+    """从 _current_url 提取域名作为子目录名"""
+    if not _current_url:
+        return ""
+    try:
+        parsed = urlparse(_current_url)
+        domain = parsed.netloc
+        # 去掉 www. 前缀和端口号
+        domain = re.sub(r'^www\.', '', domain)
+        domain = domain.split(':')[0]
+        return domain if domain else ""
+    except Exception:
+        return ""
+
 
 # ==============================================================================
 # AutoWeb Standard Library (ASL)
@@ -261,12 +289,17 @@ def save_data(data: Union[List[Dict], Dict], filename: str, format: str = None):
             # 无扩展名：自动补全
             new_filename = f"{name_part}_{timestamp}.{format}"
 
-        # 保留目录路径
+        # 保留目录路径，注入域名子目录
         dirname = os.path.dirname(filename)
-        if dirname:
-            filename = os.path.join(dirname, new_filename)
-        else:
-            filename = new_filename
+        if not dirname:
+            dirname = "output"  # 默认 output 目录
+
+        # 自动按域名创建子目录
+        domain_folder = _get_domain_folder()
+        if domain_folder:
+            dirname = os.path.join(dirname, domain_folder)
+
+        filename = os.path.join(dirname, new_filename)
 
         print(f"💾 [Toolbox] Saving {format.upper()} -> {filename}")
 

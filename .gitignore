@@ -4,6 +4,7 @@
 *.csv
 *.json
 *.html
+data
 logs
 test
 output

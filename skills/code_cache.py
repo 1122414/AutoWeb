@@ -29,6 +29,66 @@ class CacheHit(NamedTuple):
     url_pattern: str
     goal: str  # [V4] 改为 goal
     success_count: int
+    user_task: str = ""  # [V5] 原始用户任务
+
+
+# ==============================================================================
+# [V5] 参数 Diff + 替换工具函数
+# ==============================================================================
+
+def extract_param_diffs(cached_task: str, current_task: str) -> list:
+    """
+    对比两个 task，提取变化的"参数"部分。
+
+    使用 token 级 SequenceMatcher diff：
+    1. 先用正则将文本切分为 token（英文单词/数字保持完整，其余逐字符）
+    2. 对 token 序列做 diff，提取 replace 操作
+    3. 将替换的 token 组拼回字符串，作为参数差异
+
+    能正确处理中文、混合语言等无空格文本。
+    按旧参数长度降序排列（防止短串误替换长串的子串）。
+    """
+    import difflib
+    import re as _re
+
+    def _tokenize(text: str) -> list:
+        """连续英文/数字为一个 token，其余每个非空字符为一个 token"""
+        return _re.findall(r'[a-zA-Z0-9_]+|\S', text)
+
+    old_tokens = _tokenize(cached_task)
+    new_tokens = _tokenize(current_task)
+
+    matcher = difflib.SequenceMatcher(None, old_tokens, new_tokens)
+    diffs = []
+
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == 'replace':
+            old_val = ''.join(old_tokens[i1:i2])
+            new_val = ''.join(new_tokens[j1:j2])
+            if len(old_val) >= 2 and len(new_val) >= 2:
+                diffs.append((old_val, new_val))
+
+    # 按旧参数长度降序排列，防止 "fish" 在 "fishery" 之前被替换
+    diffs.sort(key=lambda x: len(x[0]), reverse=True)
+    return diffs
+
+
+def apply_param_substitution(code: str, diffs: list) -> str:
+    """
+    在代码的字符串字面量中替换参数（零 LLM Token）
+    只替换引号内的内容，避免误改变量名/函数名
+    """
+    import re as _re
+    for old_val, new_val in diffs:
+        # 匹配单引号或双引号内包含 old_val 的字符串
+        pattern = _re.compile(
+            r"""(['"])([^'"]*?)""" + _re.escape(old_val) + r"""([^'"]*?)\1"""
+        )
+        code = pattern.sub(
+            lambda m: f"{m.group(1)}{m.group(2)}{new_val}{m.group(3)}{m.group(1)}",
+            code
+        )
+    return code
 
 
 class CodeCacheManager:
@@ -80,6 +140,7 @@ class CodeCacheManager:
                 index_params=index_params,
                 consistency_level="Bounded",
                 auto_id=True,
+                enable_dynamic_field=True,  # [V5] 启用动态字段，允许存储 user_task 等新字段
             )
         return self._vector_store
 
@@ -117,22 +178,24 @@ class CodeCacheManager:
         content = dom_skeleton[:self.DOM_MAX_LENGTH] if dom_skeleton else ""
         return hashlib.md5(content.encode('utf-8')).hexdigest()[:16]
 
-    def _build_embedding_text(self, goal: str, dom_skeleton: str, url: str) -> str:
-        """构建用于向量化的文本 [V4] 优化结构"""
+    def _build_embedding_text(self, goal: str, url: str, user_task: str = "", locator_info: str = "") -> str:
+        """构建用于向量化的文本 [V5] 移除 DOM，改用 Task + Goal + URL + Locator 摘要"""
         url_pattern = self._normalize_url(url)
-        dom_content = dom_skeleton[:self.DOM_MAX_LENGTH] if dom_skeleton else ""
 
-        # [V4] 优化结构：Goal + URL + DOM
-        text = f"""Goal: {goal}
-URL: {url_pattern}
-DOM:
-{dom_content}"""
+        parts = []
+        if user_task:
+            parts.append(f"Task: {user_task}")
+        parts.append(f"Goal: {goal}" * 5)
+        parts.append(f"URL: {url_pattern}")
+        if locator_info:
+            parts.append(f"Locators: {locator_info[:800]}")
+        text = "\n".join(parts)
 
-        # [V4] 截断保护
+        # 截断保护
         if len(text) > self.MAX_EMBEDDING_CHARS:
             text = text[:self.MAX_EMBEDDING_CHARS]
             print(
-                f"   ⚠️ [CodeCache] Embedding 输入截断至 {self.MAX_EMBEDDING_CHARS} chars")
+                f"⚠️ [CodeCache] Embedding 输入截断至 {self.MAX_EMBEDDING_CHARS} chars")
 
         return text
 
@@ -140,9 +203,10 @@ DOM:
 
     def search(
         self,
-        task: str,
-        dom_skeleton: str,
+        user_task: str,
+        goal: str,
         url: str,
+        locator_info: str = "",
         top_k: int = 3
     ) -> List[CacheHit]:
         """
@@ -150,8 +214,8 @@ DOM:
 
         Args:
             task: 用户任务描述
-            dom_skeleton: DOM 骨架
             url: 当前页面 URL
+            locator_info: Observer 的定位策略摘要
             top_k: 返回数量
 
         Returns:
@@ -163,7 +227,8 @@ DOM:
             vector_store = self._get_vector_store()
 
             # 构建检索文本
-            query_text = self._build_embedding_text(task, dom_skeleton, url)
+            query_text = self._build_embedding_text(
+                goal, url, user_task, locator_info)
 
             # 向量检索
             results = vector_store.similarity_search_with_score(
@@ -182,8 +247,9 @@ DOM:
                         code=doc.metadata.get("code", ""),
                         score=similarity,
                         url_pattern=doc.metadata.get("url_pattern", ""),
-                        goal=doc.metadata.get("goal", ""),  # [V4] 改为 goal
-                        success_count=doc.metadata.get("success_count", 0)
+                        goal=doc.metadata.get("goal", ""),
+                        success_count=doc.metadata.get("success_count", 0),
+                        user_task=doc.metadata.get("user_task", ""),  # [V5]
                     )
                     hits.append(hit)
 
@@ -259,7 +325,7 @@ DOM:
         self._executor.shutdown(wait=True)
         print("✅ [CodeCache] 后台任务已完成")
 
-    def _do_save_async(self, goal: str, dom_skeleton: str, url: str, code: str):
+    def _do_save_async(self, goal: str, dom_skeleton: str, url: str, code: str, user_task: str = "", locator_info: str = ""):
         """
         后台执行的存储逻辑（在线程池中运行）
         包含：去重检查 + 实际存储
@@ -281,6 +347,7 @@ DOM:
                 "url_pattern": url_pattern,
                 "dom_hash": dom_hash,
                 "goal": goal,
+                "user_task": user_task,  # [V5] 存储原始用户任务
                 "code": code,
                 "code_length": len(code),
                 "success_count": 1,
@@ -289,9 +356,9 @@ DOM:
                 "updated_at": datetime.now().isoformat(),
             }
 
-            # 构建向量化文本
+            # 构建向量化文本（不再使用 DOM，改用 locator_info）
             embedding_text = self._build_embedding_text(
-                goal, dom_skeleton, url)
+                goal, url, user_task=user_task, locator_info=locator_info)
 
             # 创建 Document 并存储
             doc = Document(page_content=embedding_text, metadata=metadata)
@@ -307,16 +374,20 @@ DOM:
         goal: str,
         dom_skeleton: str,
         url: str,
-        code: str
+        code: str,
+        user_task: str = "",
+        locator_info: str = ""
     ) -> None:
         """
         异步存储成功执行的代码（非阻塞）
 
         Args:
             goal: 当前步骤目标
-            dom_skeleton: DOM 骨架
+            dom_skeleton: DOM 骨架（仅用于去重 hash）
             url: 当前页面 URL
             code: 生成的代码
+            user_task: 原始用户任务（用于参数感知复用）
+            locator_info: Observer 的定位策略摘要（用于 embedding）
 
         Note:
             此方法立即返回，实际存储在后台线程执行
@@ -335,7 +406,7 @@ DOM:
         # ========== 异步存储（提交到后台线程）==========
         print(f"📤 [CodeCache] 提交后台存储任务 (code: {len(code)} chars)")
         self._executor.submit(self._do_save_async, goal,
-                              dom_skeleton, url, code)
+                              dom_skeleton, url, code, user_task, locator_info)
         return True
 
     def update_stats(self, cache_id: str, success: bool) -> bool:
