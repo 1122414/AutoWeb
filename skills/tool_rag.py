@@ -87,20 +87,22 @@ class KnowledgeBaseManager:
         """
         对动态字段值做智能类型转换
 
-        - "41.30" → float(41.30)
-        - "80.0%" → float(80.0)
-        - "¥4.32" / "$4.32" → float(4.32)
-        - "-" / "" → None（不存入，让 Milvus exists() 可用）
-        - 纯文本保持字符串
+        Returns:
+            (converted_value, was_percent: bool)
+            - "41.30"  → (41.30,  False)
+            - "80.0%"  → (80.0,   True)   ← 标记为百分号来源
+            - "¥4.32"  → (4.32,   False)
+            - "-"      → (None,   False)
+            - 纯文本   → ("text", False)
         """
         if not isinstance(value, str):
-            return value  # int / float / bool 直接返回
+            return value, False  # int / float / bool 直接返回
 
         stripped = value.strip()
 
         # 无效值 → 不存入
         if stripped in ("", "-", "--", "N/A", "n/a", "null", "None"):
-            return None
+            return None, False
 
         # 去掉货币符号
         cleaned = stripped
@@ -109,20 +111,22 @@ class KnowledgeBaseManager:
                 cleaned = cleaned[len(prefix):].strip()
                 break
 
-        # 去掉百分号
+        # 检测并去掉百分号
+        was_percent = False
         if cleaned.endswith("%"):
             cleaned = cleaned[:-1].strip()
+            was_percent = True
 
         # 去掉千分位逗号: "1,234.56" → "1234.56"
         cleaned = cleaned.replace(",", "")
 
         # 尝试转为数字
         try:
-            return float(cleaned)
+            return float(cleaned), was_percent
         except (ValueError, TypeError):
             pass
 
-        return stripped  # 纯文本保持字符串
+        return stripped, False  # 纯文本保持字符串
 
     def _extract_metadata(self, item: Dict, source: str) -> Dict:
         """
@@ -145,15 +149,69 @@ class KnowledgeBaseManager:
             "crawled_at", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
 
         # 其他字段也放入 metadata（利用 Milvus 动态字段）
+        pct_fields = []  # 记录原始值带 % 的字段名
         for key, value in item.items():
             if key not in self.HIGH_FREQ_FIELDS and key not in ("text", "content", "page_content"):
                 # 只存标量值，跳过嵌套结构
                 if isinstance(value, (str, int, float, bool)):
-                    converted = self._convert_dynamic_value(value)
+                    converted, was_pct = self._convert_dynamic_value(value)
                     if converted is not None:  # 跳过无效值
                         metadata[key] = converted
+                        if was_pct:
+                            pct_fields.append(key)
+
+        # 存储百分号标记（批次检测时用，写入 Milvus 前会清理）
+        if pct_fields:
+            metadata["_pct_fields"] = pct_fields
 
         return metadata
+
+    @staticmethod
+    def _sanitize_format_consistency(docs: list, min_samples: int = 3):
+        """
+        批次内格式一致性检查
+
+        针对场景：同一字段中大部分值是纯 float，少数值原始带 %
+        规则：如果带 % 的值在该字段中是少数派 (< 50%)，则视为格式异常并移除
+        """
+        # 1. 统计每个数值字段的 pct / non-pct 分布
+        # {field: {"total": N, "pct_count": M, "pct_docs": [(doc_idx, val), ...]}}
+        field_stats = {}
+        for i, doc in enumerate(docs):
+            pct_fields = set(doc.metadata.get("_pct_fields", []))
+            for k, v in doc.metadata.items():
+                if k.startswith("_") or not isinstance(v, (int, float)):
+                    continue
+                if k not in field_stats:
+                    field_stats[k] = {"total": 0,
+                                      "pct_count": 0, "pct_docs": []}
+                field_stats[k]["total"] += 1
+                if k in pct_fields:
+                    field_stats[k]["pct_count"] += 1
+                    field_stats[k]["pct_docs"].append((i, v))
+
+        # 2. 对 % 少数派字段，移除其异常值
+        removed = 0
+        for field, stats in field_stats.items():
+            if stats["total"] < min_samples or stats["pct_count"] == 0:
+                continue
+            # 带 % 的是少数派 → 格式不一致 → 移除
+            if stats["pct_count"] / stats["total"] < 0.5:
+                for doc_idx, val in stats["pct_docs"]:
+                    if field in docs[doc_idx].metadata:
+                        del docs[doc_idx].metadata[field]
+                        removed += 1
+                        print(
+                            f"⚠️ [KB] 格式不一致: {field}={val}"
+                            f" (原始带 %, 与同字段其他纯数值不一致)，已移除"
+                        )
+
+        # 3. 清理内部标记 _pct_fields（不写入 Milvus）
+        for doc in docs:
+            doc.metadata.pop("_pct_fields", None)
+
+        if removed:
+            print(f"🧹 [KB] 本批次共清理 {removed} 个格式异常值")
 
     def _get_text_content(self, item) -> str:
         """
@@ -230,6 +288,9 @@ class KnowledgeBaseManager:
 
             if not docs:
                 return False
+
+            # 批次内格式一致性检查 (% vs 纯数值)
+            self._sanitize_format_consistency(docs)
 
             # 注册字段到注册表（含类型信息）
             if all_field_samples:

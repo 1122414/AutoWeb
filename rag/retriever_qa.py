@@ -166,8 +166,19 @@ def get_embedding_model():
 
 
 def format_docs(docs):
-    """格式化文档列表为上下文字符串"""
-    return "\n\n".join(f"[片段 {i+1}] {doc.page_content}" for i, doc in enumerate(docs))
+    """格式化文档列表为上下文字符串，包含 metadata 动态字段"""
+    parts = []
+    for i, doc in enumerate(docs):
+        text = f"[片段 {i+1}] {doc.page_content}"
+        # 附加有意义的 metadata
+        meta_parts = []
+        for k, v in doc.metadata.items():
+            if v and k not in ("text", "pk", "vector") and str(v).strip():
+                meta_parts.append(f"{k}: {v}")
+        if meta_parts:
+            text += f"\n  元数据: {', '.join(meta_parts)}"
+        parts.append(text)
+    return "\n\n".join(parts)
 
 
 def _cn_num_to_int(cn: str) -> int:
@@ -265,7 +276,37 @@ class SimpleEnsembleRetriever(BaseRetriever):
         return [item["doc"] for item in sorted_results]
 
 
-def build_hybrid_retriever(milvus_store: Milvus, expr: str, k: int):
+# 5. 自定义分词器 (优化 BM25 召回)
+# ==============================================================================
+def custom_tokenizer(text: str) -> List[str]:
+    """
+    混合分词器 (jieba + 正则)：
+    - 中文部分：jieba 精确模式分词 (人工智能 → [人工, 智能])
+    - 英文/数字部分：正则按非字母数字符号切分 (kimi-2.5 → [kimi, 2, 5])
+    - 所有 token 转小写、去空
+    """
+    import re
+    import jieba
+
+    text = text.lower()
+    tokens = []
+
+    # 按中文 vs 非中文交替切分
+    segments = re.findall(r'[\u4e00-\u9fa5]+|[^\u4e00-\u9fa5]+', text)
+
+    for seg in segments:
+        if re.match(r'[\u4e00-\u9fa5]', seg):
+            # 中文段 → jieba 分词
+            tokens.extend(jieba.lcut(seg))
+        else:
+            # 英文/数字段 → 正则按符号切分
+            parts = re.split(r'[^a-zA-Z0-9]+', seg)
+            tokens.extend(parts)
+
+    return [t for t in tokens if t.strip()]
+
+
+def build_hybrid_retriever(milvus_store: Milvus, k: int):
     """
     构建混合检索器：Milvus (Dense) + BM25 (Sparse)
     """
@@ -275,7 +316,6 @@ def build_hybrid_retriever(milvus_store: Milvus, expr: str, k: int):
         # 后续可以通过category等筛选做混合检索
         search_kwargs={
             "k": k,
-            # "expr": expr,  # 注入 query_analyzer 生成的 expr
             "fetch_k": k * 2,
             "lambda_mult": 0.6
         }
@@ -286,55 +326,48 @@ def build_hybrid_retriever(milvus_store: Milvus, expr: str, k: int):
     bm25_retriever = None
 
     try:
-        # 尝试从 Milvus 拉取数据构建 BM25
-        # ⚠️ 注意：仅适用于数据量 < 50k 的场景。海量数据请使用 Milvus 2.4+ 的 Sparse Vector 或 ElasticSearch
-        if milvus_store.col:
-            # output_fields 只取固定字段 + text
-            # 动态字段数据已在 text (page_content) 中，无需单独请求
-            output_fields = ["text"] + list(FIXED_FILTERABLE_FIELDS)
+        # 3. 优化采样策略：优先拉取最新的数据 (pk desc)
+        # BM25 构建使用全量数据 (pk >= 0)，因为 filter_expr 可能不准确
+        output_fields = ["text"] + list(FIXED_FILTERABLE_FIELDS)
 
-            # 拉取限制：防止内存溢出，拉取最新的 2000 条构建关键词索引
-            # 优先使用 query_analyzer 的 expr 过滤，避免全量拉取导致不相关文档稀释结果
-            bm25_expr = expr if expr else "pk >= 0"
-            try:
-                print(f"   🛡️ [BM25] Query with expr: {bm25_expr}")
-                res = milvus_store.col.query(
-                    expr=bm25_expr,
-                    output_fields=output_fields,
-                    limit=2000,
-                    offset=0
+        try:
+            print(f"   🛡️ [BM25] Query with pk >= 0")
+            # 增加 limit 到 5000 以覆盖更多数据 (视内存情况调整)
+            res = milvus_store.col.query(
+                expr="pk >= 0",
+                output_fields=output_fields,
+                limit=3000,
+                offset=0
+            )
+            print(f"   ✅ [BM25] query returned {len(res)} docs")
+        except Exception as e:
+            print(f"   ⚠️ [BM25] query failed: {e}")
+            res = []
+
+        if res:
+            bm25_docs = []
+            for r in res:
+                # 重建 Document 对象（动态提取固定字段）
+                meta = {f: r.get(f, "") for f in FIXED_FILTERABLE_FIELDS}
+                # Milvus LangChain 默认把 content 存在 'text' 字段
+                text_content = r.get("text") or r.get("page_content") or ""
+                if text_content:
+                    bm25_docs.append(
+                        Document(page_content=text_content, metadata=meta))
+
+            if bm25_docs:
+                # 注入自定义分词器
+                bm25_retriever = BM25Retriever.from_documents(
+                    bm25_docs,
+                    preprocess_func=custom_tokenizer
                 )
-                print(f"   ✅ [BM25] expr query returned {len(res)} docs")
-            except Exception as e:
-                # expr 过滤失败（动态字段不存在等），降级到全量拉取
-                print(f"   ⚠️ [BM25] expr failed: {e}")
-                print(f"   -> Fallback to pk >= 0")
-                res = milvus_store.col.query(
-                    expr="pk >= 0",
-                    output_fields=output_fields,
-                    limit=2000,
-                    offset=0
-                )
-
-            if res:
-                bm25_docs = []
-                for r in res:
-                    # 重建 Document 对象（动态提取固定字段）
-                    meta = {f: r.get(f, "") for f in FIXED_FILTERABLE_FIELDS}
-                    # Milvus LangChain 默认把 content 存在 'text' 字段
-                    text_content = r.get("text") or r.get("page_content") or ""
-                    if text_content:
-                        bm25_docs.append(
-                            Document(page_content=text_content, metadata=meta))
-
-                if bm25_docs:
-                    bm25_retriever = BM25Retriever.from_documents(bm25_docs)
-                    bm25_retriever.k = k  # 设置 BM25 的召回数量
-                    print(f"   -> BM25 索引构建完成 (Docs: {len(bm25_docs)})")
-                else:
-                    print("   -> Milvus 返回数据为空，跳过 BM25")
+                bm25_retriever.k = k  # 设置 BM25 的召回数量
+                print(
+                    f"   -> BM25 索引构建完成 (Docs: {len(bm25_docs)}) | Tokenizer: Regex")
             else:
-                print("   -> 无法从 Milvus 拉取数据，跳过 BM25")
+                print("   -> Milvus 返回数据为空，跳过 BM25")
+        else:
+            print("   -> 无法从 Milvus 拉取数据，跳过 BM25")
 
     except Exception as e:
         print(f"⚠️ [Hybrid] BM25 构建失败 (降级为纯向量检索): {e}")
@@ -356,16 +389,8 @@ def build_hybrid_retriever(milvus_store: Milvus, expr: str, k: int):
 # ==============================================================================
 
 
-def qa_interaction(question: str) -> str:
-    print(f"\n🤔 [RAG] Searching for: {question}")
-
-    # A. 意图分析 (生成 SQL/Expr)
-    expr = ""
-    if query_analyzer:
-        expr = query_analyzer.generate_expr(question)
-
-    embeddings = get_embedding_model()
-
+def _generate_answer(question: str, docs: List[Document]) -> str:
+    """通用生成函数"""
     llm = ChatOpenAI(
         model=MODEL_NAME,
         temperature=0.1,
@@ -374,72 +399,159 @@ def qa_interaction(question: str) -> str:
         openai_api_base=OPENAI_BASE_URL
     )
 
-    try:
-        # B. 连接 Milvus（使用新 Schema）
-        vector_store = get_vector_store(embeddings)
-
-        # C. 混合检索 (Recall)
-        target_k = get_retrieval_k(question)
-        recall_k = target_k * 3  # 召回 3 倍数量给 Reranker 筛选
-        hybrid_retriever = build_hybrid_retriever(vector_store, expr, recall_k)
-
-        print(f"🔍 [Retrieve] Fetching candidates...")
-        initial_docs = hybrid_retriever.invoke(question)
-
-        if not initial_docs:
-            return "❌ 没有在知识库中找到相关信息。"
-
-        # D. 去重 (Deduplicate)
-        # EnsembleRetriever 可能会返回重复文档 (如果 BM25 和 Vector 都命中了同一个)
-        unique_docs = []
-        seen_content = set()
-        for doc in initial_docs:
-            # 使用内容指纹去重
-            fingerprint = doc.page_content[:100]
-            if fingerprint not in seen_content:
-                unique_docs.append(doc)
-                seen_content.add(fingerprint)
-
-        print(
-            f"   -> Retrieved {len(unique_docs)} unique docs (from {len(initial_docs)} raw).")
-
-        # E. 精排 (Rerank)
-        print(f"⚖️ [Rerank] 使用 QwenReranker 进行精排...")
-        try:
-            reranker = QwenReranker()
-            final_docs = reranker.rerank(question, unique_docs, top_k=target_k)
-        except Exception as e:
-            print(f"⚠️ Rerank failed: {e}, using raw retrieval results.")
-            final_docs = unique_docs[:target_k]
-
-        # F. 生成 (Generate)
-        # 准备 Prompt
-        if RAG_PROMPT:
-            if isinstance(RAG_PROMPT, str):
-                custom_rag_prompt = PromptTemplate.from_template(RAG_PROMPT)
-            else:
-                custom_rag_prompt = RAG_PROMPT
+    if RAG_PROMPT:
+        if isinstance(RAG_PROMPT, str):
+            custom_rag_prompt = PromptTemplate.from_template(RAG_PROMPT)
         else:
-            # 默认 Prompt
-            template = """基于以下上下文回答问题。如果你不知道答案，请直接说不知道。\n\n上下文：\n{context}\n\n问题：{question}"""
-            custom_rag_prompt = PromptTemplate.from_template(template)
+            custom_rag_prompt = RAG_PROMPT
+    else:
+        # 默认 Prompt
+        template = """基于以下上下文回答问题。如果你不知道答案，请直接说不知道。\n\n上下文：\n{context}\n\n问题：{question}"""
+        custom_rag_prompt = PromptTemplate.from_template(template)
 
-        formatted_context = format_docs(final_docs)
+    formatted_context = format_docs(docs)
 
-        print("📝 [Generate] Generating answer...")
-        chain = (
-            custom_rag_prompt
-            | llm
-            | StrOutputParser()
+    print("📝 [Generate] Generating answer...")
+    chain = (
+        custom_rag_prompt
+        | llm
+        | StrOutputParser()
+    )
+
+    return chain.invoke({"context": formatted_context, "question": question})
+
+
+def _handle_sort_query(question: str, analysis: Dict) -> str:
+    """处理排序类查询 (直接查库 + 排序)"""
+    sort_field = analysis['sort_field']
+    sort_order = analysis['sort_order']
+    print(f"📉 [Sort Path] Field: {sort_field} | Order: {sort_order}")
+
+    embeddings = get_embedding_model()
+    vector_store = get_vector_store(embeddings)
+
+    try:
+        # 1. 拉取数据 (Limit 500 for memory safety)
+        # 获取所有相关字段以供展示
+        output_fields = ["text"] + list(FIXED_FILTERABLE_FIELDS)
+        if sort_field not in output_fields:
+            output_fields.append(sort_field)
+
+        print(f"   🔍 Querying Milvus for sort: pk >= 0 (limit=500)")
+        res = vector_store.col.query(
+            expr="pk >= 0",
+            output_fields=output_fields,
+            limit=500  # 限制排序数据量
         )
 
-        response = chain.invoke(
-            {"context": formatted_context, "question": question})
-        return response
+        if not res:
+            return "❌ 知识库为空，无法进行排序。"
+
+        # 2. Python 内存排序
+        def get_sort_val(item):
+            val = item.get(sort_field)
+            if val is None:
+                return -float('inf') if sort_order == 'desc' else float('inf')
+            try:
+                return float(val)
+            except ValueError:
+                return str(val)
+
+        reverse = (sort_order.lower() == "desc")
+        sorted_res = sorted(res, key=get_sort_val, reverse=reverse)
+
+        # 3. 截取 Top-K 并转换为 Documents
+        k = get_retrieval_k(question)
+        top_res = sorted_res[:k]
+
+        docs = []
+        for r in top_res:
+            meta = {f: r.get(f, "") for f in FIXED_FILTERABLE_FIELDS}
+            meta[sort_field] = r.get(sort_field, "")  # 确保排序字段可见
+
+            text = r.get("text") or r.get("page_content") or ""
+            if text:
+                docs.append(Document(page_content=text, metadata=meta))
+
+        if not docs:
+            return "❌ 未找到有效数据进行排序。"
+
+        # 4. 生成回答
+        return _generate_answer(question, docs)
 
     except Exception as e:
         traceback.print_exc()
-        return f"RAG 系统致命错误: {str(e)}"
+        return f"排序查询处理失败: {str(e)}"
+
+
+def _handle_semantic_query(question: str, analysis: Dict) -> str:
+    """处理语义检索查询 (RAG 流程)"""
+    search_query = analysis['search_query']
+    print(f"🧠 [Semantic Path] Query: {search_query}")
+
+    embeddings = get_embedding_model()
+    vector_store = get_vector_store(embeddings)
+
+    # 1. Recall (Hybrid)
+    target_k = get_retrieval_k(question)
+    recall_k = target_k * 3
+
+    # 注意：不再传入 filter_expr
+    hybrid_retriever = build_hybrid_retriever(vector_store, recall_k)
+
+    print(f"🔍 [Retrieve] Fetching candidates...")
+    initial_docs = hybrid_retriever.invoke(search_query)
+
+    if not initial_docs:
+        return "❌ 没有在知识库中找到相关信息。"
+
+    # 2. Deduplicate
+    unique_docs = []
+    seen_content = set()
+    for doc in initial_docs:
+        fingerprint = doc.page_content[:100]
+        if fingerprint not in seen_content:
+            unique_docs.append(doc)
+            seen_content.add(fingerprint)
+
+    print(f"   -> Retrieved {len(unique_docs)} unique docs.")
+
+    # 3. Rerank
+    print(f"⚖️ [Rerank] 使用 QwenReranker 进行精排...")
+    try:
+        reranker = QwenReranker()
+        final_docs = reranker.rerank(question, unique_docs, top_k=target_k)
+    except Exception as e:
+        print(f"⚠️ Rerank failed: {e}, using raw retrieval results.")
+        final_docs = unique_docs[:target_k]
+
+    # 4. Generate
+    return _generate_answer(question, final_docs)
+
+
+def qa_interaction(question: str) -> str:
+    print(f"\n🤔 [RAG] Searching for: {question}")
+
+    # A. 意图分析
+    analysis = {
+        "filter_expr": "",
+        "search_query": question,
+        "sort_field": "",
+        "sort_order": ""
+    }
+
+    if query_analyzer:
+        try:
+            # 使用新的 analyze 方法
+            analysis = query_analyzer.analyze(question)
+        except Exception as e:
+            print(f"⚠️ Query analysis failed: {e}")
+
+    # B. 分发逻辑
+    if analysis.get("sort_field"):
+        return _handle_sort_query(question, analysis)
+    else:
+        return _handle_semantic_query(question, analysis)
 
 
 if __name__ == "__main__":

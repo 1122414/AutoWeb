@@ -1,6 +1,6 @@
 import os
 import json
-from typing import Optional
+from typing import Optional, Dict
 from langchain_openai import ChatOpenAI
 
 # 导入配置
@@ -20,11 +20,17 @@ class QueryAnalyzer:
             openai_api_base=OPENAI_BASE_URL
         )
 
-    def generate_expr(self, question: str) -> str:
+    def analyze(self, question: str) -> Dict:
         """
-        分析用户问题，生成 Milvus expr 过滤表达式。
+        分析用户问题，生成结构化查询参数。
 
-        通过字段注册表获取可用字段 → 注入 Prompt → LLM 生成 expr。
+        Returns:
+            {
+                "filter_expr": "category == 'movie'",  # 类目过滤（当前暂不启用）
+                "search_query": "日本 攻略",            # 语义检索词
+                "sort_field": "",                       # 排序字段（可选）
+                "sort_order": ""                        # 排序方向（可选）
+            }
         """
         print(f"🕵️ Analyzing query: {question}")
         try:
@@ -42,7 +48,6 @@ class QueryAnalyzer:
             raw_output = response.content.strip()
 
             # 3. 解析 JSON 输出
-            # 尝试提取 JSON（处理 LLM 可能包裹 markdown 代码块的情况）
             json_str = raw_output
             if "```" in json_str:
                 json_str = json_str.split("```")[1]
@@ -51,23 +56,31 @@ class QueryAnalyzer:
                 json_str = json_str.strip()
 
             result = json.loads(json_str)
-            expr = result.get("expr", "")
-            search_query = result.get("search_query", question)
 
-            if expr:
-                print(f"🎯 Generated expr: \"{expr}\"")
-                print(f"   Search query: \"{search_query}\"")
-            else:
-                print("   -> No filter, full search.")
+            # 标准化输出
+            analysis = {
+                "filter_expr": result.get("filter_expr", ""),
+                "search_query": result.get("search_query", question),
+                "sort_field": result.get("sort_field", ""),
+                "sort_order": result.get("sort_order", ""),
+            }
 
-            return expr
+            # 打印分析结果
+            if analysis["filter_expr"]:
+                print(f"🎯 Filter expr: \"{analysis['filter_expr']}\"")
+            if analysis["sort_field"]:
+                print(
+                    f"📊 Sort: {analysis['sort_field']} ({analysis['sort_order']})")
+            print(f"   Search query: \"{analysis['search_query']}\"")
+
+            return analysis
 
         except json.JSONDecodeError as e:
             print(f"⚠️ JSON parse failed: {e}, raw: {raw_output}")
-            return ""
+            return {"filter_expr": "", "search_query": question, "sort_field": "", "sort_order": ""}
         except Exception as e:
             print(f"⚠️ Analysis failed: {e}")
-            return ""
+            return {"filter_expr": "", "search_query": question, "sort_field": "", "sort_order": ""}
 
 
 # 单例模式
