@@ -62,27 +62,42 @@ ACTION_CODE_GEN_PROMPT = """
    - **等待**: `tab.wait.load_start()`, `tab.wait.ele_displayed('x://...')`
    - **状态**: `if el.states.is_displayed:`, `if el.states.is_enabled:`
    - **新页**: `new_tab = el.click.for_new_tab()`; 操作 `new_tab`; `new_tab.close()`
-3. **点击跳转处理 (CRITICAL - 健壮模式)**:
-   - ⚠️ **不要盲目使用 `click.for_new_tab()`**！很多网站点击后是**当前页跳转**而非新标签页！
-   - ⚠️ **禁止二次点击**！try中使用el.click.for_new_tab()之后，就不要在except中使用el.click()！
-   - **健壮模式（推荐）**：先尝试新标签页，失败则回退到当前页：
-     ```
-     old_url = tab.url
-     try:
-         new_tab = el.click.for_new_tab()
-         print(f"-> Opened new tab: {{new_tab.url}}")
-         # 操作 new_tab...
-     except Exception as e:
-         # Fallback: 可能是当前页跳转
-         tab.wait(2)
-         if tab.url != old_url:
-             print(f"-> Page navigated: {{old_url}} -> {{tab.url}}")
-             # 继续在 tab 上操作...
-         else:
-             print(f"-> Click may have failed: {{e}}")
-     ```
-   - **循环爬取场景**：每次迭代完成后 `new_tab.close()` 返回列表（仅当确实打开了新标签页时）
-   - **单次进入场景**：如果页面已跳转（无论新标签页还是当前页），无需额外操作
+
+## 浏览器交互：点击与标签页维护规则 (CRITICAL)
+操作浏览器时，必须根据 strategy 字段和页面反馈严格管理标签页，防止 Agent 在错误的页面上运行。
+
+### 3.1 点击策略判断
+- ⚠️ **严禁盲目使用 `click.for_new_tab()`**！绝大多数链接是**当前页跳转**而非新标签页！
+- **检查字段**：查看 `strategy.get('opens_new_tab')` 标记。
+
+- **模式 A：明确新标签页** (值为 `true`)
+  - 必须使用 `el.click.for_new_tab()`。
+  - **后续动作**：操作完成后必须 `new_tab.close()`，否则会导致浏览器内存溢出和 Observer 获取到错误的 DOM。
+- **模式 B：当前页跳转或未知** (值为 `false` 或缺失)
+  - **严禁**使用 `for_new_tab()`。
+  - **执行方式**：使用 `el.click(by_js=True)`，JS 点击具有更好的反爬穿透性。
+
+### 3.2 标签页计数健壮逻辑 (防死锁方案)
+如果任务涉及跳转（如点击搜索结果），必须在代码中包含"状态校验"。请按以下标准模板编写：
+  ```
+  old_url = tab.url
+  old_tab_ids = browser.tab_ids
+  el.click(by_js=True)
+  tab.wait(1.5, 3)
+  if len(browser.tab_ids) > len(old_tab_ids):
+      new_tab = browser.get_tab(browser.latest_tab)
+      print(f"-> 检测到新标签页: {{new_tab.url}}")
+      # 操作 new_tab...
+  elif tab.url != old_url:
+      print(f"-> 当前页面已跳转: {{old_url}} -> {{tab.url}}")
+      # 继续在 tab 上操作...
+  else:
+      print(f"-> 点击后留在原页面，尝试检查页面元素变化")
+  ```
+
+### 3.3 循环爬取/翻页场景
+- **列表页 -> 详情页循环**：点击进入(新标签) -> 提取数据 -> `new_tab.close()` -> 回到列表页继续。**严禁**在不关闭新标签页的情况下连续打开多个详情页。
+- **翻页逻辑**：翻页操作通常不产生新标签页，仅需判断 `tab.url` 是否改变或特定元素是否刷新。
 4. **流程控制**: 仅在 Explicit Loop 时使用 `for`。禁止 `while True`。
 5. **数据安全 (Data Saving - CRITICAL)**: 
    - **严禁**手动编写 `open()`/`csv.writer()` 代码保存数据！
@@ -127,60 +142,86 @@ ACTION_CODE_GEN_PROMPT = """
 3. **元素提取简洁原则 (EAFP Style - CRITICAL)**:
    - **严禁**先用 `if ele:` 检查元素存在性再取值，这种写法多此一举且容易报错！
    - **必须**直接用 `try...except` 包裹元素提取操作。
-   - ❌ 错误做法 (LBYL - 啰嗦且易错):
+   - ⚠️ **字段级粒度 (CRITICAL)**：在循环提取多个字段时，**必须为每个字段单独使用 try-except**！
+     - **严禁**将整条记录的所有字段包裹在一个大的 try 块中！否则一个字段失败会导致整条记录丢失！
+     - 正确模式：先创建 `row = {{}}` 字典，然后每个字段单独 try-except 赋值，最后判断是否有有效值再 append。
+   - ❌ 错误做法 (整条 try - 一个字段失败，整条丢失):
      ```
-     name_ele = player.ele("x:.//h3[@class='name']")
-     if name_ele:
-         player_data["name"] = name_ele.text  # 如果后续定位失败，这里会报 AttributeError
-     else:
-         print(f"Warning: Name not found")
+     for item in items:
+         try:
+             title = item.ele('.title').text
+             company = item.ele('.company').text
+             salary = item.ele('.salary').text
+             results.append({{"title": title, "company": company, "salary": salary}})
+         except Exception as e:
+             print(f"Warning: {{e}}")  # company 失败 → title 和 salary 也丢了！
      ```
-   - ✅ 正确做法 (EAFP - 简洁健壮):
+   - ✅ 正确做法 (字段级 try - 最大化数据保留):
      ```
-     try:
-         player_data["name"] = player.ele("x:.//h3[@class='name']").text
-     except Exception as e:
-         print(f"Warning: Name extraction failed - {{e}}")
+     for item in items:
+         row = {{}}
+         try:
+             row["title"] = item.ele('.title').text
+         except:
+             row["title"] = ""
+         try:
+             row["company"] = item.ele('.company').text
+         except:
+             row["company"] = ""
+         try:
+             row["salary"] = item.ele('.salary').text
+         except:
+             row["salary"] = ""
+         if any(row.values()):
+             results.append(row)
      ```
-   - **原因**: Python 推崇 EAFP (Easier to Ask Forgiveness than Permission)，直接尝试并捕获异常比预先检查更 Pythonic 且更健壮。
+   - **原因**: Python 推崇 EAFP (Easier to Ask Forgiveness than Permission)，直接尝试并捕获异常比预先检查更 Pythonic 且更健壮。字段级粒度确保单个字段失败不会影响其他字段的提取。
 4. **元素失效防护 (Stale Element Prevention - CRITICAL)**: 
    - ⚠️ **核心问题**: 当执行 `tab.back()` 或关闭标签页后，页面刷新，**之前获取的元素引用会全部失效** (Stale Element)！
    - ⚠️ **致命错误**: 预先获取元素列表然后循环 (`items = tab.eles(); for item in items: ...`)，在第一次 `back()` 后所有 `items` 都失效！
-   - ✅ **正确做法**: 使用**索引循环**，每次迭代**重新获取**元素列表：
+   - ✅ **正确做法**: 使用**索引循环** + **标签页计数健壮逻辑**，每次迭代**重新获取**元素列表：
      ```
-     # 索引循环 + 每次重新获取
      for idx in range(len(tab.eles('.item'))):
-         items = tab.eles('.item')  # 每次都重新获取！
+         items = tab.eles('.item')
          item = items[idx]
          old_url = tab.url
-         try:
-             new_tab = item.click.for_new_tab()
+         old_tab_ids = browser.tab_ids
+         item.click(by_js=True)
+         tab.wait(1.5, 3)
+         if len(browser.tab_ids) > len(old_tab_ids):
+             new_tab = browser.get_tab(browser.latest_tab)
              # ... 在 new_tab 上采集 ...
              new_tab.close()
-         except Exception as e:
+         elif tab.url != old_url:
+             # ... 在 tab 上采集 (当前页跳转) ...
+             tab.back()
              tab.wait(2)
-             if tab.url != old_url:
-                 # ... 在 tab 上采集 ...
-                 tab.back()
-                 tab.wait(2)
-                 tab = browser.latest_tab  # 刷新 tab 引用
+             tab = browser.latest_tab
+         else:
+             print(f"-> Click did not navigate at index {{idx}}, skipping")
      ```
    - **关键点**: `tab.eles()` 必须放在循环**内部**，确保每次都拿到新鲜的元素引用。
+   - **严禁**在不关闭新标签页的情况下连续打开多个详情页。
 
 # 示例 (Few-Shot)
-## Ex1: 爬取列表并保存数据 (完整流程)
+## Ex1: 爬取列表并保存数据 (完整流程 - 字段级 try-except)
 User: "爬取电影列表" / Plan: "遍历 .movie-item，采集标题和链接，保存到 JSON"
 Code:
 results = []
 items = tab.eles('.movie-item')
 print(f"-> Found {{len(items)}} movies")
 for item in items:
+    row = {{}}
     try:
-        title = item.ele('.title').text
-        link = item.ele('tag:a').link
-        results.append({{"title": title, "link": link}})
-    except Exception as e:
-        print(f"Warning: {{e}}")
+        row["title"] = item.ele('.title').text
+    except:
+        row["title"] = ""
+    try:
+        row["link"] = item.ele('tag:a').link
+    except:
+        row["link"] = ""
+    if any(row.values()):
+        results.append(row)
 print(f"-> Total collected: {{len(results)}}")
 toolbox.save_data(results, "output/movies.json")
 

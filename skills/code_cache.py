@@ -482,10 +482,19 @@ class CodeCacheManager:
         )
         return True
 
-    def update_stats(self, cache_id: str, success: bool) -> bool:
-        action = "success" if success else "fail"
-        print(f"📊 [CodeCache] Recording {action} for cache_id: {cache_id}")
-        return True
+    def invalidate(self, cache_id: str) -> bool:
+        """失效指定缓存（从 Milvus 中删除），防止坏代码反复命中"""
+        if not cache_id:
+            return False
+        try:
+            collection = self._ensure_collection()
+            safe = cache_id.replace('"', '\\"')
+            collection.delete(expr=f'cache_id == "{safe}"')
+            print(f"🗑️ [CodeCache] Invalidated: {cache_id}")
+            return True
+        except Exception as exc:
+            print(f"⚠️ [CodeCache] Invalidate error: {exc}")
+            return False
 
 
 code_cache_manager = CodeCacheManager()

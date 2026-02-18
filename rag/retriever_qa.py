@@ -170,13 +170,43 @@ def format_docs(docs):
     return "\n\n".join(f"[片段 {i+1}] {doc.page_content}" for i, doc in enumerate(docs))
 
 
+def _cn_num_to_int(cn: str) -> int:
+    """中文数字转阿拉伯数字（支持 一~九十九）"""
+    digit_map = {"一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5,
+                 "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
+    if cn == "十":
+        return 10
+    result = 0
+    for ch in cn:
+        if ch == "十":
+            result = (result or 1) * 10
+        elif ch in digit_map:
+            result += digit_map[ch]
+    return result if result else 0
+
+
 def get_retrieval_k(question: str) -> int:
     """根据问题类型动态调整 Top-K"""
+    import re
+    # 1. 解析 "前N名/top N" — 阿拉伯数字
+    top_n_match = re.search(r'(?:前|top)\s*(\d+)', question, re.IGNORECASE)
+    if top_n_match:
+        n = int(top_n_match.group(1))
+        return max(n * 2, 15)
+
+    # 2. 解析 "前十名/前二十" — 中文数字
+    cn_match = re.search(r'前([一二两三四五六七八九十]+)', question)
+    if cn_match:
+        n = _cn_num_to_int(cn_match.group(1))
+        if n > 0:
+            return max(n * 2, 15)
+
+    # 3. 全局性查询
     global_keywords = ["全部", "所有", "列表", "清单",
                        "总结", "分析", "all", "summary", "list"]
     if any(kw in question.lower() for kw in global_keywords):
-        return 50
-    return 20
+        return 15
+    return 10
 
 # ==============================================================================
 # 3. 混合检索构建器
@@ -258,16 +288,32 @@ def build_hybrid_retriever(milvus_store: Milvus, expr: str, k: int):
         # 尝试从 Milvus 拉取数据构建 BM25
         # ⚠️ 注意：仅适用于数据量 < 50k 的场景。海量数据请使用 Milvus 2.4+ 的 Sparse Vector 或 ElasticSearch
         if milvus_store.col:
-            # 动态获取 output_fields（固定字段 + text）
-            all_fields = get_all_filterable_fields()
-            output_fields = ["text"] + all_fields.get("fixed_fields", [])
+            # output_fields 只取固定字段 + text
+            # 动态字段数据已在 text (page_content) 中，无需单独请求
+            output_fields = ["text"] + list(FIXED_FILTERABLE_FIELDS)
+
             # 拉取限制：防止内存溢出，拉取最新的 2000 条构建关键词索引
-            res = milvus_store.col.query(
-                expr="pk >= 0",
-                output_fields=output_fields,
-                limit=2000,
-                offset=0
-            )
+            # 优先使用 query_analyzer 的 expr 过滤，避免全量拉取导致不相关文档稀释结果
+            bm25_expr = expr if expr else "pk >= 0"
+            try:
+                print(f"   🛡️ [BM25] Query with expr: {bm25_expr}")
+                res = milvus_store.col.query(
+                    expr=bm25_expr,
+                    output_fields=output_fields,
+                    limit=2000,
+                    offset=0
+                )
+                print(f"   ✅ [BM25] expr query returned {len(res)} docs")
+            except Exception as e:
+                # expr 过滤失败（动态字段不存在等），降级到全量拉取
+                print(f"   ⚠️ [BM25] expr failed: {e}")
+                print(f"   -> Fallback to pk >= 0")
+                res = milvus_store.col.query(
+                    expr="pk >= 0",
+                    output_fields=output_fields,
+                    limit=2000,
+                    offset=0
+                )
 
             if res:
                 bm25_docs = []
@@ -322,6 +368,7 @@ def qa_interaction(question: str) -> str:
     llm = ChatOpenAI(
         model=MODEL_NAME,
         temperature=0.1,
+        max_tokens=4096,  # 防止长表格回答被截断
         openai_api_key=OPENAI_API_KEY,
         openai_api_base=OPENAI_BASE_URL
     )

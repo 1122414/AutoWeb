@@ -13,7 +13,7 @@ from core.state_v2 import AgentState
 from skills.actor import BrowserActor
 from skills.logger import logger
 from prompts.action_prompts import ACTION_CODE_GEN_PROMPT
-from prompts.planner_prompts import PLANNER_START_PROMPT, PLANNER_STEP_PROMPT, PLANNER_CONTINUE_PROMPT
+from prompts.planner_prompts import PLANNER_START_PROMPT, PLANNER_STEP_PROMPT, PLANNER_CONTINUE_PROMPT, PLANNER_FORCE_SKIP_PROMPT
 
 # ====== 依赖注入辅助函数 ======
 
@@ -775,6 +775,25 @@ def planner_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lite
     last_verification = verification.get(
         "summary", "(无)") if verification else "(无)"
 
+    # [V8] 连续失败保底：跟踪连续步骤失败次数
+    step_fail_count = state.get("_step_fail_count", 0)
+    is_last_step_fail = verification.get(
+        "is_success", True) is False if verification else False
+    if is_last_step_fail:
+        step_fail_count += 1
+        logger.info(f"   ⚠️ [Planner] 连续失败计数: {step_fail_count}")
+    else:
+        step_fail_count = 0
+
+    MAX_STEP_FAIL = 2  # 同一步骤最多失败 2 次，之后强制换方案
+    fail_override_hint = ""
+    if step_fail_count >= MAX_STEP_FAIL:
+        fail_override_hint = PLANNER_FORCE_SKIP_PROMPT.format(
+            step_fail_count=step_fail_count,
+            last_verification=last_verification
+        )
+        logger.info(f"   🚨 [Planner] 连续失败 {step_fail_count} 次，注入强制跳过指令")
+
     finished_steps_str = "\n".join(
         [f"- {s}" for s in finished_steps]) if finished_steps else "(无)"
 
@@ -786,7 +805,7 @@ def planner_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lite
         suggestions_str=suggestions_str,
         reflection_str=reflection_str,
         last_verification=last_verification
-    )
+    ) + fail_override_hint
     response = llm.invoke([HumanMessage(content=prompt)])
     content = response.content
     is_finished = "【任务已完成】" in content
@@ -795,11 +814,26 @@ def planner_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lite
         "messages": [response],
         "plan": content,
         "loop_count": loop_count + 1,
-        "is_complete": is_finished
+        "is_complete": is_finished,
+        "_step_fail_count": step_fail_count  # [V8] 持久化失败计数
     }
 
     # 3. 动态路由
     if is_finished:
+        # [V8] RAG 存储拦截：Planner 判定完成前，检查用户是否要求存入向量数据库
+        rag_goal_keywords = ["向量数据库", "知识库", "Milvus", "save_to_kb", "存入向量"]
+        rag_done_keywords = ["store_kb", "存入向量", "已存入知识库", "RAG存储"]
+        task_needs_rag = any(kw in task for kw in rag_goal_keywords)
+        rag_already_done = any(
+            any(dk in step for dk in rag_done_keywords) for step in finished_steps
+        ) if finished_steps else False
+
+        if task_needs_rag and not rag_already_done:
+            logger.info("   📚 [Planner] 用户目标包含向量数据库存储，但尚未执行 → 拦截完成，跳转 RAGNode")
+            update_dict["is_complete"] = False
+            update_dict["rag_task_type"] = "store_kb"
+            return Command(update=update_dict, goto="RAGNode")
+
         logger.info("🏁 [Planner] 判定任务完成，流程结束。")
         return Command(update=update_dict, goto="__end__")
 
@@ -917,15 +951,24 @@ def executor_node(state: AgentState, config: RunnableConfig) -> Command[Literal[
             error_type, error_kw = error_in_log
             logger.info(f"   ⚠️ 检测到 {error_type} 错误: {error_kw}")
 
-            # [V4] 缓存代码失败：直接跳 Planner，不尝试 Coder 修复
+            # [V4] 缓存代码失败：失效缓存 + 跳 Planner
             if code_source == "cache":
                 logger.info(
                     f"   ⚠️ 缓存代码失败，标记 _cache_failed_this_round，跳 Planner")
+                # [V8] 失效坏缓存，防止下次再命中
+                cache_hit_id = state.get("_cache_hit_id", "")
+                if cache_hit_id:
+                    try:
+                        from skills.code_cache import code_cache_manager
+                        code_cache_manager.invalidate(cache_hit_id)
+                    except Exception as e:
+                        logger.info(f"   ⚠️ [CodeCache] 失效失败: {e}")
                 return Command(
                     update={
                         "messages": [AIMessage(content=f"【缓存代码失败】{error_kw}，重新规划")],
                         "execution_log": execution_log,
                         "_cache_failed_this_round": True,
+                        "_cache_hit_id": None,
                         "reflections": [f"缓存代码失败: {error_kw}，需要重新生成"]
                     },
                     goto="Planner"
@@ -1122,9 +1165,18 @@ def verifier_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lit
         logger.info("   ❌ Step Failed")
         updates["reflections"] = [f"Step Failed: {summary}"]
 
-        # [V4] 缓存代码验收失败：跳 Planner
+        # [V4] 缓存代码验收失败：失效缓存 + 跳 Planner
         if code_source == "cache":
+            # [V8] 失效坏缓存
+            cache_hit_id = state.get("_cache_hit_id", "")
+            if cache_hit_id:
+                try:
+                    from skills.code_cache import code_cache_manager
+                    code_cache_manager.invalidate(cache_hit_id)
+                except Exception as e:
+                    logger.info(f"   ⚠️ [CodeCache] 失效失败: {e}")
             updates["_cache_failed_this_round"] = True
+            updates["_cache_hit_id"] = None
             return Command(update=updates, goto="Planner")
 
         # LLM 代码失败：回 Observer 重试

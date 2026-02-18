@@ -202,22 +202,24 @@ def interactive_loop(app, browser_instance, llm, observer):
 
                         print(
                             "\n   验收选项: [Enter=接受] [s=强制成功] [f=强制失败] [d=强制完成]")
-                        user_override = input("   👤 > ").strip().lower()
+                        print(
+                            "   或输入任意文字作为反馈，Planner 将据此重新规划")
+                        user_override = input("   👤 > ").strip()
 
                         # 根据用户选择更新状态和跳转目标
-                        if user_override == "s":
+                        if user_override.lower() == "s":
                             print("   ✅ 人工覆盖: 强制成功")
                             app.update_state(config, {
                                 "verification_result": {},
                                 "finished_steps": [summary]
                             }, as_node="Verifier")
-                        elif user_override == "f":
+                        elif user_override.lower() == "f":
                             print("   ❌ 人工覆盖: 强制失败")
                             app.update_state(config, {
                                 "verification_result": {},
                                 "reflections": [f"Step Failed (Manual): {summary}"]
                             }, as_node="Verifier")
-                        elif user_override == "d":
+                        elif user_override.lower() == "d":
                             print("   🎉 人工覆盖: 强制完成任务")
                             app.update_state(config, {
                                 "verification_result": {},
@@ -225,6 +227,18 @@ def interactive_loop(app, browser_instance, llm, observer):
                                 "finished_steps": [summary]
                             }, as_node="Verifier")
                             goto_node = "__end__"  # 任务完成，跳转到结束
+                        elif user_override:
+                            # 人工反馈：将用户输入注入 reflections，让 Planner 据此重新规划
+                            print(f"   📝 人工反馈已注入，Planner 将据此重新规划")
+                            app.update_state(config, {
+                                "verification_result": {
+                                    "is_success": is_success,
+                                    "is_done": False,
+                                    "summary": f"{summary} | 用户反馈: {user_override}"
+                                },
+                                "reflections": [f"用户反馈: {user_override}"],
+                                "_cache_failed_this_round": True,  # 强制跳过缓存，走 Coder 重新生成
+                            }, as_node="Verifier")
                         else:
                             # Enter = 接受当前结果
                             if is_done:

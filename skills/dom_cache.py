@@ -54,7 +54,8 @@ class DomCacheManager:
         self._collection: Optional[Collection] = None
         self._embeddings = None
         self._vector_dim: Optional[int] = None
-        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="DomCache")
+        self._executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="DomCache")
         self._weights = normalize_weights(
             (DOM_CACHE_WEIGHT_URL, DOM_CACHE_WEIGHT_DOM, DOM_CACHE_WEIGHT_TASK),
             defaults=(0.2, 0.7, 0.1),
@@ -88,7 +89,8 @@ class DomCacheManager:
             FieldSchema("url_pattern", DataType.VARCHAR, max_length=512),
             FieldSchema("task_intent", DataType.VARCHAR, max_length=2000),
             FieldSchema("dom_hash", DataType.VARCHAR, max_length=64),
-            FieldSchema("locator_suggestions", DataType.VARCHAR, max_length=65535),
+            FieldSchema("locator_suggestions",
+                        DataType.VARCHAR, max_length=65535),
             FieldSchema("created_at", DataType.VARCHAR, max_length=32),
             FieldSchema("updated_at", DataType.VARCHAR, max_length=32),
             FieldSchema("expire_at", DataType.VARCHAR, max_length=32),
@@ -133,14 +135,18 @@ class DomCacheManager:
             ),
             consistency_level="Bounded",
         )
-        vec_idx = {"metric_type": "COSINE", "index_type": "AUTOINDEX", "params": {}}
+        vec_idx = {"metric_type": "COSINE",
+                   "index_type": "AUTOINDEX", "params": {}}
         collection.create_index(field_name="url_vector", index_params=vec_idx)
         collection.create_index(field_name="dom_vector", index_params=vec_idx)
         collection.create_index(field_name="task_vector", index_params=vec_idx)
-        collection.create_index(field_name="url_pattern", index_params={"index_type": "INVERTED"})
-        collection.create_index(field_name="dom_hash", index_params={"index_type": "INVERTED"})
+        collection.create_index(field_name="url_pattern", index_params={
+                                "index_type": "INVERTED"})
+        collection.create_index(field_name="dom_hash", index_params={
+                                "index_type": "INVERTED"})
         collection.load()
-        print(f"✅ [DomCache] Created collection '{DOM_CACHE_COLLECTION}' (dim={dim})")
+        print(
+            f"✅ [DomCache] Created collection '{DOM_CACHE_COLLECTION}' (dim={dim})")
         return collection
 
     def _ensure_collection(self) -> Collection:
@@ -169,7 +175,8 @@ class DomCacheManager:
         try:
             parsed = urlparse(url)
             domain_parts = parsed.netloc.split(".")
-            domain = ".".join(domain_parts[-2:]) if len(domain_parts) >= 2 else parsed.netloc
+            domain = ".".join(
+                domain_parts[-2:]) if len(domain_parts) >= 2 else parsed.netloc
             path = re.sub(r"/\d+", "/*", parsed.path or "")
             return f"{domain}{path}"[:512]
         except Exception:
@@ -191,16 +198,20 @@ class DomCacheManager:
         return hashlib.md5(compact.encode("utf-8")).hexdigest()[:16]
 
     def _embed_fields(self, url_pattern: str, dom_skeleton: str, task_intent: str) -> Dict[str, List[float]]:
-        texts = [url_pattern or "", self._compact_dom(dom_skeleton), task_intent or ""]
+        texts = [url_pattern or "", self._compact_dom(
+            dom_skeleton), task_intent or ""]
         vectors = self._get_embeddings().embed_documents(texts)
         return {"url_vector": vectors[0], "dom_vector": vectors[1], "task_vector": vectors[2]}
 
     def _build_requests(self, vectors: Dict[str, List[float]], limit: int) -> List[AnnSearchRequest]:
         params = {"metric_type": "COSINE", "params": {}}
         return [
-            AnnSearchRequest(data=[vectors["url_vector"]], anns_field="url_vector", param=params, limit=limit),
-            AnnSearchRequest(data=[vectors["dom_vector"]], anns_field="dom_vector", param=params, limit=limit),
-            AnnSearchRequest(data=[vectors["task_vector"]], anns_field="task_vector", param=params, limit=limit),
+            AnnSearchRequest(data=[vectors["url_vector"]],
+                             anns_field="url_vector", param=params, limit=limit),
+            AnnSearchRequest(data=[vectors["dom_vector"]],
+                             anns_field="dom_vector", param=params, limit=limit),
+            AnnSearchRequest(data=[vectors["task_vector"]],
+                             anns_field="task_vector", param=params, limit=limit),
         ]
 
     def _decode_locator_suggestions(self, raw: str) -> List[Dict]:
@@ -232,7 +243,8 @@ class DomCacheManager:
             now_dt = datetime.now()
             url_pattern = self._normalize_url(current_url)
             task_intent = self._task_intent(user_task)
-            vectors = self._embed_fields(url_pattern, dom_skeleton, task_intent)
+            vectors = self._embed_fields(
+                url_pattern, dom_skeleton, task_intent)
 
             requests = self._build_requests(vectors, max(top_k, 8))
             ranker = WeightedRanker(*self._weights)
@@ -261,9 +273,12 @@ class DomCacheManager:
                 tag="DomCache",
             )
             for item in raw_hits:
-                score = float(getattr(item, "score", getattr(item, "distance", 0.0)))
-                locator_raw = read_hit_field(item, "locator_suggestions") or "[]"
-                hit_task_intent = (read_hit_field(item, "task_intent") or "").strip()
+                score = float(
+                    getattr(item, "score", getattr(item, "distance", 0.0)))
+                locator_raw = read_hit_field(
+                    item, "locator_suggestions") or "[]"
+                hit_task_intent = (read_hit_field(
+                    item, "task_intent") or "").strip()
                 # Hard gate: task intent similarity must pass threshold, even if hybrid score is high.
                 task_vec = self._get_embeddings().embed_query(hit_task_intent or "")
                 task_sim = self._cosine_similarity(query_task_vec, task_vec)
@@ -277,10 +292,13 @@ class DomCacheManager:
                     DomCacheHit(
                         id=(read_hit_field(item, "cache_id") or ""),
                         score=score,
-                        locator_suggestions=self._decode_locator_suggestions(locator_raw),
-                        url_pattern=(read_hit_field(item, "url_pattern") or ""),
+                        locator_suggestions=self._decode_locator_suggestions(
+                            locator_raw),
+                        url_pattern=(read_hit_field(
+                            item, "url_pattern") or ""),
                         dom_hash=(read_hit_field(item, "dom_hash") or ""),
-                        task_intent=(read_hit_field(item, "task_intent") or ""),
+                        task_intent=(read_hit_field(
+                            item, "task_intent") or ""),
                     )
                 )
             return hits[:top_k]
@@ -299,13 +317,15 @@ class DomCacheManager:
             collection = self._ensure_collection()
             now = datetime.now()
             now_iso = now.strftime("%Y-%m-%dT%H:%M:%S")
-            exp_iso = (now + timedelta(hours=max(1, DOM_CACHE_TTL_HOURS))).strftime("%Y-%m-%dT%H:%M:%S")
+            exp_iso = (now + timedelta(hours=max(1, DOM_CACHE_TTL_HOURS))
+                       ).strftime("%Y-%m-%dT%H:%M:%S")
 
             url_pattern = self._normalize_url(current_url)
             task_intent = self._task_intent(user_task)
             dom_hash = self._compute_dom_hash(dom_skeleton)
             cache_id = f"{dom_hash}_{now.strftime('%Y%m%d%H%M%S')}"
-            vectors = self._embed_fields(url_pattern, dom_skeleton, task_intent)
+            vectors = self._embed_fields(
+                url_pattern, dom_skeleton, task_intent)
 
             # pymilvus insert 使用“按列”格式:
             # 外层 list 是字段列，内层 list 是该字段这一批次的值（这里每列都只有 1 个值，即插入 1 行）。
@@ -328,7 +348,8 @@ class DomCacheManager:
                 [0],
                 [0],
             ]
-            insert_and_flush(collection=collection, data=payload, tag="DomCache")
+            insert_and_flush(collection=collection,
+                             data=payload, tag="DomCache")
             print(
                 f"✅ [DomCache] Saved cache_id={cache_id}, url={url_pattern}, "
                 f"ttl_hours={max(1, DOM_CACHE_TTL_HOURS)}"
@@ -360,6 +381,7 @@ class DomCacheManager:
         return True
 
     def invalidate(self, cache_id: str) -> bool:
+        """失效指定缓存（从 Milvus 中删除），防止坏代码反复命中"""
         if not cache_id:
             return False
         try:

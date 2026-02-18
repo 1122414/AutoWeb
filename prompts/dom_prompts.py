@@ -83,6 +83,20 @@ DRISSION_LOCATOR_PROMPT = """
    - 严禁定位到 TextNode (如 `/text()`) 或 Attribute (如 `/@href`)。
    - 必须定位到 Element 节点 (如 `x://a`)。
 
+5. **新标签页预判 (opens_new_tab - CRITICAL)**:
+   - 当 `action_suggestion` 为 `click` 时，必须精准判断点击后是否会打开新标签页。
+   - ⚠️ **严禁将 `rel="noopener"` 或 `rel="noreferrer"` 作为判断依据**！它们是安全属性，不控制跳转方式！
+   - **判定为 `true` 的条件**（优先级从高到低）：
+     1. 元素自身或其父级 `<a>` 标签包含 `target="_blank"` 属性
+     2. 页面 `<head>` 中存在 `<base target="_blank">` 且该元素为链接
+     3. 元素的 `onclick` 属性或 `href` 中明确包含 `window.open` 代码
+     4. 元素包含语义提示，如 `aria-label="在新窗口打开"` 或文本包含 "Open in new tab"
+   - **判定为 `false` 的条件**：
+     1. 普通 `<a>` 链接且**无** `target="_blank"`（忽略 `rel` 属性，它不影响跳转）
+     2. `href` 以 `javascript:`(非 window.open)、`mailto:`、`tel:` 或 `#` 开头
+     3. 普通 `<button>` 元素（除非有明确 JS 弹窗证据）
+   - **决策策略**: 遇到不确定的 `<div>` 或 `<span>` 伪装按钮，**默认为 `false`**（保持在当前 Page 对象操作更安全）
+
 【Few-Shot Examples】
 1. **场景：点击普通按钮**
    - Goal: "登录"
@@ -114,6 +128,7 @@ DRISSION_LOCATOR_PROMPT = """
     "sub_locators": {{ 
         "username": "#user"
     }},
-    "action_suggestion": "click|input|extract"
+    "action_suggestion": "click|input|extract",
+    "opens_new_tab": false
 }}
 """

@@ -20,6 +20,13 @@ CODE_COLLECTION_NAME = "code_cache"
 # OPENAI_BASE_URL = os.getenv("MODA_OPENAI_BASE_URL")
 
 # ==========================
+# NVIDIA
+# ==========================
+# MODEL_NAME = os.getenv('NVIDIA_MODEL_NAME')
+# OPENAI_API_KEY = os.getenv('NVIDIA_API_KEY')
+# OPENAI_BASE_URL = os.getenv('NVIDIA_BASE_URL')
+
+# ==========================
 # 百炼
 # ==========================
 MODEL_NAME = os.getenv('BAILIAN_MODEL_NAME')
