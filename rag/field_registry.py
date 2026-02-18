@@ -61,25 +61,47 @@ class JsonFieldRegistry:
         with open(self._path, "w", encoding="utf-8") as f:
             json.dump(self._data, f, ensure_ascii=False, indent=2)
 
-    def register(self, field_names: List[str]):
-        """注册字段（跳过固定字段）"""
+    @staticmethod
+    def _infer_type(value) -> str:
+        """根据值推断字段类型"""
+        if isinstance(value, (int, float)):
+            return "number"
+        return "string"
+
+    def register(self, fields):
+        """
+        注册字段（跳过固定字段）
+
+        Args:
+            fields: {field_name: sample_value} 字典，或 [field_name, ...] 列表（兼容旧接口）
+        """
         with self._lock:
             today = datetime.now().strftime("%Y-%m-%d")
             changed = False
 
-            for name in field_names:
+            # 兼容旧接口：列表 → 字典
+            if isinstance(fields, list):
+                fields = {name: "" for name in fields}
+
+            for name, value in fields.items():
                 # 跳过固定字段和内部字段
                 if name in FIXED_FILTERABLE_FIELDS or name in ("text", "pk", "vector"):
                     continue
 
+                inferred_type = self._infer_type(value)
+
                 if name not in self._data["dynamic_fields"]:
                     self._data["dynamic_fields"][name] = {
                         "first_seen": today,
-                        "count": 1
+                        "count": 1,
+                        "type": inferred_type
                     }
                     changed = True
                 else:
                     self._data["dynamic_fields"][name]["count"] += 1
+                    # 如果之前是 string 但新值是 number，升级类型
+                    if inferred_type == "number":
+                        self._data["dynamic_fields"][name]["type"] = "number"
                     changed = True
 
             if changed:
@@ -119,21 +141,33 @@ class RedisFieldRegistry:
                 self._redis_url, decode_responses=True)
         return self._redis
 
-    def register(self, field_names: List[str]):
-        """注册字段到 Redis Hash"""
+    def register(self, fields):
+        """
+        注册字段到 Redis Hash
+
+        Args:
+            fields: {field_name: sample_value} 字典，或 [field_name, ...] 列表（兼容旧接口）
+        """
         r = self._get_redis()
         today = datetime.now().strftime("%Y-%m-%d")
 
-        for name in field_names:
+        if isinstance(fields, list):
+            fields = {name: "" for name in fields}
+
+        for name, value in fields.items():
             if name in FIXED_FILTERABLE_FIELDS or name in ("text", "pk", "vector"):
                 continue
+
+            inferred_type = JsonFieldRegistry._infer_type(value)
 
             existing = r.hget(self._key, name)
             if existing:
                 data = json.loads(existing)
                 data["count"] += 1
+                if inferred_type == "number":
+                    data["type"] = "number"
             else:
-                data = {"first_seen": today, "count": 1}
+                data = {"first_seen": today, "count": 1, "type": inferred_type}
 
             r.hset(self._key, name, json.dumps(data, ensure_ascii=False))
 
@@ -172,9 +206,14 @@ def _create_registry():
 field_registry = _create_registry()
 
 
-def register_fields(metadata_keys: List[str]):
-    """注册字段（便捷函数）"""
-    field_registry.register(metadata_keys)
+def register_fields(fields):
+    """
+    注册字段（便捷函数）
+
+    Args:
+        fields: {field_name: sample_value} 字典，或 [field_name, ...] 列表
+    """
+    field_registry.register(fields)
 
 
 def get_all_filterable_fields() -> Dict:
@@ -199,7 +238,10 @@ def format_fields_for_prompt() -> str:
     if fields["dynamic_fields"]:
         dynamic_parts = []
         for name, info in sorted(fields["dynamic_fields"].items(), key=lambda x: x[1].get("count", 0), reverse=True):
-            dynamic_parts.append(f"{name} (出现 {info.get('count', 0)} 次)")
+            field_type = info.get("type", "string")
+            type_label = "数值" if field_type == "number" else "文本"
+            dynamic_parts.append(
+                f"{name} ({type_label}, 出现 {info.get('count', 0)} 次)")
         lines.append(f"动态字段（低频）：{', '.join(dynamic_parts)}")
     else:
         lines.append("动态字段：暂无")

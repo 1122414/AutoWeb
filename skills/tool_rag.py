@@ -13,6 +13,7 @@ from typing import List, Dict, Union, Optional
 from concurrent.futures import ThreadPoolExecutor, Future
 from threading import Lock
 
+
 # 确保项目根目录在 path 中
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -81,12 +82,55 @@ class KnowledgeBaseManager:
     HIGH_FREQ_FIELDS = ["source", "title", "category",
                         "data_type", "platform", "crawled_at"]
 
+    @staticmethod
+    def _convert_dynamic_value(value):
+        """
+        对动态字段值做智能类型转换
+
+        - "41.30" → float(41.30)
+        - "80.0%" → float(80.0)
+        - "¥4.32" / "$4.32" → float(4.32)
+        - "-" / "" → None（不存入，让 Milvus exists() 可用）
+        - 纯文本保持字符串
+        """
+        if not isinstance(value, str):
+            return value  # int / float / bool 直接返回
+
+        stripped = value.strip()
+
+        # 无效值 → 不存入
+        if stripped in ("", "-", "--", "N/A", "n/a", "null", "None"):
+            return None
+
+        # 去掉货币符号
+        cleaned = stripped
+        for prefix in ("¥", "$", "€", "£", "￥"):
+            if cleaned.startswith(prefix):
+                cleaned = cleaned[len(prefix):].strip()
+                break
+
+        # 去掉百分号
+        if cleaned.endswith("%"):
+            cleaned = cleaned[:-1].strip()
+
+        # 去掉千分位逗号: "1,234.56" → "1234.56"
+        cleaned = cleaned.replace(",", "")
+
+        # 尝试转为数字
+        try:
+            return float(cleaned)
+        except (ValueError, TypeError):
+            pass
+
+        return stripped  # 纯文本保持字符串
+
     def _extract_metadata(self, item: Dict, source: str) -> Dict:
         """
         从字典数据中提取 metadata
 
         高频字段放入对应 key，其他字段也放入 metadata（动态字段），
         自动注入 crawled_at 时间戳。
+        动态字段值做智能类型转换（字符串数字→float），无效值不存入。
         """
         from datetime import datetime
         metadata = {}
@@ -105,7 +149,9 @@ class KnowledgeBaseManager:
             if key not in self.HIGH_FREQ_FIELDS and key not in ("text", "content", "page_content"):
                 # 只存标量值，跳过嵌套结构
                 if isinstance(value, (str, int, float, bool)):
-                    metadata[key] = value
+                    converted = self._convert_dynamic_value(value)
+                    if converted is not None:  # 跳过无效值
+                        metadata[key] = converted
 
         return metadata
 
@@ -153,7 +199,7 @@ class KnowledgeBaseManager:
                 items = content
 
             docs = []
-            all_field_names = set()
+            all_field_samples = {}  # {field_name: sample_value} 用于推断类型
 
             for item in items:
                 # 提取文本（内容）
@@ -166,7 +212,10 @@ class KnowledgeBaseManager:
                 # 构建 metadata
                 if isinstance(item, dict):
                     metadata = self._extract_metadata(item, source)
-                    all_field_names.update(metadata.keys())
+                    # 收集字段样本值（用于推断类型）
+                    for k, v in metadata.items():
+                        if k not in all_field_samples:
+                            all_field_samples[k] = v
                 else:
                     metadata = {
                         "source": source,
@@ -182,16 +231,16 @@ class KnowledgeBaseManager:
             if not docs:
                 return False
 
-            # 注册字段到注册表
-            if all_field_names:
-                register_fields(list(all_field_names))
+            # 注册字段到注册表（含类型信息）
+            if all_field_samples:
+                register_fields(all_field_samples)
 
             with self.lock:
                 self.buffer.extend(docs)
                 buffer_size = len(self.buffer)
 
             print(
-                f"📥 [KB] 已加入缓冲 ({buffer_size} 条待写入, 字段: {len(all_field_names)} 个)")
+                f"📥 [KB] 已加入缓冲 ({buffer_size} 条待写入, 字段: {len(all_field_samples)} 个)")
 
             # 达到阈值自动刷新
             if buffer_size >= self.BUFFER_THRESHOLD:
@@ -232,13 +281,18 @@ class KnowledgeBaseManager:
             from skills.vector_gateway import add_documents
             self._ensure_connection()
             add_documents(self._vector_store, docs, tag="KnowledgeBaseManager")
-            print(f"   ✅ [KB] 成功写入 {len(docs)} 条数据")
+            # 显式 flush，确保数据持久化到 Milvus
+            if self._vector_store and hasattr(self._vector_store, 'col') and self._vector_store.col:
+                self._vector_store.col.flush()
+                print(f"   ✅ [KB] 成功写入并 flush {len(docs)} 条数据")
+            else:
+                print(f"   ✅ [KB] 成功写入 {len(docs)} 条数据（无法 flush）")
             return True
         except Exception as e:
             print(f"   ❌ [KB] 批量写入失败: {e}")
             return False
 
-    def flush_and_wait(self, timeout: float = 30.0) -> bool:
+    def flush_and_wait(self, timeout: float = 120.0) -> bool:
         """
         同步刷新并等待所有异步任务完成（程序退出时调用）
 
@@ -291,7 +345,7 @@ def ask_knowledge_base(question: str) -> str:
     [RAG] 查询本地知识库。
 
     Args:
-        question (str): 用户的自然语言问题（完整问题，内部处理分析）。
+        question(str): 用户的自然语言问题（完整问题，内部处理分析）。
 
     Returns:
         str: 知识库的回答。

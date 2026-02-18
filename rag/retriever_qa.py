@@ -272,9 +272,10 @@ def build_hybrid_retriever(milvus_store: Milvus, expr: str, k: int):
     # 1. 准备 Milvus 检索器 (Dense - 语义检索)
     milvus_retriever = milvus_store.as_retriever(
         search_type="mmr",  # 使用 MMR 增加多样性
+        # 后续可以通过category等筛选做混合检索
         search_kwargs={
             "k": k,
-            "expr": expr,  # 注入 query_analyzer 生成的 expr
+            # "expr": expr,  # 注入 query_analyzer 生成的 expr
             "fetch_k": k * 2,
             "lambda_mult": 0.6
         }
@@ -380,7 +381,6 @@ def qa_interaction(question: str) -> str:
         # C. 混合检索 (Recall)
         target_k = get_retrieval_k(question)
         recall_k = target_k * 3  # 召回 3 倍数量给 Reranker 筛选
-
         hybrid_retriever = build_hybrid_retriever(vector_store, expr, recall_k)
 
         print(f"🔍 [Retrieve] Fetching candidates...")

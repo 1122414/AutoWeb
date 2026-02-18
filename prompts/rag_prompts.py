@@ -66,7 +66,10 @@ QUERY_ANALYZER_PROMPT = """
 5. 不要把"大类范畴"和"具体检索词"搞混：
    - "电影" → category 过滤
    - "肖申克的救赎" → title 过滤
-6. **动态字段是字符串类型**：所有动态字段的值都是字符串（如 "41.30"、"80.0%"、"-"），**严禁**使用数值比较（`>`, `<`, `>=`）。如需筛选"有该字段数据的记录"，请用 `字段名 != '-'`
+6. **动态字段类型区分**：
+   - 标注为「数值」的动态字段：值已转为数字，可用 `>`, `<`, `>=`, `<=` 等数值比较
+   - 标注为「文本」的动态字段：只能用 `like '%关键词%'` 或 `==`
+   - 筛选"有该字段数据的记录"：数值字段用 `字段名 >= 0`，文本字段用 `字段名 != ""`（Milvus 不支持 exists() 函数）
 
 【少样本示例】
 --------------------------------------------------
@@ -80,7 +83,7 @@ User: "找一下携程上关于日本的攻略"
 Expected: {{"expr": "category == '攻略' and platform like '%携程%'", "search_query": "日本 攻略"}}
 
 User: "告诉我coding_index排名前十的模型"
-Expected: {{"expr": "coding_index != '-'", "search_query": "coding_index 排名 模型"}}
+Expected: {{"expr": "coding_index != ''", "search_query": "coding_index 排名 模型"}}
 
 User: "给我看下所有的动作片"
 Expected: {{"expr": "category == 'movie'", "search_query": "动作片"}}

@@ -808,7 +808,13 @@ def planner_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lite
     ) + fail_override_hint
     response = llm.invoke([HumanMessage(content=prompt)])
     content = response.content
-    is_finished = "【任务已完成】" in content
+    # [V9] 改进完成判断：当两个标记同时出现时，以【计划已生成】为准
+    # (Planner 推理过程中可能先写"【任务已完成】"然后自己推翻，生成新计划)
+    has_finished_tag = "【任务已完成】" in content
+    has_plan_tag = "【计划已生成】" in content
+    is_finished = has_finished_tag and not has_plan_tag
+    if has_finished_tag and has_plan_tag:
+        logger.info("   ⚠️ [Planner] 检测到【任务已完成】和【计划已生成】同时出现，以计划为准")
 
     update_dict = {
         "messages": [response],

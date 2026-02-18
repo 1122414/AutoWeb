@@ -161,5 +161,6 @@ def get_vector_store(embeddings):
         collection_name=KNOWLEDGE_COLLECTION_NAME,
         consistency_level="Bounded",
         auto_id=True,
+        enable_dynamic_field=True,  # 必须开启，否则 metadata 中的动态字段不会写入 $meta
     )
     return vector_store
