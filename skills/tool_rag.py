@@ -421,17 +421,3 @@ def ask_knowledge_base(question: str) -> str:
         return f"Error: RAG 模块未找到或导入失败。{e}"
     except Exception as e:
         return f"Error: 查询知识库时出错: {e}"
-
-
-def save_to_knowledge_base(content: str, source: str = "auto_web_spider") -> bool:
-    """
-    [RAG] 将内容保存到知识库（异步非阻塞）
-
-    Args:
-        content: 文本内容
-        source: 数据来源
-
-    Returns:
-        bool: 是否成功加入缓冲
-    """
-    return kb_manager.add(content, source)
