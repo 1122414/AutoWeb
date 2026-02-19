@@ -62,7 +62,8 @@ def run_with_retry(
             result = fn()
             cost_ms = int((time.time() - start) * 1000)
             if i > 1:
-                print(f"✅ [{tag}] {operation} recovered on attempt {i}/{attempts} ({cost_ms}ms)")
+                print(
+                    f"✅ [{tag}] {operation} recovered on attempt {i}/{attempts} ({cost_ms}ms)")
             return result
         except Exception as exc:
             cost_ms = int((time.time() - start) * 1000)
@@ -144,7 +145,8 @@ def hybrid_search(
         )
         cost_ms = int((time.time() - start) * 1000)
         size = len(res[0]) if res else 0
-        print(f"📈 [{tag}] hybrid_search done in {cost_ms}ms (hits={size}, limit={limit})")
+        print(
+            f"📈 [{tag}] hybrid_search done in {cost_ms}ms (hits={size}, limit={limit})")
         return res or []
     except Exception as exc:
         cost_ms = int((time.time() - start) * 1000)
@@ -195,3 +197,19 @@ def filter_not_expired(
     if dropped:
         print(f"⏭️ [{tag}] TTL filtered {dropped} expired/invalid hits")
     return kept
+
+
+# ==============================================================================
+# Embedding 单例工厂
+# ==============================================================================
+_shared_embeddings = None
+
+
+def get_shared_embeddings():
+    """全局 Embedding 模型单例，所有模块统一从此处获取。"""
+    global _shared_embeddings
+    if _shared_embeddings is None:
+        from rag.retriever_qa import get_embedding_model
+        _shared_embeddings = get_embedding_model()
+        print("🔗 [VectorGateway] Shared embedding model initialized")
+    return _shared_embeddings

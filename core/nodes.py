@@ -37,7 +37,6 @@ def _detect_task_continuity(new_task: str, current_url: str, old_task: str = "")
     2. URL 域名匹配: 新任务中明确提到的 URL 与当前 URL 同域 → 延续
     3. 默认: 全新任务
     """
-    # urlparse 已在文件顶部导入
 
     # 1. 延续关键词检测
     CONTINUE_KEYWORDS = ["继续", "接着", "下一页", "翻页", "再爬", "追加", "补充", "当前页面"]
@@ -57,7 +56,6 @@ def _detect_task_continuity(new_task: str, current_url: str, old_task: str = "")
                 return True
 
             # 检查新任务是否提到其他 URL（全新任务标志）
-            # re 已在文件顶部导入
             urls_in_task = re.findall(r'https?://[^\s<>"\']+', new_task)
             for url in urls_in_task:
                 task_domain = urlparse(url).netloc
@@ -74,7 +72,7 @@ def _detect_task_continuity(new_task: str, current_url: str, old_task: str = "")
 
 
 # ==============================================================================
-# [V5] Locator 摘要提取（用于 CodeCache embedding）
+# Locator 摘要提取（用于 CodeCache embedding）
 # ==============================================================================
 def _extract_locator_info(state: dict) -> str:
     """从 state 的 locator_suggestions 中提取 locator 摘要字符串"""
@@ -99,7 +97,7 @@ def _extract_locator_info(state: dict) -> str:
 
 
 # ==============================================================================
-# [V4] 代码缓存检索节点
+# 代码缓存检索节点
 # ==============================================================================
 def cache_lookup_node(state: AgentState, config: RunnableConfig) -> Command[Literal["Coder", "Executor"]]:
     """
@@ -113,15 +111,13 @@ def cache_lookup_node(state: AgentState, config: RunnableConfig) -> Command[Lite
     """
     from config import CODE_CACHE_ENABLED, CODE_CACHE_THRESHOLD
 
-    # [V4] 检查本轮是否已有缓存失败（防止死循环）
+    # 检查本轮是否已有缓存失败（防止死循环）
     if state.get("_cache_failed_this_round"):
         logger.info("⚠️ [CacheLookup] 本轮缓存已失败，强制跳过")
         return Command(
             update={"_code_source": "llm"},
             goto="Coder"
         )
-
-    # [V5] 提取 locator 摘要的辅助函数已移至模块级
 
     # 检查是否启用缓存
     if not CODE_CACHE_ENABLED:
@@ -134,10 +130,10 @@ def cache_lookup_node(state: AgentState, config: RunnableConfig) -> Command[Lite
     logger.info("\n🔍 [CacheLookup] 正在检索可复用代码...")
 
     user_task = state.get("user_task", "")
-    plan = state.get("plan", "")  # [V4] 新增 plan 作为查询条件
+    plan = state.get("plan", "")
     current_url = state.get("current_url", "")
 
-    # [V5] 提取 Observer 的定位策略摘要
+    # 提取 Observer 的定位策略摘要
     locator_info = _extract_locator_info(state)
 
     # 空白页/初始页面，跳过缓存检索
@@ -151,10 +147,6 @@ def cache_lookup_node(state: AgentState, config: RunnableConfig) -> Command[Lite
     try:
         from skills.code_cache import code_cache_manager
 
-        # [V4] 使用 plan + task 组合查询
-        # combined_task = f"{user_task}\n当前计划: {plan}" if plan else task
-
-        # [V5] user_task与plan分开
         hits = code_cache_manager.search(
             user_task=user_task,
             goal=plan,
@@ -169,7 +161,7 @@ def cache_lookup_node(state: AgentState, config: RunnableConfig) -> Command[Lite
                 f"✅ 命中缓存! Score: {best_hit.score:.4f}, URL: {best_hit.url_pattern}")
             logger.info(f"📋 原任务: {best_hit.goal[:50]}...")
 
-            # [V5] 参数感知：检测任务差异，做程序化替换
+            # 参数感知：检测任务差异，做程序化替换
             final_code = best_hit.code
             cached_task = best_hit.user_task
             from skills.code_cache import extract_param_diffs, apply_param_substitution
@@ -227,7 +219,7 @@ def _save_code_to_cache(state: AgentState, current_url: str):
     if not CODE_CACHE_ENABLED:
         return {"false": "[CodeCache] 缓存已禁用"}
 
-    # [V4] 如果是缓存代码执行成功，不重复存储
+    # 如果是缓存代码执行成功，不重复存储
     code_source = state.get("_code_source")
     if code_source == "cache":
         logger.info("   ⏭️ [CodeCache] 缓存代码执行，跳过存储")
@@ -238,7 +230,7 @@ def _save_code_to_cache(state: AgentState, current_url: str):
         logger.info("   ⏭️ [CodeCache] 代码过短，跳过存储")
         return {"false": "[CodeCache] 代码过短，跳过存储"}
 
-    # [V4] 使用 plan 作为 goal
+    # 使用 plan 作为 goal
     goal = state.get("plan", "")
     dom_skeleton = state.get("dom_skeleton", "")
 
@@ -313,7 +305,7 @@ def observer_node(state: AgentState, config: RunnableConfig, observer) -> Comman
     """[Observer] 环境感知节点：捕获 DOM 并生成定位策略"""
     logger.info("\n👁️ [Observer] 正在感知环境...")
 
-    # [V4] 新一轮开始，重置缓存失败标记
+    # 新一轮开始，重置缓存失败标记
     base_update = {
         "_cache_failed_this_round": False,
         "_observer_source": None,
@@ -326,8 +318,7 @@ def observer_node(state: AgentState, config: RunnableConfig, observer) -> Comman
         logger.info("   ⚠️ 无浏览器实例，跳过观察")
         return Command(update=base_update, goto="Planner")
 
-    # [V3 Fix] 先等待新标签页稳定，再获取最新标签页
-    # time 已在文件顶部导入
+    # 先等待新标签页稳定，再获取最新标签页
     time.sleep(0.3)  # 短暂等待，让新标签页有时间创建
 
     # 重新获取最新标签页（处理新标签页打开的情况）
@@ -342,7 +333,7 @@ def observer_node(state: AgentState, config: RunnableConfig, observer) -> Comman
     except Exception as e:
         logger.debug(f"Wait interrupted: {e}")
 
-    # [V3 Fix] 在页面加载后再获取 URL（确保是新页面的 URL）
+    # 在页面加载后再获取 URL（确保是新页面的 URL）
     current_url = tab.url if tab else ""
     loop_count = state.get("loop_count", 0)
 
@@ -366,14 +357,13 @@ def observer_node(state: AgentState, config: RunnableConfig, observer) -> Comman
         dom = observer.capture_dom_skeleton(tab)[:50000]
 
         # DOM 变化检测
-        # hashlib 已在文件顶部导入
         current_dom_hash = hashlib.md5(dom.encode()).hexdigest()
         previous_dom_hash = state.get("dom_hash", "")
 
         # 获取历史累积的策略列表
         accumulated_strategies = state.get("locator_suggestions", [])
 
-        # [V3 Fix] 检查是否有失败记录，有则强制重新分析（之前的策略可能是错的）
+        # 检查是否有失败记录，有则强制重新分析（之前的策略可能是错的）
         reflections = state.get("reflections", [])
         error_type = state.get("error_type")
         has_failure = len(reflections) > 0 or error_type is not None
@@ -382,7 +372,7 @@ def observer_node(state: AgentState, config: RunnableConfig, observer) -> Comman
         should_analyze = (current_dom_hash != previous_dom_hash) or has_failure
         new_strategy_entry = None
 
-        # [V7] DOM Cache: 如果上轮是 DomCache 命中且后续失败，先失效该缓存，避免重复命中坏样本
+        # DOM Cache: 如果上轮是 DomCache 命中且后续失败，先失效该缓存，避免重复命中坏样本
         observer_source = state.get("_observer_source", "")
         dom_cache_hit_id = state.get("_dom_cache_hit_id", "")
         if has_failure and observer_source == "dom_cache" and dom_cache_hit_id:
@@ -396,7 +386,7 @@ def observer_node(state: AgentState, config: RunnableConfig, observer) -> Comman
             except Exception as e:
                 logger.info(f"   ⚠️ [DomCache] 失效失败缓存异常: {e}")
 
-        # [V7] DOM Cache: 仅在需要分析且无失败记录时尝试命中
+        # DOM Cache: 仅在需要分析且无失败记录时尝试命中
         dom_cache_hit = None
         if should_analyze and not has_failure:
             try:
@@ -448,7 +438,7 @@ def observer_node(state: AgentState, config: RunnableConfig, observer) -> Comman
         else:
             logger.info("   -> 页面无变化，复用历史策略 (Skipping Observer Analysis)...")
 
-        # [V4] 合并基础更新
+        # 合并基础更新
         update_dict = {
             **base_update,
             "dom_skeleton": dom,
@@ -459,7 +449,7 @@ def observer_node(state: AgentState, config: RunnableConfig, observer) -> Comman
             "_dom_cache_hit_id": dom_cache_hit.id if dom_cache_hit else None,
         }
 
-        # [V7] 新分析结果写入 DomCache
+        # 新分析结果写入 DomCache
         if new_strategy_entry and not dom_cache_hit:
             try:
                 from config import DOM_CACHE_ENABLED
@@ -494,7 +484,7 @@ def observer_node(state: AgentState, config: RunnableConfig, observer) -> Comman
 
 
 # =============================================================================
-# [V5] RAG Node - 向量数据库操作调度节点
+# RAG Node - 向量数据库操作调度节点
 # =============================================================================
 
 def rag_node(state: AgentState, config: RunnableConfig) -> Command[Literal["Observer"]]:
@@ -654,7 +644,7 @@ def planner_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lite
     loop_count = state.get("loop_count", 0)
     finished_steps = state.get("finished_steps", [])
 
-    # [V3] 循环限制：防止死循环
+    # 循环限制：防止死循环
     MAX_LOOP_COUNT = 10
     if loop_count >= MAX_LOOP_COUNT:
         logger.info(f"   ⚠️ 达到最大循环次数 ({MAX_LOOP_COUNT})，强制结束任务")
@@ -694,7 +684,7 @@ def planner_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lite
     if loop_count == 0 and not is_initial_page:
         logger.info(f"   🔄 [Planner] 检测到已有页面: {current_url[:50]}...")
 
-        # [V5] 任务连续性检测：判断是延续任务还是全新任务
+        # 任务连续性检测：判断是延续任务还是全新任务
         is_continuation = _detect_task_continuity(task, current_url)
 
         if is_continuation:
@@ -735,7 +725,7 @@ def planner_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lite
                     "messages": [response],
                     "plan": response.content,
                     "current_url": current_url,
-                    # [V5] 全新任务：重置所有旧状态（使用 None 触发 clearable_list_reducer 清空）
+                    # 全新任务：重置所有旧状态（使用 None 触发 clearable_list_reducer 清空）
                     "locator_suggestions": None,    # 清空定位策略
                     "finished_steps": None,         # 清空历史步骤
                     "reflections": None,            # 清空反思记录
@@ -775,7 +765,7 @@ def planner_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lite
     last_verification = verification.get(
         "summary", "(无)") if verification else "(无)"
 
-    # [V8] 连续失败保底：跟踪连续步骤失败次数
+    # 连续失败保底：跟踪连续步骤失败次数
     step_fail_count = state.get("_step_fail_count", 0)
     is_last_step_fail = verification.get(
         "is_success", True) is False if verification else False
@@ -808,7 +798,7 @@ def planner_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lite
     ) + fail_override_hint
     response = llm.invoke([HumanMessage(content=prompt)])
     content = response.content
-    # [V9] 改进完成判断：当两个标记同时出现时，以【计划已生成】为准
+    # 改进完成判断：当两个标记同时出现时，以【计划已生成】为准
     # (Planner 推理过程中可能先写"【任务已完成】"然后自己推翻，生成新计划)
     has_finished_tag = "【任务已完成】" in content
     has_plan_tag = "【计划已生成】" in content
@@ -821,12 +811,12 @@ def planner_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lite
         "plan": content,
         "loop_count": loop_count + 1,
         "is_complete": is_finished,
-        "_step_fail_count": step_fail_count  # [V8] 持久化失败计数
+        "_step_fail_count": step_fail_count
     }
 
     # 3. 动态路由
     if is_finished:
-        # [V8] RAG 存储拦截：Planner 判定完成前，检查用户是否要求存入向量数据库
+        # RAG 存储拦截：Planner 判定完成前，检查用户是否要求存入向量数据库
         rag_goal_keywords = ["向量数据库", "知识库", "Milvus", "save_to_kb", "存入向量"]
         rag_done_keywords = ["store_kb", "存入向量", "已存入知识库", "RAG存储"]
         task_needs_rag = any(kw in task for kw in rag_goal_keywords)
@@ -843,7 +833,7 @@ def planner_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lite
         logger.info("🏁 [Planner] 判定任务完成，流程结束。")
         return Command(update=update_dict, goto="__end__")
 
-    # [V5] RAG 任务检测
+    # RAG 任务检测
     rag_store_keywords = ["存入向量", "存入知识库", "save_to_kb", "向量数据库", "Milvus"]
     rag_qa_keywords = ["查询知识库", "根据知识库回答", "从知识库中", "知识库问答"]
 
@@ -905,7 +895,7 @@ def coder_node(state: AgentState, config: RunnableConfig, llm) -> Command[Litera
         update={
             "messages": [AIMessage(content=f"【代码生成】\n{response.content}")],
             "generated_code": code,
-            "_code_source": "llm"  # [V4] 明确标记为 LLM 生成
+            "_code_source": "llm"
         },
         goto="Executor"
     )
@@ -916,7 +906,7 @@ def executor_node(state: AgentState, config: RunnableConfig) -> Command[Literal[
     logger.info("\n⚡ [Executor] 正在执行代码...")
     tab = _get_tab(config)
     code = state.get("generated_code", "")
-    code_source = state.get("_code_source", "llm")  # [V4] 获取代码来源
+    code_source = state.get("_code_source", "llm")
 
     logger.info(f"   📦 代码来源: {code_source}")
 
@@ -925,7 +915,7 @@ def executor_node(state: AgentState, config: RunnableConfig) -> Command[Literal[
     current_url = state.get("current_url", "")
     set_current_url(current_url)
 
-    # [V3] 错误分类关键词
+    # 错误分类关键词
     SYNTAX_ERRORS = ["SyntaxError", "IndentationError",
                      "NameError", "TypeError", "AttributeError"]
     LOCATOR_ERRORS = ["ElementNotFound", "TimeoutException",
@@ -941,7 +931,7 @@ def executor_node(state: AgentState, config: RunnableConfig) -> Command[Literal[
 
         logger.info(f"   -> Log Length: {len(execution_log)}")
 
-        # [V3] 检查执行日志中是否有错误（即使没有抛异常）
+        # 检查执行日志中是否有错误（即使没有抛异常）
         error_in_log = None
         for kw in SYNTAX_ERRORS:
             if kw in execution_log:
@@ -957,11 +947,11 @@ def executor_node(state: AgentState, config: RunnableConfig) -> Command[Literal[
             error_type, error_kw = error_in_log
             logger.info(f"   ⚠️ 检测到 {error_type} 错误: {error_kw}")
 
-            # [V4] 缓存代码失败：失效缓存 + 跳 Planner
+            # 缓存代码失败：失效缓存 + 跳 Planner
             if code_source == "cache":
                 logger.info(
                     f"   ⚠️ 缓存代码失败，标记 _cache_failed_this_round，跳 Planner")
-                # [V8] 失效坏缓存，防止下次再命中
+                # 失效坏缓存，防止下次再命中
                 cache_hit_id = state.get("_cache_hit_id", "")
                 if cache_hit_id:
                     try:
@@ -1051,15 +1041,15 @@ def executor_node(state: AgentState, config: RunnableConfig) -> Command[Literal[
 
 
 def verifier_node(state: AgentState, config: RunnableConfig, llm) -> Command[Literal["Observer", "Planner", "RAGNode"]]:
-    """[Verifier] 验收并决定下一步 (V4: Planner 是唯一出口)"""
+    """[Verifier] 验收并决定下一步"""
     logger.info("\n🔍 [Verifier] 正在验收...")
 
     log = state.get("execution_log", "")
     task = state.get("user_task", "")
     current_plan = state.get("plan", "Unknown Plan")
-    code_source = state.get("_code_source", "llm")  # [V4] 获取代码来源
+    code_source = state.get("_code_source", "llm")
 
-    # [V3 Fix] 获取最新标签页（处理新标签页打开的情况）
+    # 获取最新标签页（处理新标签页打开的情况）
     browser = config["configurable"].get("browser")
     if browser:
         time.sleep(0.3)  # 短暂等待，让新标签页有时间创建
@@ -1087,7 +1077,7 @@ def verifier_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lit
         if kw in log:
             logger.info(f"⚡ [Verifier] Deterministic Fail: {kw}")
 
-            # [V4] 缓存代码失败：跳 Planner，标记失败
+            # 缓存代码失败：跳 Planner，标记失败
             if code_source == "cache":
                 return Command(
                     update={
@@ -1145,11 +1135,11 @@ def verifier_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lit
     # 将验收结果存入 State，供 main.py 读取和覆盖
     updates = {
         "messages": [response],
-        "is_complete": False,  # [V4] Verifier 不再判断任务完成，交给 Planner
+        "is_complete": False,  # Verifier 不再判断任务完成，交给 Planner
         "current_url": current_url,
         "verification_result": {
             "is_success": is_success,
-            "is_done": False,  # [V4] 由 Planner 判断
+            "is_done": False,  # 由 Planner 判断
             "summary": summary
         }
     }
@@ -1157,7 +1147,7 @@ def verifier_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lit
     if is_success:
         updates["finished_steps"] = [summary]
 
-        # [V5] 检查是否需要存代码到缓存 → RAGNode
+        # 检查是否需要存代码到缓存 → RAGNode
         code = state.get("generated_code", "")
         code_source_val = state.get("_code_source", "")
         if code and len(code) > 50 and code_source_val != "cache":
@@ -1171,9 +1161,9 @@ def verifier_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lit
         logger.info("   ❌ Step Failed")
         updates["reflections"] = [f"Step Failed: {summary}"]
 
-        # [V4] 缓存代码验收失败：失效缓存 + 跳 Planner
+        # 缓存代码验收失败：失效缓存 + 跳 Planner
         if code_source == "cache":
-            # [V8] 失效坏缓存
+            # 失效坏缓存
             cache_hit_id = state.get("_cache_hit_id", "")
             if cache_hit_id:
                 try:

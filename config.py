@@ -69,7 +69,7 @@ RERANK_TYPE = os.getenv("RERANK_TYPE", "api").lower()
 RERANK_MODEL_PATH = os.getenv("RERANK_MODEL_PATH")
 
 # ==============================================================================
-# [新增] 浏览器自动化配置 (Browser Pilot / DrissionPage)
+# 浏览器自动化配置 (Browser Pilot / DrissionPage)
 # ==============================================================================
 
 # 是否开启无头模式 (True=不显示界面，False=显示界面)
@@ -90,7 +90,7 @@ BROWSER_ARGS = [
 ]
 
 # ==============================================================================
-# [新增] 存储与输出路径
+# 存储与输出路径
 # ==============================================================================
 
 # 运行结果输出目录 (用于存放截图、下载的文件、生成的报告)
@@ -101,7 +101,7 @@ OUTPUT_DIR = os.getenv("OUTPUT_DIR", "./output")
 # POSTGRES_CONNECTION_STRING = os.getenv("POSTGRES_CONNECTION_STRING")
 
 # ==============================================================================
-# [新增] 各节点独立模型配置（不设置则使用全局默认值）
+# 各节点独立模型配置（不设置则使用全局默认值）
 # ==============================================================================
 
 # Coder 节点（代码生成，可使用专用代码模型如 DeepSeek-Coder）
@@ -126,7 +126,7 @@ VERIFIER_API_KEY = os.getenv('VERIFIER_API_KEY') or OPENAI_API_KEY
 VERIFIER_BASE_URL = os.getenv('VERIFIER_BASE_URL') or OPENAI_BASE_URL
 
 # ==============================================================================
-# [新增] 代码缓存配置 (Code Cache System)
+# 代码缓存配置 (Code Cache System)
 # ==============================================================================
 
 # 是否启用代码缓存复用 (True=复用历史代码，False=始终重新生成)
@@ -138,7 +138,7 @@ CODE_CACHE_THRESHOLD = float(os.getenv("CODE_CACHE_THRESHOLD", "0.90"))
 # 代码缓存 Collection 名称 (与知识库分开)
 CODE_CACHE_COLLECTION = os.getenv("CODE_CACHE_COLLECTION", "code_cache")
 
-# [V6] Code Cache 多向量融合权重 (goal + locator + user_task + url)
+# Code Cache 多向量融合权重 (goal + locator + user_task + url)
 CODE_CACHE_WEIGHT_GOAL = float(os.getenv("CODE_CACHE_WEIGHT_GOAL", "0.6"))
 CODE_CACHE_WEIGHT_LOCATOR = float(
     os.getenv("CODE_CACHE_WEIGHT_LOCATOR", "0.2"))
@@ -147,7 +147,7 @@ CODE_CACHE_WEIGHT_USER_TASK = float(
 CODE_CACHE_WEIGHT_URL = float(os.getenv("CODE_CACHE_WEIGHT_URL", "0.1"))
 
 # ==============================================================================
-# [V7] DOM 缓存配置 (Milvus Hybrid Search)
+# DOM 缓存配置 (Milvus Hybrid Search)
 # ==============================================================================
 DOM_CACHE_ENABLED = os.getenv("DOM_CACHE_ENABLED", "True").lower() == "true"
 DOM_CACHE_COLLECTION = os.getenv("DOM_CACHE_COLLECTION", "dom_cache")

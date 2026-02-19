@@ -4,7 +4,7 @@ from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
 
 # =============================================================================
-# [V5] 自定义 Reducer：支持清空列表
+# 自定义 Reducer：支持清空列表
 # =============================================================================
 
 
@@ -31,7 +31,7 @@ class EnvState(TypedDict):
     """
     current_url: str
     dom_skeleton: str
-    # [V5] 使用支持清空的 reducer
+    # 使用支持清空的 reducer
     locator_suggestions: Annotated[List[Dict[str,
                                              Any]], clearable_list_reducer]
     dom_hash: Optional[str]  # DOM MD5 哈希，用于检测页面变化 (Optimization)
@@ -45,10 +45,10 @@ class TaskState(TypedDict):
     user_task: str                      # 原始任务
     plan: Optional[str]                 # Planner 生成的最新计划
 
-    # [V5] 使用支持清空的 reducer
+    # 使用支持清空的 reducer
     finished_steps: Annotated[List[str], clearable_list_reducer]
 
-    # [V5] 使用支持清空的 reducer
+    # 使用支持清空的 reducer
     reflections: Annotated[List[str], clearable_list_reducer]
 
     is_complete: bool                   # 总体任务能否认为已完成
@@ -75,22 +75,22 @@ class AgentState(EnvState, TaskState):
     # 错误处理
     error: Optional[str]
 
-    # [V3] Executor 微循环控制
+    # Executor 微循环控制
     coder_retry_count: int              # Coder 重试计数（语法错误时微循环，最多3次）
     error_type: Optional[str]           # 错误类型: "syntax" | "locator" | None
 
-    # [V4] 代码缓存控制
+    # 代码缓存控制
     _code_source: Optional[str]         # 代码来源: "cache" | "llm" | None
     _cache_failed_this_round: bool      # 本轮缓存代码是否已失败（用于防止死循环）
     _cache_hit_id: Optional[str]        # 缓存命中记录 ID（用于失败失效）
 
-    # [V7] DOM 缓存控制
+    # DOM 缓存控制
     _observer_source: Optional[str]     # 观察来源: "dom_cache" | "observer" | None
     _dom_cache_hit_id: Optional[str]    # DomCache 命中记录 ID（用于失败失效）
 
-    # [V8] 连续失败保底
+    # 连续失败保底
     _step_fail_count: int               # 连续步骤失败计数（成功时重置为 0）
 
-    # [V5] RAG Node 控制
+    # RAG Node 控制
     # RAG 任务类型: "store_kb" | "store_code" | "qa" | None
     rag_task_type: Optional[str]

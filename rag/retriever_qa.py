@@ -139,18 +139,30 @@ class QwenReranker:
 # ==============================================================================
 
 
+# ==============================================================================
+# 2. 核心辅助函数
+# ==============================================================================
+
+_cached_embedding_model = None
+
+
 def get_embedding_model():
-    """自动选择 OpenAI 或 Ollama Embeddings"""
+    """自动选择 OpenAI 或 Ollama Embeddings (单例模式)"""
+    global _cached_embedding_model
+    if _cached_embedding_model is not None:
+        return _cached_embedding_model
+
     http_client = httpx.Client(trust_env=False, timeout=60.0)
 
     if EMBEDDING_TYPE == 'local_ollama':
         # 清洗 base_url
         base_url = OPENAI_OLLAMA_BASE_URL.replace(
             "/api/generate", "").replace("/v1", "").rstrip("/")
-        return OllamaEmbeddings(base_url=base_url, model=OPENAI_OLLAMA_EMBEDDING_MODEL)
+        instance = OllamaEmbeddings(
+            base_url=base_url, model=OPENAI_OLLAMA_EMBEDDING_MODEL)
 
     elif EMBEDDING_TYPE == 'local_vllm':
-        return OpenAIEmbeddings(
+        instance = OpenAIEmbeddings(
             model=VLLM_OPENAI_EMBEDDING_MODEL,
             openai_api_key=VLLM_OPENAI_EMBEDDING_API_KEY,
             openai_api_base=VLLM_OPENAI_EMBEDDING_BASE_URL,
@@ -158,11 +170,15 @@ def get_embedding_model():
             check_embedding_ctx_length=False
         )
     else:
-        return OpenAIEmbeddings(
+        instance = OpenAIEmbeddings(
             model=EMBEDDING_MODEL,
             openai_api_key=OPENAI_API_KEY,
             openai_api_base=OPENAI_OLLAMA_BASE_URL
         )
+
+    _cached_embedding_model = instance
+    print(f"🔗 [RAG] Embedding model initialized ({EMBEDDING_TYPE})")
+    return _cached_embedding_model
 
 
 def format_docs(docs):
@@ -331,7 +347,7 @@ def build_hybrid_retriever(milvus_store: Milvus, k: int):
         output_fields = ["text"] + list(FIXED_FILTERABLE_FIELDS)
 
         try:
-            print(f"   🛡️ [BM25] Query with pk >= 0")
+            print(f" 🛡️ [BM25] Query with pk >= 0")
             # 增加 limit 到 5000 以覆盖更多数据 (视内存情况调整)
             res = milvus_store.col.query(
                 expr="pk >= 0",

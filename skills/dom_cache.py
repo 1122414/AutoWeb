@@ -1,21 +1,17 @@
-import atexit
-import hashlib
+# ==============================================================================
+# DOM Cache Manager - DOM 结构缓存系统
+# ==============================================================================
 import json
 import re
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
-from typing import Dict, List, NamedTuple, Optional, Tuple
-from urllib.parse import urlparse
+from typing import Dict, List, NamedTuple, Optional
 
 import numpy as np
 from pymilvus import (
     AnnSearchRequest,
-    Collection,
-    CollectionSchema,
     DataType,
     FieldSchema,
     WeightedRanker,
-    utility,
 )
 
 from config import (
@@ -25,14 +21,12 @@ from config import (
     DOM_CACHE_WEIGHT_DOM,
     DOM_CACHE_WEIGHT_TASK,
     DOM_CACHE_WEIGHT_URL,
-    MILVUS_URI,
 )
+from skills.vector_base import VectorCacheBase
 from skills.vector_gateway import (
-    connect_milvus,
     filter_not_expired,
     hybrid_search,
     insert_and_flush,
-    normalize_weights,
     read_hit_field,
 )
 
@@ -46,38 +40,29 @@ class DomCacheHit(NamedTuple):
     task_intent: str
 
 
-class DomCacheManager:
+class DomCacheManager(VectorCacheBase):
     DOM_TEXT_MAX = 12000
     TASK_TEXT_MAX = 1500
 
     def __init__(self):
-        self._collection: Optional[Collection] = None
-        self._embeddings = None
-        self._vector_dim: Optional[int] = None
-        self._executor = ThreadPoolExecutor(
-            max_workers=1, thread_name_prefix="DomCache")
-        self._weights = normalize_weights(
-            (DOM_CACHE_WEIGHT_URL, DOM_CACHE_WEIGHT_DOM, DOM_CACHE_WEIGHT_TASK),
+        super().__init__(
+            weights=(DOM_CACHE_WEIGHT_URL, DOM_CACHE_WEIGHT_DOM,
+                     DOM_CACHE_WEIGHT_TASK),
             defaults=(0.2, 0.7, 0.1),
             tag="DomCache",
         )
-        atexit.register(self._shutdown)
 
-    def _shutdown(self):
-        self._executor.shutdown(wait=True)
+    # ------------------------------------------------------------------
+    # 抽象方法实现
+    # ------------------------------------------------------------------
 
-    def _get_embeddings(self):
-        if self._embeddings is None:
-            from rag.retriever_qa import get_embedding_model
+    @property
+    def _collection_name(self) -> str:
+        return DOM_CACHE_COLLECTION
 
-            self._embeddings = get_embedding_model()
-        return self._embeddings
-
-    def _get_vector_dim(self) -> int:
-        if self._vector_dim is None:
-            vec = self._get_embeddings().embed_query("dom_cache_dim_probe")
-            self._vector_dim = len(vec)
-        return self._vector_dim
+    @property
+    def _collection_description(self) -> str:
+        return "Observer DOM cache with hybrid vectors"
 
     def _schema_fields(self, dim: int) -> List[FieldSchema]:
         return [
@@ -98,89 +83,12 @@ class DomCacheManager:
             FieldSchema("fail_count", DataType.INT64),
         ]
 
-    def _is_schema_compatible(self, collection: Collection, dim: int) -> bool:
-        required = {
-            "url_vector",
-            "dom_vector",
-            "task_vector",
-            "cache_id",
-            "url_pattern",
-            "task_intent",
-            "dom_hash",
-            "locator_suggestions",
-            "created_at",
-            "updated_at",
-            "expire_at",
-            "hit_count",
-            "fail_count",
-        }
-        fields = {f.name: f for f in collection.schema.fields}
-        if not required.issubset(fields.keys()):
-            return False
-        for name in ("url_vector", "dom_vector", "task_vector"):
-            field = fields[name]
-            if field.dtype != DataType.FLOAT_VECTOR:
-                return False
-            if int(field.params.get("dim", -1)) != dim:
-                return False
-        return True
+    def _vector_field_names(self) -> List[str]:
+        return ["url_vector", "dom_vector", "task_vector"]
 
-    def _create_collection(self, dim: int) -> Collection:
-        collection = Collection(
-            name=DOM_CACHE_COLLECTION,
-            schema=CollectionSchema(
-                fields=self._schema_fields(dim),
-                description="Observer DOM cache with hybrid vectors",
-                enable_dynamic_field=True,
-            ),
-            consistency_level="Bounded",
-        )
-        vec_idx = {"metric_type": "COSINE",
-                   "index_type": "AUTOINDEX", "params": {}}
-        collection.create_index(field_name="url_vector", index_params=vec_idx)
-        collection.create_index(field_name="dom_vector", index_params=vec_idx)
-        collection.create_index(field_name="task_vector", index_params=vec_idx)
-        collection.create_index(field_name="url_pattern", index_params={
-                                "index_type": "INVERTED"})
-        collection.create_index(field_name="dom_hash", index_params={
-                                "index_type": "INVERTED"})
-        collection.load()
-        print(
-            f"✅ [DomCache] Created collection '{DOM_CACHE_COLLECTION}' (dim={dim})")
-        return collection
-
-    def _ensure_collection(self) -> Collection:
-        if self._collection is not None:
-            return self._collection
-        connect_milvus(MILVUS_URI, alias="default", tag="DomCache")
-        dim = self._get_vector_dim()
-
-        if utility.has_collection(DOM_CACHE_COLLECTION):
-            current = Collection(DOM_CACHE_COLLECTION)
-            if not self._is_schema_compatible(current, dim):
-                print(
-                    f"⚠️ [DomCache] Incompatible schema in '{DOM_CACHE_COLLECTION}', dropping and recreating."
-                )
-                utility.drop_collection(DOM_CACHE_COLLECTION)
-                current = self._create_collection(dim)
-            else:
-                current.load()
-            self._collection = current
-            return self._collection
-
-        self._collection = self._create_collection(dim)
-        return self._collection
-
-    def _normalize_url(self, url: str) -> str:
-        try:
-            parsed = urlparse(url)
-            domain_parts = parsed.netloc.split(".")
-            domain = ".".join(
-                domain_parts[-2:]) if len(domain_parts) >= 2 else parsed.netloc
-            path = re.sub(r"/\d+", "/*", parsed.path or "")
-            return f"{domain}{path}"[:512]
-        except Exception:
-            return (url or "")[:512]
+    # ------------------------------------------------------------------
+    # DomCache 特有逻辑
+    # ------------------------------------------------------------------
 
     def _compact_dom(self, dom_skeleton: str) -> str:
         if not dom_skeleton:
@@ -193,17 +101,13 @@ class DomCacheManager:
         text = re.sub(r"\s+", " ", (user_task or "").strip())
         return text[: self.TASK_TEXT_MAX]
 
-    def _compute_dom_hash(self, dom_skeleton: str) -> str:
-        compact = self._compact_dom(dom_skeleton)
-        return hashlib.md5(compact.encode("utf-8")).hexdigest()[:16]
-
-    def _embed_fields(self, url_pattern: str, dom_skeleton: str, task_intent: str) -> Dict[str, List[float]]:
+    def _embed_fields(self, url_pattern: str, dom_skeleton: str, task_intent: str) -> Dict[str, list]:
         texts = [url_pattern or "", self._compact_dom(
             dom_skeleton), task_intent or ""]
         vectors = self._get_embeddings().embed_documents(texts)
         return {"url_vector": vectors[0], "dom_vector": vectors[1], "task_vector": vectors[2]}
 
-    def _build_requests(self, vectors: Dict[str, List[float]], limit: int) -> List[AnnSearchRequest]:
+    def _build_requests(self, vectors: Dict[str, list], limit: int) -> List[AnnSearchRequest]:
         params = {"metric_type": "COSINE", "params": {}}
         return [
             AnnSearchRequest(data=[vectors["url_vector"]],
@@ -221,7 +125,7 @@ class DomCacheManager:
         except Exception:
             return []
 
-    def _cosine_similarity(self, a: List[float], b: List[float]) -> float:
+    def _cosine_similarity(self, a: list, b: list) -> float:
         if not a or not b or len(a) != len(b):
             return 0.0
         va = np.asarray(a, dtype=np.float32)
@@ -279,7 +183,7 @@ class DomCacheManager:
                     item, "locator_suggestions") or "[]"
                 hit_task_intent = (read_hit_field(
                     item, "task_intent") or "").strip()
-                # Hard gate: task intent similarity must pass threshold, even if hybrid score is high.
+                # Hard gate: task intent similarity must pass threshold
                 task_vec = self._get_embeddings().embed_query(hit_task_intent or "")
                 task_sim = self._cosine_similarity(query_task_vec, task_vec)
                 if task_sim < DOM_CACHE_TASK_MIN_SIM:
@@ -327,12 +231,6 @@ class DomCacheManager:
             vectors = self._embed_fields(
                 url_pattern, dom_skeleton, task_intent)
 
-            # pymilvus insert 使用“按列”格式:
-            # 外层 list 是字段列，内层 list 是该字段这一批次的值（这里每列都只有 1 个值，即插入 1 行）。
-            # 顺序必须与 schema 字段顺序一致:
-            # url_vector, dom_vector, task_vector, cache_id, url_pattern, task_intent,
-            # dom_hash, locator_suggestions, created_at, updated_at, expire_at, hit_count, fail_count
-            # 其中 created_at/updated_at 初始都用 now_iso；hit_count/fail_count 初始都为 0。
             payload = [
                 [vectors["url_vector"]],
                 [vectors["dom_vector"]],
@@ -379,19 +277,6 @@ class DomCacheManager:
             locator_suggestions,
         )
         return True
-
-    def invalidate(self, cache_id: str) -> bool:
-        """失效指定缓存（从 Milvus 中删除），防止坏代码反复命中"""
-        if not cache_id:
-            return False
-        try:
-            collection = self._ensure_collection()
-            safe = cache_id.replace('"', '\\"')
-            collection.delete(expr=f'cache_id == "{safe}"')
-            return True
-        except Exception as exc:
-            print(f"⚠️ [DomCache] Invalidate error: {exc}")
-            return False
 
 
 dom_cache_manager = DomCacheManager()

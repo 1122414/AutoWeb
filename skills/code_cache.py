@@ -1,27 +1,17 @@
 # ==============================================================================
 # Code Cache Manager - 代码缓存复用系统
 # ==============================================================================
-# 核心功能：
-# 1. 将成功执行的代码存入 Milvus 向量库
-# 2. 根据任务描述 + DOM 结构检索相似代码
-# 3. 复用历史代码，减少 Token 消耗
-# ==============================================================================
-import atexit
 import hashlib
 import re
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
-from typing import Dict, List, NamedTuple, Optional, Tuple
+from typing import Dict, List, NamedTuple, Optional
 from urllib.parse import urlparse
 
 from pymilvus import (
     AnnSearchRequest,
-    Collection,
-    CollectionSchema,
     DataType,
     FieldSchema,
     WeightedRanker,
-    utility,
 )
 
 from config import (
@@ -30,13 +20,11 @@ from config import (
     CODE_CACHE_WEIGHT_LOCATOR,
     CODE_CACHE_WEIGHT_URL,
     CODE_CACHE_WEIGHT_USER_TASK,
-    MILVUS_URI,
 )
+from skills.vector_base import VectorCacheBase
 from skills.vector_gateway import (
-    connect_milvus,
     hybrid_search,
     insert_and_flush,
-    normalize_weights,
     read_hit_field,
 )
 
@@ -89,18 +77,15 @@ def apply_param_substitution(code: str, diffs: list) -> str:
     return code
 
 
-class CodeCacheManager:
+class CodeCacheManager(VectorCacheBase):
     SIMILARITY_THRESHOLD = 0.0
     DUPLICATE_THRESHOLD = 0.90
     NAVIGATION_CODE_MAX_LENGTH = 200
     MAX_CODE_WARN = 6400
 
     def __init__(self):
-        self._collection: Optional[Collection] = None
-        self._embeddings = None
-        self._vector_dim: Optional[int] = None
-        self._weights = normalize_weights(
-            (
+        super().__init__(
+            weights=(
                 CODE_CACHE_WEIGHT_GOAL,
                 CODE_CACHE_WEIGHT_LOCATOR,
                 CODE_CACHE_WEIGHT_USER_TASK,
@@ -109,22 +94,18 @@ class CodeCacheManager:
             defaults=(0.6, 0.2, 0.1, 0.1),
             tag="CodeCache",
         )
-        self._executor = ThreadPoolExecutor(
-            max_workers=1, thread_name_prefix="CodeCache")
-        atexit.register(self._shutdown)
 
-    def _get_embeddings(self):
-        if self._embeddings is None:
-            from rag.retriever_qa import get_embedding_model
+    # ------------------------------------------------------------------
+    # 抽象方法实现
+    # ------------------------------------------------------------------
 
-            self._embeddings = get_embedding_model()
-        return self._embeddings
+    @property
+    def _collection_name(self) -> str:
+        return CODE_CACHE_COLLECTION
 
-    def _get_vector_dim(self) -> int:
-        if self._vector_dim is None:
-            vec = self._get_embeddings().embed_query("code_cache_dimension_probe")
-            self._vector_dim = len(vec)
-        return self._vector_dim
+    @property
+    def _collection_description(self) -> str:
+        return "AutoWeb code cache with multi-vector hybrid retrieval"
 
     def _schema_fields(self, dim: int) -> List[FieldSchema]:
         return [
@@ -146,109 +127,12 @@ class CodeCacheManager:
             FieldSchema("updated_at", DataType.VARCHAR, max_length=64),
         ]
 
-    def _is_schema_compatible(self, collection: Collection, dim: int) -> bool:
-        required = {
-            "goal_vector",
-            "locator_vector",
-            "user_task_vector",
-            "url_vector",
-            "goal",
-            "locator_info",
-            "user_task",
-            "url_pattern",
-            "code",
-            "cache_id",
-            "dom_hash",
-            "success_count",
-            "fail_count",
-            "created_at",
-            "updated_at",
-        }
-        fields = {f.name: f for f in collection.schema.fields}
-        if not required.issubset(fields.keys()):
-            return False
+    def _vector_field_names(self) -> List[str]:
+        return ["goal_vector", "locator_vector", "user_task_vector", "url_vector"]
 
-        for name in ("goal_vector", "locator_vector", "user_task_vector", "url_vector"):
-            field = fields[name]
-            if field.dtype != DataType.FLOAT_VECTOR:
-                return False
-            if int(field.params.get("dim", -1)) != dim:
-                return False
-        return True
-
-    def _create_collection(self, dim: int) -> Collection:
-        schema = CollectionSchema(
-            fields=self._schema_fields(dim),
-            description="AutoWeb code cache with multi-vector hybrid retrieval",
-            enable_dynamic_field=True,
-        )
-        collection = Collection(
-            name=CODE_CACHE_COLLECTION,
-            schema=schema,
-            consistency_level="Bounded",
-        )
-
-        vector_index = {"metric_type": "COSINE",
-                        "index_type": "AUTOINDEX", "params": {}}
-        collection.create_index(field_name="goal_vector",
-                                index_params=vector_index)
-        collection.create_index(
-            field_name="locator_vector", index_params=vector_index)
-        collection.create_index(
-            field_name="user_task_vector", index_params=vector_index)
-        collection.create_index(field_name="url_vector",
-                                index_params=vector_index)
-        collection.create_index(field_name="url_pattern", index_params={
-                                "index_type": "INVERTED"})
-        collection.load()
-        print(
-            f"✅ [CodeCache] Created collection '{CODE_CACHE_COLLECTION}' (dim={dim})")
-        return collection
-
-    def _ensure_collection(self) -> Collection:
-        if self._collection is not None:
-            return self._collection
-
-        connect_milvus(MILVUS_URI, alias="default", tag="CodeCache")
-
-        dim = self._get_vector_dim()
-        if utility.has_collection(CODE_CACHE_COLLECTION):
-            current = Collection(CODE_CACHE_COLLECTION)
-            if not self._is_schema_compatible(current, dim):
-                print(
-                    f"⚠️ [CodeCache] Found incompatible schema in '{CODE_CACHE_COLLECTION}', "
-                    "dropping and recreating."
-                )
-                # 自动版本/结构兼容性校验
-                utility.drop_collection(CODE_CACHE_COLLECTION)
-                current = self._create_collection(dim)
-            else:
-                current.load()
-                print(
-                    f"📦 [CodeCache] Reusing collection '{CODE_CACHE_COLLECTION}'")
-            self._collection = current
-            return self._collection
-
-        self._collection = self._create_collection(dim)
-        return self._collection
-
-    def _normalize_url(self, url: str) -> str:
-        try:
-            parsed = urlparse(url)
-            # [Fix] 不再强制只取后两段，而是保留完整 netloc (去除 www.)
-            # e.g. mard.gov.vn -> mard.gov.vn, www.google.com -> google.com
-            domain = parsed.netloc
-            if domain.lower().startswith("www."):
-                domain = domain[4:]
-
-            path = re.sub(r"/\d+", "/*", parsed.path or "")
-            return f"{domain}{path}"[:512]
-        except Exception:
-            return (url or "")[:512]
-
-    def _compute_dom_hash(self, dom_skeleton: str) -> str:
-        content = (dom_skeleton or "")[:2500]
-        return hashlib.md5(content.encode("utf-8")).hexdigest()[:16]
+    # ------------------------------------------------------------------
+    # CodeCache 特有逻辑
+    # ------------------------------------------------------------------
 
     def _embed_fields(
         self,
@@ -256,15 +140,10 @@ class CodeCacheManager:
         locator_info: str,
         user_task: str,
         url_pattern: str,
-    ) -> Dict[str, List[float]]:
-        texts = [
-            goal or "",
-            locator_info or "",
-            user_task or "",
-            url_pattern or "",
-        ]
-        embeddings = self._get_embeddings()
-        vectors = embeddings.embed_documents(texts)
+    ) -> Dict[str, list]:
+        texts = [goal or "", locator_info or "",
+                 user_task or "", url_pattern or ""]
+        vectors = self._get_embeddings().embed_documents(texts)
         return {
             "goal_vector": vectors[0],
             "locator_vector": vectors[1],
@@ -272,7 +151,7 @@ class CodeCacheManager:
             "url_vector": vectors[3],
         }
 
-    def _build_ann_requests(self, vectors: Dict[str, List[float]], limit: int) -> List[AnnSearchRequest]:
+    def _build_ann_requests(self, vectors: Dict[str, list], limit: int) -> List[AnnSearchRequest]:
         params = {"metric_type": "COSINE", "params": {}}
         return [
             AnnSearchRequest(data=[vectors["goal_vector"]],
@@ -284,16 +163,6 @@ class CodeCacheManager:
             AnnSearchRequest(data=[vectors["url_vector"]],
                              anns_field="url_vector", param=params, limit=limit),
         ]
-
-    def _to_similarity(self, score: float) -> float:
-        value = float(score)
-        if 0.0 <= value <= 1.0:
-            return value
-        if 1.0 < value <= 2.0:
-            return max(0.0, 1.0 - value / 2.0)
-        if -1.0 <= value < 0.0:
-            return max(0.0, min(1.0, 1.0 + value))
-        return max(0.0, min(1.0, 1.0 / (1.0 + abs(value))))
 
     def search(
         self,
@@ -397,11 +266,6 @@ class CodeCacheManager:
             print(f"⚠️ [CodeCache] Duplicate check error: {exc}")
             return False
 
-    def _shutdown(self):
-        print("📧 [CodeCache] Waiting for background save tasks...")
-        self._executor.shutdown(wait=True)
-        print("✅ [CodeCache] Background tasks finished")
-
     def _do_save_async(
         self,
         goal: str,
@@ -481,20 +345,6 @@ class CodeCacheManager:
             locator_info,
         )
         return True
-
-    def invalidate(self, cache_id: str) -> bool:
-        """失效指定缓存（从 Milvus 中删除），防止坏代码反复命中"""
-        if not cache_id:
-            return False
-        try:
-            collection = self._ensure_collection()
-            safe = cache_id.replace('"', '\\"')
-            collection.delete(expr=f'cache_id == "{safe}"')
-            print(f"🗑️ [CodeCache] Invalidated: {cache_id}")
-            return True
-        except Exception as exc:
-            print(f"⚠️ [CodeCache] Invalidate error: {exc}")
-            return False
 
 
 code_cache_manager = CodeCacheManager()

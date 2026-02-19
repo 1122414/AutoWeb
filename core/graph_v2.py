@@ -12,7 +12,7 @@ from core.nodes import (
 def build_graph(checkpointer=None, llm=None, observer=None,
                 coder_llm=None, planner_llm=None, verifier_llm=None):
     """
-    构建 AutoWeb V5 Graph (Code Cache Edition)
+    构建 AutoWeb Graph
 
     Args:
         checkpointer: LangGraph 检查点器
@@ -26,7 +26,7 @@ def build_graph(checkpointer=None, llm=None, observer=None,
     图的定义变得非常简洁，只需要添加节点和边即可。
     LangGraph 会自动遵守 Command 中的 goto 指令。
 
-    V4 流程：
+    流程：
     START -> Observer -> Planner -> CacheLookup -> (Coder | Executor)
     Coder -> Executor -> Verifier -> (Observer | Planner)
     Planner 是唯一的 __end__ 出口
@@ -47,7 +47,7 @@ def build_graph(checkpointer=None, llm=None, observer=None,
     workflow.add_node("Executor", executor_node)  # Executor 不需要 LLM
     workflow.add_node("Verifier", partial(
         verifier_node, llm=verifier_llm or llm))
-    workflow.add_node("RAGNode", rag_node)  # [V5] RAG 向量库操作节点
+    workflow.add_node("RAGNode", rag_node)  # RAG 向量库操作节点
     workflow.add_node("ErrorHandler", partial(error_handler_node, llm=llm))
 
     # 2. Set Entry Point (从 Observer 开始)

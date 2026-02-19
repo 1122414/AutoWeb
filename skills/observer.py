@@ -7,7 +7,7 @@ from langchain_core.documents import Document
 
 # 引入 Prompt
 from prompts.dom_prompts import DOM_ANALYSIS_PROMPT, DRISSION_LOCATOR_PROMPT
-from drivers.js_loader import DOM_SKELETON_JS  # 假设你把 JS 放在了这里
+from drivers.js_loader import DOM_SKELETON_JS
 from config import OBSERVER_MODEL_NAME, OBSERVER_API_KEY, OBSERVER_BASE_URL
 
 # 引入 Compressor
@@ -209,7 +209,7 @@ class BrowserObserver:
                 # 简单清洗
                 target_text = target_text.strip()
 
-                # [V3 Fix] 检查是否有序号限定词（如"第一条"、"第二个"等），有则跳过启发式
+                # 检查是否有序号限定词（如"第一条"、"第二个"等），有则跳过启发式
                 ordinal_keywords = ["第一", "第二", "第三", "第1", "第2",
                                     "第3", "首个", "最后", "first", "second", "last"]
                 has_ordinal = any(kw in requirement for kw in ordinal_keywords)
@@ -252,7 +252,7 @@ class BrowserObserver:
         # Cache Miss - Call LLM
         prompt = DRISSION_LOCATOR_PROMPT.format(
             requirement=requirement,
-            current_url=current_url,  # [V6] 添加当前 URL 用于页面类型判断
+            current_url=current_url,
             previous_steps=prev_steps_str,
             dom_json=dom_skeleton[:50000]  # 防止 Token 溢出
         )
