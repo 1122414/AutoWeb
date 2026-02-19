@@ -20,8 +20,13 @@ from config import (
     CODE_CACHE_WEIGHT_LOCATOR,
     CODE_CACHE_WEIGHT_URL,
     CODE_CACHE_WEIGHT_USER_TASK,
+    CODE_CACHE_SIMILARITY_THRESHOLD,
+    CODE_CACHE_DUPLICATE_THRESHOLD,
+    CODE_CACHE_NAV_MAX_LEN,
+    CODE_CACHE_MAX_CODE_WARN,
 )
 from skills.vector_base import VectorCacheBase
+from skills.logger import logger
 from skills.vector_gateway import (
     hybrid_search,
     insert_and_flush,
@@ -78,10 +83,6 @@ def apply_param_substitution(code: str, diffs: list) -> str:
 
 
 class CodeCacheManager(VectorCacheBase):
-    SIMILARITY_THRESHOLD = 0.0
-    DUPLICATE_THRESHOLD = 0.90
-    NAVIGATION_CODE_MAX_LENGTH = 200
-    MAX_CODE_WARN = 6400
 
     def __init__(self):
         super().__init__(
@@ -172,7 +173,7 @@ class CodeCacheManager(VectorCacheBase):
         locator_info: str = "",
         top_k: int = 3,
     ) -> List[CacheHit]:
-        print("🔎 [CodeCache] Searching for similar code...")
+        logger.info("🔎 [CodeCache] Searching for similar code...")
         try:
             collection = self._ensure_collection()
             url_pattern = self._normalize_url(url)
@@ -198,7 +199,7 @@ class CodeCacheManager(VectorCacheBase):
                 raw_score = getattr(
                     item, "score", getattr(item, "distance", 0.0))
                 sim = self._to_similarity(float(raw_score))
-                if sim < self.SIMILARITY_THRESHOLD:
+                if sim < CODE_CACHE_SIMILARITY_THRESHOLD:
                     continue
 
                 metadata = {
@@ -223,17 +224,17 @@ class CodeCacheManager(VectorCacheBase):
                 )
 
             if hits:
-                print(
+                logger.info(
                     f"✅ [CodeCache] Found {len(hits)} hits (best score: {hits[0].score:.4f})")
             else:
-                print("❌ [CodeCache] No cache hits")
+                logger.info("❌ [CodeCache] No cache hits")
             return hits
         except Exception as exc:
-            print(f"⚠️ [CodeCache] Search error: {exc}")
+            logger.warning(f"⚠️ [CodeCache] Search error: {exc}")
             return []
 
     def _is_navigation_task(self, goal: str, code: str) -> bool:
-        if len(code) > self.NAVIGATION_CODE_MAX_LENGTH:
+        if len(code) > CODE_CACHE_NAV_MAX_LEN:
             return False
         code_lower = code.lower().strip()
         for pattern in ("tab.get(", "tab.get ("):
@@ -255,15 +256,15 @@ class CodeCacheManager(VectorCacheBase):
                 locator_info=locator_info,
                 top_k=1,
             )
-            if hits and hits[0].score >= self.DUPLICATE_THRESHOLD:
-                print(
+            if hits and hits[0].score >= CODE_CACHE_DUPLICATE_THRESHOLD:
+                logger.info(
                     "   ⚠️ [CodeCache] Similar content already exists "
-                    f"(score={hits[0].score:.4f} >= {self.DUPLICATE_THRESHOLD}), skip save"
+                    f"(score={hits[0].score:.4f} >= {CODE_CACHE_DUPLICATE_THRESHOLD}), skip save"
                 )
                 return True
             return False
         except Exception as exc:
-            print(f"⚠️ [CodeCache] Duplicate check error: {exc}")
+            logger.warning(f"⚠️ [CodeCache] Duplicate check error: {exc}")
             return False
 
     def _do_save_async(
@@ -310,9 +311,9 @@ class CodeCacheManager(VectorCacheBase):
             ]
             insert_and_flush(collection=collection,
                              data=payload, tag="CodeCache")
-            print(f"   ✅ [CodeCache] Saved: {cache_id}")
+            logger.info(f"   ✅ [CodeCache] Saved: {cache_id}")
         except Exception as exc:
-            print(f"❌ [CodeCache] Background save failed: {exc}")
+            logger.error(f"❌ [CodeCache] Background save failed: {exc}")
 
     def save(
         self,
@@ -324,17 +325,18 @@ class CodeCacheManager(VectorCacheBase):
         locator_info: str = "",
     ) -> bool:
         if self._is_navigation_task(goal, code):
-            print(
+            logger.info(
                 f"⏭️ [CodeCache] Skip navigation-only code ({len(code)} chars)")
             return False
 
-        if len(code) > self.MAX_CODE_WARN:
-            print(
+        if len(code) > CODE_CACHE_MAX_CODE_WARN:
+            logger.warning(
                 f"⚠️ [CodeCache] Code is long ({len(code)} chars), "
                 "consider splitting task in Planner"
             )
 
-        print(f"📤 [CodeCache] Submit async save (code: {len(code)} chars)")
+        logger.info(
+            f"📤 [CodeCache] Submit async save (code: {len(code)} chars)")
         self._executor.submit(
             self._do_save_async,
             goal,

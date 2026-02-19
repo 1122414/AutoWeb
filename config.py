@@ -146,6 +146,14 @@ CODE_CACHE_WEIGHT_USER_TASK = float(
     os.getenv("CODE_CACHE_WEIGHT_USER_TASK", "0.1"))
 CODE_CACHE_WEIGHT_URL = float(os.getenv("CODE_CACHE_WEIGHT_URL", "0.1"))
 
+# Code Cache 行为阈值
+CODE_CACHE_SIMILARITY_THRESHOLD = float(
+    os.getenv("CODE_CACHE_SIMILARITY_THRESHOLD", "0.0"))
+CODE_CACHE_DUPLICATE_THRESHOLD = float(
+    os.getenv("CODE_CACHE_DUPLICATE_THRESHOLD", "0.90"))
+CODE_CACHE_NAV_MAX_LEN = int(os.getenv("CODE_CACHE_NAV_MAX_LEN", "200"))
+CODE_CACHE_MAX_CODE_WARN = int(os.getenv("CODE_CACHE_MAX_CODE_WARN", "6400"))
+
 # ==============================================================================
 # DOM 缓存配置 (Milvus Hybrid Search)
 # ==============================================================================

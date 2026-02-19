@@ -5,6 +5,7 @@ import json
 import re
 from datetime import datetime, timedelta
 from typing import Dict, List, NamedTuple, Optional
+from skills.logger import logger
 
 import numpy as np
 from pymilvus import (
@@ -187,7 +188,7 @@ class DomCacheManager(VectorCacheBase):
                 task_vec = self._get_embeddings().embed_query(hit_task_intent or "")
                 task_sim = self._cosine_similarity(query_task_vec, task_vec)
                 if task_sim < DOM_CACHE_TASK_MIN_SIM:
-                    print(
+                    logger.info(
                         f"⏭️ [DomCache] Skip hit by task gate: sim={task_sim:.4f} "
                         f"< min={DOM_CACHE_TASK_MIN_SIM:.2f}"
                     )
@@ -207,7 +208,7 @@ class DomCacheManager(VectorCacheBase):
                 )
             return hits[:top_k]
         except Exception as exc:
-            print(f"⚠️ [DomCache] Search error: {exc}")
+            logger.warning(f"⚠️ [DomCache] Search error: {exc}")
             return []
 
     def _do_save_async(
@@ -248,12 +249,12 @@ class DomCacheManager(VectorCacheBase):
             ]
             insert_and_flush(collection=collection,
                              data=payload, tag="DomCache")
-            print(
+            logger.info(
                 f"✅ [DomCache] Saved cache_id={cache_id}, url={url_pattern}, "
                 f"ttl_hours={max(1, DOM_CACHE_TTL_HOURS)}"
             )
         except Exception as exc:
-            print(f"❌ [DomCache] Save failed: {exc}")
+            logger.error(f"❌ [DomCache] Save failed: {exc}")
 
     def save(
         self,
@@ -263,9 +264,9 @@ class DomCacheManager(VectorCacheBase):
         locator_suggestions: List[Dict],
     ) -> bool:
         if not locator_suggestions:
-            print("⏭️ [DomCache] Skip save: empty locator_suggestions")
+            logger.info("⏭️ [DomCache] Skip save: empty locator_suggestions")
             return False
-        print(
+        logger.info(
             f"📤 [DomCache] Submit async save, url={self._normalize_url(current_url)}, "
             f"task_len={len(user_task or '')}"
         )

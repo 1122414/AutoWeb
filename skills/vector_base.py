@@ -11,6 +11,7 @@ import re
 from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Optional, Tuple
+from skills.logger import logger
 
 from pymilvus import (
     AnnSearchRequest,
@@ -130,7 +131,7 @@ class VectorCacheBase(ABC):
                     pass
 
         collection.load()
-        print(
+        logger.info(
             f"✅ [{self._tag}] Created collection '{self._collection_name}' (dim={dim})")
         return collection
 
@@ -144,13 +145,13 @@ class VectorCacheBase(ABC):
         if utility.has_collection(name):
             current = Collection(name)
             if not self._is_schema_compatible(current, dim):
-                print(
+                logger.warning(
                     f"⚠️ [{self._tag}] Incompatible schema in '{name}', dropping and recreating.")
                 utility.drop_collection(name)
                 current = self._create_collection(dim)
             else:
                 current.load()
-                print(f"📦 [{self._tag}] Reusing collection '{name}'")
+                logger.info(f"📦 [{self._tag}] Reusing collection '{name}'")
             self._collection = current
             return self._collection
 
@@ -215,10 +216,10 @@ class VectorCacheBase(ABC):
         try:
             with open(log_path, "a", encoding="utf-8") as f:
                 f.write(_json.dumps(entry, ensure_ascii=False) + "\n")
-            print(f"📋 [{self._tag}] 已记录失败: {cache_id} (原因: {reason})")
-            print(f"   ℹ️ 如需删除此缓存，请手动调用 invalidate('{cache_id}')")
+            logger.info(f"📋 [{self._tag}] 已记录失败: {cache_id} (原因: {reason})")
+            logger.info(f"   ℹ️ 如需删除此缓存，请手动调用 invalidate('{cache_id}')")
         except Exception as e:
-            print(f"⚠️ [{self._tag}] 记录失败日志异常: {e}")
+            logger.warning(f"⚠️ [{self._tag}] 记录失败日志异常: {e}")
 
     def invalidate(self, cache_id: str) -> bool:
         """手动删除指定缓存（仅供用户主动清理时调用）"""
@@ -228,13 +229,13 @@ class VectorCacheBase(ABC):
             collection = self._ensure_collection()
             safe = cache_id.replace('"', '\\"')
             collection.delete(expr=f'cache_id == "{safe}"')
-            print(f"🗑️ [{self._tag}] Invalidated: {cache_id}")
+            logger.info(f"🗑️ [{self._tag}] Invalidated: {cache_id}")
             return True
         except Exception as exc:
-            print(f"⚠️ [{self._tag}] Invalidate error: {exc}")
+            logger.warning(f"⚠️ [{self._tag}] Invalidate error: {exc}")
             return False
 
     def _shutdown(self):
-        print(f"📧 [{self._tag}] Waiting for background tasks...")
+        logger.info(f"📧 [{self._tag}] Waiting for background tasks...")
         self._executor.shutdown(wait=True)
-        print(f"✅ [{self._tag}] Background tasks finished")
+        logger.info(f"✅ [{self._tag}] Background tasks finished")
