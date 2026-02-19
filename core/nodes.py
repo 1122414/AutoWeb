@@ -15,6 +15,7 @@ from skills.logger import logger
 from prompts.action_prompts import ACTION_CODE_GEN_PROMPT, CODER_TASK_WRAPPER
 from prompts.planner_prompts import PLANNER_START_PROMPT, PLANNER_STEP_PROMPT, PLANNER_CONTINUE_PROMPT, PLANNER_FORCE_SKIP_PROMPT
 from prompts.verifier_prompts import VERIFIER_CHECK_PROMPT, ERROR_RECOVERY_PROMPT
+from config import RAG_STORE_KEYWORDS, RAG_QA_KEYWORDS, RAG_GOAL_KEYWORDS, RAG_DONE_KEYWORDS, CONTINUE_KEYWORDS
 
 # ====== 依赖注入辅助函数 ======
 
@@ -39,8 +40,7 @@ def _detect_task_continuity(new_task: str, current_url: str, old_task: str = "")
     3. 默认: 全新任务
     """
 
-    # 1. 延续关键词检测
-    CONTINUE_KEYWORDS = ["继续", "接着", "下一页", "翻页", "再爬", "追加", "补充", "当前页面"]
+    # 1. 延续关键词检测（关键词定义在 config.py）
     for kw in CONTINUE_KEYWORDS:
         if kw in new_task:
             logger.info(f"   🔗 [TaskContinuity] 检测到延续关键词: '{kw}' → 保留旧状态")
@@ -258,6 +258,25 @@ def _save_code_to_cache(state: AgentState, current_url: str):
         return {"false": f"[CodeCache] 存储失败: {e}"}
 
 
+def _handle_cache_failure(state: AgentState, updates: dict) -> Command:
+    """缓存代码失败统一处理：记录失败 + 标记熔断 + 跳 Planner
+
+    调用方负责构建 updates 中的 messages / reflections 等字段，
+    本函数只负责：记录失败 + 追加熔断标记。
+    """
+    cache_hit_id = state.get("_cache_hit_id", "")
+    if cache_hit_id:
+        try:
+            from skills.code_cache import code_cache_manager
+            code_cache_manager.record_failure(cache_hit_id, reason="执行/验收失败")
+        except Exception as e:
+            logger.info(f"   ⚠️ [CodeCache] 记录失败异常: {e}")
+
+    updates["_cache_failed_this_round"] = True
+    updates["_cache_hit_id"] = None
+    return Command(update=updates, goto="Planner")
+
+
 def error_handler_node(state: AgentState, config: RunnableConfig, llm) -> Command[Literal["Observer", "__end__"]]:
     """
     [ErrorHandler] 全局错误处理与回退
@@ -365,7 +384,7 @@ def observer_node(state: AgentState, config: RunnableConfig, observer) -> Comman
         should_analyze = (current_dom_hash != previous_dom_hash) or has_failure
         new_strategy_entry = None
 
-        # DOM Cache: 如果上轮是 DomCache 命中且后续失败，先失效该缓存，避免重复命中坏样本
+        # DOM Cache: 如果上轮是 DomCache 命中且后续失败，记录失败（不删除，供用户审查）
         observer_source = state.get("_observer_source", "")
         dom_cache_hit_id = state.get("_dom_cache_hit_id", "")
         if has_failure and observer_source == "dom_cache" and dom_cache_hit_id:
@@ -373,11 +392,10 @@ def observer_node(state: AgentState, config: RunnableConfig, observer) -> Comman
                 from config import DOM_CACHE_ENABLED
                 if DOM_CACHE_ENABLED:
                     from skills.dom_cache import dom_cache_manager
-                    dom_cache_manager.invalidate(dom_cache_hit_id)
-                    logger.info(
-                        f"   🗑️ [DomCache] 已失效失败缓存: {dom_cache_hit_id}")
+                    dom_cache_manager.record_failure(
+                        dom_cache_hit_id, reason="后续执行失败")
             except Exception as e:
-                logger.info(f"   ⚠️ [DomCache] 失效失败缓存异常: {e}")
+                logger.info(f"   ⚠️ [DomCache] 记录失败异常: {e}")
 
         # DOM Cache: 仅在需要分析且无失败记录时尝试命中
         dom_cache_hit = None
@@ -483,6 +501,12 @@ def observer_node(state: AgentState, config: RunnableConfig, observer) -> Comman
 def rag_node(state: AgentState, config: RunnableConfig) -> Command[Literal["Observer"]]:
     """
     [RAG Node] 统一处理所有向量数据库操作
+
+    设计说明:
+        rag_task_type 由上游节点（Planner / Verifier）写入 State，
+        RAGNode 读取后分派。这是 LangGraph Command 模式下的惯用法——
+        Command(goto=...) 只能指定目标节点，无法传递额外参数，
+        因此必须通过 State 携带路由上下文。
 
     任务类型:
     - store_kb: 读取最新 JSON → 存入知识库
@@ -810,11 +834,9 @@ def planner_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lite
     # 3. 动态路由
     if is_finished:
         # RAG 存储拦截：Planner 判定完成前，检查用户是否要求存入向量数据库
-        rag_goal_keywords = ["向量数据库", "知识库", "Milvus", "save_to_kb", "存入向量"]
-        rag_done_keywords = ["store_kb", "存入向量", "已存入知识库", "RAG存储"]
-        task_needs_rag = any(kw in task for kw in rag_goal_keywords)
+        task_needs_rag = any(kw in task for kw in RAG_GOAL_KEYWORDS)
         rag_already_done = any(
-            any(dk in step for dk in rag_done_keywords) for step in finished_steps
+            any(dk in step for dk in RAG_DONE_KEYWORDS) for step in finished_steps
         ) if finished_steps else False
 
         if task_needs_rag and not rag_already_done:
@@ -826,16 +848,13 @@ def planner_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lite
         logger.info("🏁 [Planner] 判定任务完成，流程结束。")
         return Command(update=update_dict, goto="__end__")
 
-    # RAG 任务检测
-    rag_store_keywords = ["存入向量", "存入知识库", "save_to_kb", "向量数据库", "Milvus"]
-    rag_qa_keywords = ["查询知识库", "根据知识库回答", "从知识库中", "知识库问答"]
-
+    # RAG 任务检测（关键词定义在 config.py）
     plan_text = content.lower() if content else ""
-    if any(kw in content for kw in rag_store_keywords):
+    if any(kw in content for kw in RAG_STORE_KEYWORDS):
         logger.info("   📚 [Planner] 检测到 RAG 存储任务 → RAGNode")
         update_dict["rag_task_type"] = "store_kb"
         return Command(update=update_dict, goto="RAGNode")
-    elif any(kw in content for kw in rag_qa_keywords):
+    elif any(kw in content for kw in RAG_QA_KEYWORDS):
         logger.info("   📚 [Planner] 检测到 RAG 问答任务 → RAGNode")
         update_dict["rag_task_type"] = "qa"
         return Command(update=update_dict, goto="RAGNode")
@@ -936,26 +955,11 @@ def executor_node(state: AgentState, config: RunnableConfig) -> Command[Literal[
 
             # 缓存代码失败：失效缓存 + 跳 Planner
             if code_source == "cache":
-                logger.info(
-                    f"   ⚠️ 缓存代码失败，标记 _cache_failed_this_round，跳 Planner")
-                # 失效坏缓存，防止下次再命中
-                cache_hit_id = state.get("_cache_hit_id", "")
-                if cache_hit_id:
-                    try:
-                        from skills.code_cache import code_cache_manager
-                        code_cache_manager.invalidate(cache_hit_id)
-                    except Exception as e:
-                        logger.info(f"   ⚠️ [CodeCache] 失效失败: {e}")
-                return Command(
-                    update={
-                        "messages": [AIMessage(content=f"【缓存代码失败】{error_kw}，重新规划")],
-                        "execution_log": execution_log,
-                        "_cache_failed_this_round": True,
-                        "_cache_hit_id": None,
-                        "reflections": [f"缓存代码失败: {error_kw}，需要重新生成"]
-                    },
-                    goto="Planner"
-                )
+                return _handle_cache_failure(state, {
+                    "messages": [AIMessage(content=f"【缓存代码失败】{error_kw}，重新规划")],
+                    "execution_log": execution_log,
+                    "reflections": [f"缓存代码失败: {error_kw}，需要重新生成"],
+                })
 
             # LLM 代码的错误处理逻辑保持不变
             if error_type == "syntax":
@@ -1138,17 +1142,7 @@ def verifier_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lit
 
         # 缓存代码验收失败：失效缓存 + 跳 Planner
         if code_source == "cache":
-            # 失效坏缓存
-            cache_hit_id = state.get("_cache_hit_id", "")
-            if cache_hit_id:
-                try:
-                    from skills.code_cache import code_cache_manager
-                    code_cache_manager.invalidate(cache_hit_id)
-                except Exception as e:
-                    logger.info(f"   ⚠️ [CodeCache] 失效失败: {e}")
-            updates["_cache_failed_this_round"] = True
-            updates["_cache_hit_id"] = None
-            return Command(update=updates, goto="Planner")
+            return _handle_cache_failure(state, updates)
 
         # LLM 代码失败：回 Observer 重试
         return Command(update=updates, goto="Observer")

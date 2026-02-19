@@ -162,3 +162,17 @@ DOM_CACHE_REQUIRE_URL_MATCH = os.getenv(
 DOM_CACHE_WEIGHT_URL = float(os.getenv("DOM_CACHE_WEIGHT_URL", "0.2"))
 DOM_CACHE_WEIGHT_DOM = float(os.getenv("DOM_CACHE_WEIGHT_DOM", "0.5"))
 DOM_CACHE_WEIGHT_TASK = float(os.getenv("DOM_CACHE_WEIGHT_TASK", "0.3"))
+
+# ==============================================================================
+# 路由关键词 (Routing Keywords)
+# ==============================================================================
+# RAG 路由: Planner 根据计划内容分派到 RAGNode
+RAG_STORE_KEYWORDS = ["存入向量", "存入知识库", "save_to_kb", "向量数据库", "Milvus"]
+RAG_QA_KEYWORDS = ["查询知识库", "根据知识库回答", "从知识库中", "知识库问答"]
+
+# RAG 完成拦截: Planner 判定完成前检查是否还需要执行 RAG 存储
+RAG_GOAL_KEYWORDS = ["向量数据库", "知识库", "Milvus", "save_to_kb", "存入向量"]
+RAG_DONE_KEYWORDS = ["store_kb", "存入向量", "已存入知识库", "RAG存储"]
+
+# 任务连续性检测: 包含这些词时视为延续任务
+CONTINUE_KEYWORDS = ["继续", "接着", "下一页", "翻页", "再爬", "追加", "补充", "当前页面"]

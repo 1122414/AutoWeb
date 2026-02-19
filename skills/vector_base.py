@@ -187,8 +187,41 @@ class VectorCacheBase(ABC):
             return max(0.0, min(1.0, 1.0 + value))
         return max(0.0, min(1.0, 1.0 / (1.0 + abs(value))))
 
+    def record_failure(self, cache_id: str, reason: str = "") -> None:
+        """记录缓存命中失败（不删除缓存，仅做持久化标记供用户审查）
+
+        失败可能是上下文相关的（DOM 临时变化、页面异常等），
+        不代表缓存本身是坏数据。当前轮次的跳过由 _cache_failed_this_round
+        熔断器保证，此方法只负责持久化记录。
+
+        失败日志写入 output/cache_failures.jsonl，用户可审查后
+        手动调用 invalidate() 删除确认无效的缓存。
+        """
+        if not cache_id:
+            return
+        import json as _json
+        import os
+        from datetime import datetime
+
+        log_path = os.path.join("output", "cache_failures.jsonl")
+        os.makedirs("output", exist_ok=True)
+
+        entry = {
+            "cache_id": cache_id,
+            "cache_type": self._tag,
+            "timestamp": datetime.now().isoformat(),
+            "reason": reason,
+        }
+        try:
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(_json.dumps(entry, ensure_ascii=False) + "\n")
+            print(f"📋 [{self._tag}] 已记录失败: {cache_id} (原因: {reason})")
+            print(f"   ℹ️ 如需删除此缓存，请手动调用 invalidate('{cache_id}')")
+        except Exception as e:
+            print(f"⚠️ [{self._tag}] 记录失败日志异常: {e}")
+
     def invalidate(self, cache_id: str) -> bool:
-        """失效指定缓存（从 Milvus 中删除），防止坏数据反复命中"""
+        """手动删除指定缓存（仅供用户主动清理时调用）"""
         if not cache_id:
             return False
         try:
