@@ -12,8 +12,9 @@ from langgraph.types import Command
 from core.state_v2 import AgentState
 from skills.actor import BrowserActor
 from skills.logger import logger
-from prompts.action_prompts import ACTION_CODE_GEN_PROMPT
+from prompts.action_prompts import ACTION_CODE_GEN_PROMPT, CODER_TASK_WRAPPER
 from prompts.planner_prompts import PLANNER_START_PROMPT, PLANNER_STEP_PROMPT, PLANNER_CONTINUE_PROMPT, PLANNER_FORCE_SKIP_PROMPT
+from prompts.verifier_prompts import VERIFIER_CHECK_PROMPT, ERROR_RECOVERY_PROMPT
 
 # ====== 依赖注入辅助函数 ======
 
@@ -268,18 +269,10 @@ def error_handler_node(state: AgentState, config: RunnableConfig, llm) -> Comman
     reflections = state.get("reflections", [])
 
     # 构建回退策略
-    prompt = f"""
-    系统在执行过程中遇到严重错误。
-    【错误信息】{error_msg}
-    【已尝试的反思】{reflections[-1] if reflections else 'None'}
-    
-    请分析是否可以重试或必须终止任务。
-    如果可以重试，请给出建议。
-    如果必须终止，请说明原因。
-    
-    Status: [RETRY | TERMINATE]
-    Strategy: [策略描述]
-    """
+    prompt = ERROR_RECOVERY_PROMPT.format(
+        error_msg=error_msg,
+        last_reflection=reflections[-1] if reflections else 'None',
+    )
 
     response = llm.invoke([HumanMessage(content=prompt)])
     content = response.content
@@ -870,13 +863,7 @@ def coder_node(state: AgentState, config: RunnableConfig, llm) -> Command[Litera
         xpath_plan=xpath_plan,
     )
 
-    prompt = f"""
-    ⚠️ **【唯一任务】** - 你必须且只能完成以下计划，禁止做任何其他事情！
-    {plan}
-
-    ---
-    {base_prompt}
-    """
+    prompt = CODER_TASK_WRAPPER.format(plan=plan, base_prompt=base_prompt)
 
     # 注意：不使用 bind_tools，因为会导致 LLM 返回 tool_calls 而不是生成代码
     response = llm.invoke([HumanMessage(content=prompt)])
@@ -1100,23 +1087,11 @@ def verifier_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lit
             )
 
     # 2. LLM 验收（优化 Prompt）
-    prompt = f"""
-    你是自动化测试验收员。请根据以下信息判断**当前步骤**是否成功。
-    
-    【当前计划】{current_plan}
-    【当前 URL】{current_url}
-    【执行日志】{log[-2000:]}
-    
-    【验收原则】
-    1. **只验收当前步骤**: 你只需判断【当前计划】描述的操作是否执行成功，**严禁**评价整体任务是否完成！
-    2. **Warning 不算失败**: "Warning:"、"Failed to wait"、"没有等到新标签页" 等提示只是警告，不影响步骤成功
-    3. **关注操作结果**: 判断计划中的核心操作是否执行成功
-    4. **禁止越权判断**: 严禁在 Summary 中说"核心任务已完成"、"整体目标已达成"等整体性评价，这不是你的职责！
-    
-    格式:
-    Status: [STEP_SUCCESS | STEP_FAIL]
-    Summary: [简短描述当前步骤的执行结果，不要评价整体任务]
-    """
+    prompt = VERIFIER_CHECK_PROMPT.format(
+        current_plan=current_plan,
+        current_url=current_url,
+        log=log[-2000:],
+    )
     response = llm.invoke([HumanMessage(content=prompt)])
     content = response.content
 
