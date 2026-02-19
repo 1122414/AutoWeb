@@ -4,34 +4,36 @@ import csv
 import sqlite3
 import httpx
 import re
+from contextvars import ContextVar
 from typing import List, Dict, Union, Optional
 from urllib.parse import urlparse
+from skills.logger import logger
 from skills.tool_rag import kb_manager  # RAG Ingestion
 
 # ==============================================================================
-# 全局上下文：当前任务的 URL（由 Executor 在执行前设置）
+# 上下文变量：当前任务的 URL（由 Executor 在执行前设置，线程安全）
 # ==============================================================================
-_current_url: str = ""
+_current_url: ContextVar[str] = ContextVar("_current_url", default="")
 
 
 def set_current_url(url: str):
     """设置当前任务 URL（供 save_data 自动按域名分目录）"""
-    global _current_url
-    _current_url = url or ""
+    _current_url.set(url or "")
 
 
 def _get_domain_folder() -> str:
     """从 _current_url 提取域名作为子目录名"""
-    if not _current_url:
+    url = _current_url.get()
+    if not url:
         return ""
     try:
-        parsed = urlparse(_current_url)
+        parsed = urlparse(url)
         domain = parsed.netloc
         # 去掉 www. 前缀和端口号
         domain = re.sub(r'^www\.', '', domain)
         domain = domain.split(':')[0]
         return domain if domain else ""
-    except Exception:
+    except ValueError:
         return ""
 
 
@@ -84,14 +86,15 @@ def http_request(url: str, method: str = "GET", headers: Dict = None, params: Di
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"}
 
-    print(f"⚡ [Toolbox] HTTP {method} -> {url}")
+    logger.info(f"⚡ [Toolbox] HTTP {method} -> {url}")
     try:
         with httpx.Client(timeout=30.0, verify=False) as client:
             resp = client.request(
                 method, url, headers=headers, params=params, json=data)
             resp.raise_for_status()
             return resp.text
-    except Exception as e:
+    except httpx.HTTPError as e:
+        logger.error(f"❌ [Toolbox] HTTP Error: {e}")
         return f"Error: {str(e)}"
 
 # 2. 📥 File Downloader
@@ -101,7 +104,7 @@ def download_file(url: str, save_path: str) -> bool:
     """
     [Network] 下载文件到本地。
     """
-    print(f"📥 [Toolbox] Downloading: {url} -> {save_path}")
+    logger.info(f"📥 [Toolbox] Downloading: {url} -> {save_path}")
     try:
         with httpx.stream("GET", url, verify=False, timeout=60.0) as resp:
             resp.raise_for_status()
@@ -110,8 +113,8 @@ def download_file(url: str, save_path: str) -> bool:
                 for chunk in resp.iter_bytes():
                     f.write(chunk)
         return True
-    except Exception as e:
-        print(f"❌ [Toolbox] Download Failed: {e}")
+    except (httpx.HTTPError, IOError) as e:
+        logger.error(f"❌ [Toolbox] Download Failed: {e}")
         return False
 
 # 3. 🧹 Content Cleaner
@@ -153,7 +156,7 @@ def load_cookies_from_str(cookie_str: str, domain: str) -> List[Dict]:
                     "path": item.get("path", "/")
                 })
             return cookies
-        except:
+        except json.JSONDecodeError:
             pass
 
     # Case B: Header String (k=v; k=v)
@@ -176,7 +179,7 @@ def db_insert(table: str, data: Dict, db_path: str = "autoweb_data.db"):
     """
     [DB] 将字典数据插入 SQLite 数据库。会自动建表。
     """
-    print(f"💾 [Toolbox] DB Insert -> Table: {table}")
+    logger.info(f"💾 [Toolbox] DB Insert -> Table: {table}")
     try:
         conn = sqlite3.connect(db_path)
         cursor = conn.cursor()
@@ -190,9 +193,7 @@ def db_insert(table: str, data: Dict, db_path: str = "autoweb_data.db"):
         create_sql = f"CREATE TABLE IF NOT EXISTS {table} (id INTEGER PRIMARY KEY AUTOINCREMENT, {cols_def}, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
         cursor.execute(create_sql)
 
-        # 2. 检查是否有新列 (Schema Evolution - 略过, 假设 Schema 稳定)
-
-        # 3. 插入数据
+        # 2. 插入数据
         cols = ", ".join(keys)
         placeholders = ", ".join(["?" for _ in keys])
         values = [str(data[k]) for k in keys]
@@ -203,8 +204,8 @@ def db_insert(table: str, data: Dict, db_path: str = "autoweb_data.db"):
         conn.commit()
         conn.close()
         return True
-    except Exception as e:
-        print(f"❌ [Toolbox] DB Error: {e}")
+    except sqlite3.Error as e:
+        logger.error(f"❌ [Toolbox] DB Error: {e}")
         return False
 
 
@@ -221,35 +222,11 @@ def db_query(sql: str, db_path: str = "autoweb_data.db") -> List[Dict]:
         result = [dict(row) for row in rows]
         conn.close()
         return result
-    except Exception as e:
-        print(f"❌ [Toolbox] Query Error: {e}")
+    except sqlite3.Error as e:
+        logger.error(f"❌ [Toolbox] Query Error: {e}")
         return []
 
-# 6. 📊 Excel/CSV Export
-
-
-def save_to_csv(data_list: List[Dict], filename: str):
-    """
-    [Data] 保存数据列表到 CSV
-    """
-    if not data_list:
-        return
-    print(f"📊 [Toolbox] Saving CSV -> {filename}")
-    try:
-        keys = data_list[0].keys()
-        # Handle unicode in Windows
-        mode = 'a' if os.path.exists(filename) else 'w'
-        with open(filename, mode, newline='', encoding='utf-8-sig') as f:
-            writer = csv.DictWriter(f, fieldnames=keys)
-            if mode == 'w':
-                writer.writeheader()
-            writer.writerows(data_list)
-        return True
-    except Exception as e:
-        print(f"❌ [Toolbox] CSV Error: {e}")
-        return False
-
-# 8. 💾 Unified Data Saver (The "Arm" for Coder)
+# 6. 💾 Unified Data Saver (The "Arm" for Coder)
 
 
 def save_data(data: Union[List[Dict], Dict], filename: str, format: str = None):
@@ -262,7 +239,7 @@ def save_data(data: Union[List[Dict], Dict], filename: str, format: str = None):
     import time as _time
 
     if not data:
-        print("⚠️ [Toolbox] No data to save.")
+        logger.warning("⚠️ [Toolbox] No data to save.")
         return False
 
     try:
@@ -301,7 +278,7 @@ def save_data(data: Union[List[Dict], Dict], filename: str, format: str = None):
 
         filename = os.path.join(dirname, new_filename)
 
-        print(f"💾 [Toolbox] Saving {format.upper()} -> {filename}")
+        logger.info(f"💾 [Toolbox] Saving {format.upper()} -> {filename}")
 
         # 2. 确保目录存在
         abs_path = os.path.abspath(filename)
@@ -324,25 +301,32 @@ def save_data(data: Union[List[Dict], Dict], filename: str, format: str = None):
 
         elif format == "csv":
             data_list = data if isinstance(data, list) else [data]
-            save_to_csv(data_list, filename)
+            if data_list:
+                keys = data_list[0].keys()
+                mode = 'a' if os.path.exists(filename) else 'w'
+                with open(filename, mode, newline='', encoding='utf-8-sig') as f:
+                    writer = csv.DictWriter(f, fieldnames=keys)
+                    if mode == 'w':
+                        writer.writeheader()
+                    writer.writerows(data_list)
 
         else:
-            print(f"❌ [Toolbox] Unknown format: {format}")
+            logger.error(f"❌ [Toolbox] Unknown format: {format}")
             return False
 
-        print(f"✅ [Toolbox] Data saved successfully: {filename}")
+        logger.info(f"✅ [Toolbox] Data saved successfully: {filename}")
         return True
 
-    except Exception as e:
-        print(f"❌ [Toolbox] Save Error: {e}")
+    except (IOError, KeyError, TypeError) as e:
+        logger.error(f"❌ [Toolbox] Save Error: {e}")
         return False
 
-# 9. 📧 Notification (Mock)
+# 7. 📧 Notification (Mock)
 
 
 def notify(msg: str, title: str = "AutoWeb Notification"):
     """
     [Notify] 发送通知 (目前只打印，未来可对接 Email/Slack)
     """
-    print(f"\n🔔 [{title}] {msg}\n")
+    logger.info(f"\n🔔 [{title}] {msg}\n")
     return True
