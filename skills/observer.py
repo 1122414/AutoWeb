@@ -276,11 +276,3 @@ class BrowserObserver:
             print(f"🧠 [Observer] 定位策略生成: {strategy}")
 
         return strategy
-
-    def extract_structured_data(self, html_snippet: str, schema_desc: str) -> Dict:
-        """
-        [清洗] 从 HTML 片段中提取结构化数据 (原 extractor_agent 核心逻辑)
-        """
-        # 这里可以使用更通用的 UNIVERSAL_EXTRACTION_PROMPT
-        # 为了演示，暂时简化逻辑
-        pass
