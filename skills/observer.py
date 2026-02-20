@@ -6,7 +6,7 @@ from langchain_openai import ChatOpenAI
 from langchain_core.documents import Document
 
 # 引入 Prompt
-from prompts.dom_prompts import DOM_ANALYSIS_PROMPT, DRISSION_LOCATOR_PROMPT
+from prompts.observer_prompts import DRISSION_LOCATOR_PROMPT
 from drivers.js_loader import DOM_SKELETON_JS
 from config import OBSERVER_MODEL_NAME, OBSERVER_API_KEY, OBSERVER_BASE_URL
 

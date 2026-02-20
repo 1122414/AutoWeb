@@ -12,7 +12,7 @@ from langgraph.types import Command
 from core.state_v2 import AgentState
 from skills.actor import BrowserActor
 from skills.logger import logger
-from prompts.action_prompts import ACTION_CODE_GEN_PROMPT, CODER_TASK_WRAPPER
+from prompts.coder_prompts import ACTION_CODE_GEN_PROMPT, CODER_TASK_WRAPPER
 from prompts.planner_prompts import PLANNER_START_PROMPT, PLANNER_STEP_PROMPT, PLANNER_CONTINUE_PROMPT, PLANNER_FORCE_SKIP_PROMPT
 from prompts.verifier_prompts import VERIFIER_CHECK_PROMPT, ERROR_RECOVERY_PROMPT
 from config import RAG_STORE_KEYWORDS, RAG_QA_KEYWORDS, RAG_GOAL_KEYWORDS, RAG_DONE_KEYWORDS, CONTINUE_KEYWORDS

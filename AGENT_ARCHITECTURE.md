@@ -16,7 +16,7 @@ Agent 调用工具（如保存数据、操作浏览器）的方式并非传统�
 ### 工作流：
 
 1. **定义 (Definition)**：所有原子工具函数位于 `skills/toolbox.py`。
-2. **生成 (Generation)**：`Coder` 节点基于 `action_prompts.py` 的指令，生成调用 `toolbox` 的 Python 代码。
+2. **生成 (Generation)**：`Coder` 节点基于 `coder_prompts.py` 的指令，生成调用 `toolbox` 的 Python 代码。
 3. **注入 (Injection)**：在 `actor.py` 的执行器中，会将 `toolbox`, `tab`, `browser` 等对象注入到 Python 的执行环境。
 4. **执行 (Execution)**：通过 `exec()` 动态运行脚本。这种方式避免了传统 Tool Calling 在复杂逻辑（如循环爬取）下的死板。
 

@@ -81,8 +81,8 @@ AutoWeb/
 │   └── vector_gateway.py   # 向量数据库网关
 ├── prompts/
 │   ├── planner_prompts.py  # [V6] 增强版规划 Prompt
-│   ├── action_prompts.py   # Coder Prompt
-│   ├── dom_prompts.py      # DOM 分析 Prompt
+│   ├── coder_prompts.py   # Coder Prompt
+│   ├── observer_prompts.py      # DOM 分析 Prompt
 │   └── rag_prompts.py      # RAG 相关 Prompt
 ├── rag/
 │   ├── milvus_schema.py    # [V6] Milvus Schema 定义
