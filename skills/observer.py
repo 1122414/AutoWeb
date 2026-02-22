@@ -192,7 +192,7 @@ class BrowserObserver:
 
         return json.dumps({"error": "Failed to capture DOM after retries"})
 
-    def analyze_locator_strategy(self, dom_skeleton: str, requirement: str, current_url: str, previous_steps: list = []) -> Union[Dict, list]:
+    def analyze_locator_strategy(self, dom_skeleton: str, requirement: str, current_url: str, previous_steps: list = [], ignore_cache: bool = False) -> Union[Dict, list]:
         """
         [推理] 基于 DOM 骨架和用户需求，生成操作定位策略
         [Optimization] 增加 MD5 缓存机制 & 启发式搜索
@@ -237,7 +237,7 @@ class BrowserObserver:
             current_hash = hashlib.md5(context_str.encode('utf-8')).hexdigest()
 
             # 检查缓存: 如果 DOM Hash 一致，且缓存中有有效结果，直接返回
-            if self._dom_cache["hash"] == current_hash and self._dom_cache["analysis"]:
+            if not ignore_cache and self._dom_cache["hash"] == current_hash and self._dom_cache["analysis"]:
                 print(
                     f"⏩ [Observer] DOM Cache Hit! ({current_hash[:8]}) - Skipping LLM Analysis")
                 return self._dom_cache["analysis"]

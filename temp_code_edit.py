@@ -1,37 +1,51 @@
 results = []
-items = tab.eles('x://div[@id=\'wrap\']/div[2]/div[3]/div[1]/div[1]/div[1]/ul[1]/div/div[1]/li[@class=\'job-card-box\']')
-print(f"-> Found {len(items)} job cards")
-for item in items:
-    row = {}
+categories = tab.eles('x://div[@class="container content"]//h5[@class="tit"]')
+print(f"-> Found {len(categories)} categories")
+
+for category in categories:
     try:
-        row["title"] = item.ele('x:.//div[@class=\'job-title clearfix\']/a[@class=\'job-name\']').text
+        category_name = category.ele('x://b').text
     except:
-        row["title"] = ""
+        try:
+            category_name = category.text
+        except:
+            category_name = ""
+    
+    print(f"-> Processing category: {category_name}")
+    
     try:
-        row["salary"] = item.ele('x:.//div[@class=\'job-title clearfix\']/span[@class=\'job-salary\']').text
-    except:
-        row["salary"] = ""
-    try:
-        tags = []
-        tag_elements = item.eles('x:.//ul[@class=\'tag-list\']/li')
-        for tag_el in tag_elements:
-            tags.append(tag_el.text)
-        row["tags"] = tags
-    except:
-        row["tags"] = []
-    try:
-        row["company"] = item.ele('x:.//div[@class=\'job-card-footer\']/a[@class=\'boss-info\']/span[@class=\'boss-name\']').text
-    except:
-        row["company"] = ""
-    try:
-        row["location"] = item.ele('x:.//div[@class=\'job-card-footer\']/span[@class=\'company-location\']').text
-    except:
-        row["location"] = ""
-    try:
-        row["link"] = item.ele('x:.//div[@class=\'job-title clearfix\']/a[@class=\'job-name\']').link
-    except:
-        row["link"] = ""
-    if any(row.values()):
-        results.append(row)
-print(f"-> Total collected: {len(results)}")
-toolbox.save_data(results, "output/job_data.json")
+        tools_container = category.ele('x://following-sibling::div[@class="cardlk"][1]')
+        tool_items = tools_container.eles('x://div[@class="col"]/a[not(@class="gl") and not(@class="gl tip")]')
+        
+        for tool_item in tool_items:
+            row = {}
+            
+            try:
+                row["title"] = tool_item.text
+            except:
+                row["title"] = ""
+            
+            try:
+                row["link"] = tool_item.attr('href')
+            except:
+                row["link"] = ""
+            
+            try:
+                row["description"] = tool_item.ele('x://p').text
+            except:
+                row["description"] = ""
+            
+            try:
+                row["category"] = category_name
+            except:
+                row["category"] = ""
+            
+            if any(row.values()):
+                results.append(row)
+                
+    except Exception as e:
+        print(f"-> Error processing category {category_name}: {e}")
+        continue
+
+print(f"-> Total collected: {len(results)} tools")
+toolbox.save_data(results, "output/tools.json")

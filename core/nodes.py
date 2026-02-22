@@ -434,7 +434,7 @@ def observer_node(state: AgentState, config: RunnableConfig, observer) -> Comman
                 logger.info(
                     f"   -> 正在进行视觉定位分析 (Context: {len(finished_steps)} finished steps)...")
                 locator_suggestions = observer.analyze_locator_strategy(
-                    dom, task, current_url, previous_steps=finished_steps)
+                    dom, task, current_url, previous_steps=finished_steps, ignore_cache=has_failure)
 
                 if isinstance(locator_suggestions, dict):
                     locator_suggestions = [locator_suggestions]
