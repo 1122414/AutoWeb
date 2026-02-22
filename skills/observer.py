@@ -192,7 +192,7 @@ class BrowserObserver:
 
         return json.dumps({"error": "Failed to capture DOM after retries"})
 
-    def analyze_locator_strategy(self, dom_skeleton: str, requirement: str, current_url: str, previous_steps: list = [], ignore_cache: bool = False) -> Union[Dict, list]:
+    def analyze_locator_strategy(self, dom_skeleton: str, requirement: str, current_url: str, previous_steps: list = [], ignore_cache: bool = False, previous_failures: list = None) -> Union[Dict, list]:
         """
         [推理] 基于 DOM 骨架和用户需求，生成操作定位策略
         [Optimization] 增加 MD5 缓存机制 & 启发式搜索
@@ -245,15 +245,18 @@ class BrowserObserver:
         except Exception as e:
             print(f"⚠️ Cache Check Failed: {e}")
 
-        # Formatted previous steps
+        # Formatted previous steps and failures
         prev_steps_str = "\n".join(
             [f"- {s}" for s in previous_steps]) if previous_steps else "(无 - 初始状态)"
+        prev_failures_str = "\n".join(
+            [f"- {f}" for f in previous_failures]) if previous_failures else "(无失败记录)"
 
         # Cache Miss - Call LLM
         prompt = DRISSION_LOCATOR_PROMPT.format(
             requirement=requirement,
             current_url=current_url,
             previous_steps=prev_steps_str,
+            previous_failures=prev_failures_str,
             dom_json=dom_skeleton[:50000]  # 防止 Token 溢出
         )
 

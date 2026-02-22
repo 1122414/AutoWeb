@@ -19,6 +19,9 @@ def clearable_list_reducer(existing: List, update: Any) -> List:
     """
     if update is None:
         return []  # 清空
+    # 字典协议处理：检测到带特定 flag 的字典，意味着要求强制替换
+    if isinstance(update, dict) and "__replace__" in update:
+        return update["__replace__"]
     if isinstance(update, list):
         return (existing or []) + update  # 追加
     return update  # 替换

@@ -258,6 +258,51 @@ def _save_code_to_cache(state: AgentState, current_url: str):
         return {"false": f"[CodeCache] 存储失败: {e}"}
 
 
+def _save_dom_to_cache(state: AgentState, current_url: str):
+    """
+    [辅助函数] 将验证通过的策略存入 DomCache
+    """
+    from config import DOM_CACHE_ENABLED
+
+    if not DOM_CACHE_ENABLED:
+        return {"false": "[DomCache] 缓存已禁用"}
+
+    observer_source = state.get("_observer_source")
+    if observer_source == "dom_cache":
+        logger.info("   ⏭️ [DomCache] 本轮策略来自缓存，跳过存储")
+        return {"false": "策略来自缓存"}
+
+    # 取最新的一条策略
+    locator_suggestions = state.get("locator_suggestions", [])
+    if not locator_suggestions:
+        return {"false": "无策略"}
+
+    latest_strategy = locator_suggestions[-1]
+    strategies = latest_strategy.get("strategies", [])
+    if isinstance(strategies, dict):
+        strategies = [strategies]
+
+    if not strategies:
+        return {"false": "无策略详情"}
+
+    task = state.get("user_task", "")
+    dom = state.get("dom_skeleton", "")
+
+    try:
+        from skills.dom_cache import dom_cache_manager
+        dom_cache_manager.save(
+            user_task=task,
+            current_url=current_url,
+            dom_skeleton=dom,
+            locator_suggestions=strategies,
+        )
+        logger.info("   💾 [DomCache] 已提交缓存写入任务")
+        return {"true": "[DomCache] 任务已提交"}
+    except Exception as e:
+        logger.info(f"   ⚠️ [DomCache] 存储失败: {e}")
+        return {"false": f"存储失败: {e}"}
+
+
 def _handle_cache_failure(state: AgentState, updates: dict) -> Command:
     """缓存代码失败统一处理：记录失败 + 标记熔断 + 跳 Planner
 
@@ -434,7 +479,7 @@ def observer_node(state: AgentState, config: RunnableConfig, observer) -> Comman
                 logger.info(
                     f"   -> 正在进行视觉定位分析 (Context: {len(finished_steps)} finished steps)...")
                 locator_suggestions = observer.analyze_locator_strategy(
-                    dom, task, current_url, previous_steps=finished_steps, ignore_cache=has_failure)
+                    dom, task, current_url, previous_steps=finished_steps, ignore_cache=has_failure, previous_failures=reflections)
 
                 if isinstance(locator_suggestions, dict):
                     locator_suggestions = [locator_suggestions]
@@ -459,26 +504,6 @@ def observer_node(state: AgentState, config: RunnableConfig, observer) -> Comman
             "_observer_source": "dom_cache" if dom_cache_hit else "observer",
             "_dom_cache_hit_id": dom_cache_hit.id if dom_cache_hit else None,
         }
-
-        # 新分析结果写入 DomCache
-        if new_strategy_entry and not dom_cache_hit:
-            try:
-                from config import DOM_CACHE_ENABLED
-                if DOM_CACHE_ENABLED:
-                    from skills.dom_cache import dom_cache_manager
-                    strategies = new_strategy_entry.get("strategies", [])
-                    if isinstance(strategies, dict):
-                        strategies = [strategies]
-                    if isinstance(strategies, list) and strategies:
-                        dom_cache_manager.save(
-                            user_task=task,
-                            current_url=current_url,
-                            dom_skeleton=dom,
-                            locator_suggestions=strategies,
-                        )
-                        logger.info("   💾 [DomCache] 已提交缓存写入任务")
-            except Exception as e:
-                logger.info(f"   ⚠️ [DomCache] 写入异常: {e}")
 
         # 如果刚做完重新分析（因为失败触发），清空错误标记
         if has_failure and should_analyze:
@@ -510,7 +535,7 @@ def rag_node(state: AgentState, config: RunnableConfig) -> Command[Literal["Obse
 
     任务类型:
     - store_kb: 读取最新 JSON → 存入知识库
-    - store_code: 将验证通过的代码存入 Code Cache
+    - store_cache: 将验证通过的代码存入 Code Cache 和 Dom Cache
     - qa: 查询知识库并返回答案
     """
     rag_task = state.get("rag_task_type")
@@ -522,8 +547,8 @@ def rag_node(state: AgentState, config: RunnableConfig) -> Command[Literal["Obse
         if rag_task == "store_kb":
             result_summary = _rag_store_kb(state)
 
-        elif rag_task == "store_code":
-            result_summary = _rag_store_code(state, config)
+        elif rag_task == "store_cache":
+            result_summary = _rag_store_cache(state, config)
 
         elif rag_task == "qa":
             result_summary = _rag_qa(state)
@@ -542,7 +567,7 @@ def rag_node(state: AgentState, config: RunnableConfig) -> Command[Literal["Obse
         update={
             "messages": [AIMessage(content=f"[RAG] {result_summary}")],
             "rag_task_type": None,  # 清空任务标记
-            "finished_steps": [result_summary] if rag_task != "store_code" else [],
+            "finished_steps": [result_summary] if rag_task != "store_cache" else [],
         },
         goto="Observer"
     )
@@ -622,14 +647,24 @@ def _rag_store_kb(state: AgentState) -> str:
     return f"成功将 {len(data)} 条数据从 {latest_file} 存入向量知识库 (save_to_kb)"
 
 
-def _rag_store_code(state: AgentState, config: RunnableConfig) -> str:
-    """[RAG] 将验证通过的代码存入 Code Cache"""
+def _rag_store_cache(state: AgentState, config: RunnableConfig) -> str:
+    """[RAG] 将验证通过的代码/策略存入 Code Cache / Dom Cache"""
     current_url = state.get("current_url", "")
-    result = _save_code_to_cache(state, current_url)
-    if "false" in result:
-        return f"代码保存失败: {result['false']}"
-    else:
-        return f"代码已提交缓存存储"
+
+    res_code = "跳过"
+    res_dom = "跳过"
+
+    # 存 Code Cache
+    if state.get("generated_code") and len(state.get("generated_code", "")) >= 50 and state.get("_code_source") != "cache":
+        result_code = _save_code_to_cache(state, current_url)
+        res_code = result_code.get("false", result_code.get("true", "未知"))
+
+    # 存 Dom Cache
+    if state.get("_observer_source") == "observer":
+        result_dom = _save_dom_to_cache(state, current_url)
+        res_dom = result_dom.get("false", result_dom.get("true", "未知"))
+
+    return f"代码缓存: {res_code}, DOM缓存: {res_dom}"
 
 
 def _rag_qa(state: AgentState) -> str:
@@ -1039,6 +1074,7 @@ def verifier_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lit
     task = state.get("user_task", "")
     current_plan = state.get("plan", "Unknown Plan")
     code_source = state.get("_code_source", "llm")
+    current_suggestions = state.get("locator_suggestions", [])
 
     # 获取最新标签页（处理新标签页打开的情况）
     browser = config["configurable"].get("browser")
@@ -1075,6 +1111,7 @@ def verifier_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lit
                         "messages": [AIMessage(content=f"【缓存验收失败】{kw}")],
                         "_cache_failed_this_round": True,
                         "reflections": [f"缓存代码验收失败: {kw}"],
+                        "locator_suggestions": {"__replace__": current_suggestions[:-1]} if current_suggestions else None,
                         "is_complete": False
                     },
                     goto="Planner"
@@ -1085,6 +1122,7 @@ def verifier_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lit
                 update={
                     "messages": [AIMessage(content=f"Status: STEP_FAIL ({kw})")],
                     "reflections": [f"Step Failed: {current_plan}. Error: {kw}"],
+                    "locator_suggestions": {"__replace__": current_suggestions[:-1]} if current_suggestions else None,
                     "is_complete": False
                 },
                 goto="Observer"
@@ -1126,12 +1164,19 @@ def verifier_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lit
     if is_success:
         updates["finished_steps"] = [summary]
 
-        # 检查是否需要存代码到缓存 → RAGNode
+        # 检查是否需要存代码或策略到缓存 → RAGNode
         code = state.get("generated_code", "")
         code_source_val = state.get("_code_source", "")
-        if code and len(code) > 50 and code_source_val != "cache":
-            logger.info("   📚 Step OK + 需缓存代码 → RAGNode")
-            updates["rag_task_type"] = "store_code"
+        observer_source = state.get("_observer_source", "")
+
+        needs_store_code = bool(code and len(
+            code) > 50 and code_source_val != "cache")
+        needs_store_dom = bool(observer_source == "observer")
+
+        if needs_store_code or needs_store_dom:
+            logger.info(
+                f"   📚 Step OK + 需缓存代码({needs_store_code})/策略({needs_store_dom}) → RAGNode")
+            updates["rag_task_type"] = "store_cache"
             return Command(update=updates, goto="RAGNode")
 
         logger.info("   🔄 Step OK, 继续下一步...")
@@ -1139,6 +1184,9 @@ def verifier_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lit
     else:
         logger.info("   ❌ Step Failed")
         updates["reflections"] = [f"Step Failed: {summary}"]
+        # 清除本轮导致失败的最新那条策略，避免后续带错上下文
+        updates["locator_suggestions"] = {
+            "__replace__": current_suggestions[:-1]} if current_suggestions else None
 
         # 缓存代码验收失败：失效缓存 + 跳 Planner
         if code_source == "cache":
