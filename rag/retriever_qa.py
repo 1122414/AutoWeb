@@ -138,11 +138,6 @@ class QwenReranker:
 # 2. 核心辅助函数
 # ==============================================================================
 
-
-# ==============================================================================
-# 2. 核心辅助函数
-# ==============================================================================
-
 _cached_embedding_model = None
 
 
@@ -275,8 +270,8 @@ class SimpleEnsembleRetriever(BaseRetriever):
         for docs, weight in zip(doc_lists, self.weights):
             for rank, doc in enumerate(docs):
                 # 使用内容作为 Key 进行去重 (Milvus返回的ID可能不一致)
-                # 更好的做法是用 hash(doc.page_content)，这里直接用内容字符串
-                key = doc.page_content
+                # 用 hash(doc.page_content)
+                key = hash(doc.page_content)
 
                 if key not in scores:
                     scores[key] = {"doc": doc, "score": 0.0}
