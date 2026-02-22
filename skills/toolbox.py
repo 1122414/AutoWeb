@@ -315,10 +315,12 @@ def save_data(data: Union[List[Dict], Dict], filename: str, format: str = None):
             return False
 
         logger.info(f"✅ [Toolbox] Data saved successfully: {filename}")
+        print(f"✅ 数据已成功保存到文件: {filename}")
         return True
 
     except (IOError, KeyError, TypeError) as e:
         logger.error(f"❌ [Toolbox] Save Error: {e}")
+        print(f"❌ 数据保存失败: {e}")
         return False
 
 # 7. 📧 Notification (Mock)
