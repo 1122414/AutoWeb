@@ -95,11 +95,21 @@ class BrowserActor:
         output_buffer = io.StringIO()
 
         try:
-            # 执行代码并捕获 print 输出
-            with contextlib.redirect_stdout(output_buffer):
-                exec(strategy_code, {}, local_scope)
+            # 动态添加日志处理器，捕获当前执行上下文中所有 logger 输出
+            import logging
+            temp_handler = logging.StreamHandler(output_buffer)
+            temp_handler.setLevel(logging.INFO)
+            temp_handler.setFormatter(logging.Formatter("%(message)s"))
+            logger._logger.addHandler(temp_handler)
 
-            # 获取捕获的 print 内容
+            try:
+                # 执行代码并捕获 print 和 logger 输出
+                with contextlib.redirect_stdout(output_buffer), contextlib.redirect_stderr(output_buffer):
+                    exec(strategy_code, {}, local_scope)
+            finally:
+                logger._logger.removeHandler(temp_handler)
+
+            # 获取捕获的内容
             stdout_content = output_buffer.getvalue()
             if stdout_content:
                 logs.append(f"--- [Code Output] ---\n{stdout_content.strip()}")
