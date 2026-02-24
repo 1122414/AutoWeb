@@ -3,8 +3,9 @@ import time
 import hashlib
 import re
 import traceback
+from datetime import datetime
 import tiktoken
-from typing import Literal, Union
+from typing import Literal, Optional, Union
 from urllib.parse import urlparse
 from langchain_core.messages import HumanMessage, AIMessage, RemoveMessage
 from langchain_core.runnables import RunnableConfig
@@ -25,6 +26,30 @@ def _get_tab(config: RunnableConfig):
     """从 config 获取浏览器标签页"""
     browser = config["configurable"].get("browser")
     return browser.latest_tab if browser else None
+
+
+def _parse_iso_datetime(text: str) -> Optional[datetime]:
+    value = (text or "").strip()
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except Exception:
+        for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S"):
+            try:
+                return datetime.strptime(value, fmt)
+            except Exception:
+                continue
+    return None
+
+
+def _is_hit_from_current_task(created_at: str, task_started_at: Optional[datetime]) -> bool:
+    if task_started_at is None:
+        return False
+    created_dt = _parse_iso_datetime(created_at)
+    if created_dt is None:
+        return False
+    return created_dt >= task_started_at
 
 
 def _detect_task_continuity(new_task: str, current_url: str, old_task: str = "") -> bool:
@@ -262,11 +287,32 @@ def cache_lookup_node(state: AgentState, config: RunnableConfig) -> Command[Lite
             goal=plan,
             url=current_url,
             locator_info=locator_info,
-            top_k=3
+            top_k=10
         )
 
-        if hits and hits[0].score >= CODE_CACHE_THRESHOLD:
-            best_hit = hits[0]
+        failed_code_cache_ids = set(state.get("_failed_code_cache_ids", []) or [])
+        task_started_at = _parse_iso_datetime(state.get("_task_started_at", ""))
+        eligible_hits = [
+            hit for hit in hits
+            if (not hit.id) or (hit.id not in failed_code_cache_ids)
+        ]
+
+        if hits and len(eligible_hits) < len(hits):
+            logger.info(
+                f"   ⏭️ [CacheLookup] 过滤失败缓存命中: {len(hits) - len(eligible_hits)} 条")
+
+        if task_started_at is not None:
+            before_len = len(eligible_hits)
+            eligible_hits = [
+                hit for hit in eligible_hits
+                if not _is_hit_from_current_task(hit.created_at, task_started_at)
+            ]
+            if len(eligible_hits) < before_len:
+                logger.info(
+                    f"   ⏭️ [CacheLookup] 过滤同任务新写入缓存: {before_len - len(eligible_hits)} 条")
+
+        if eligible_hits and eligible_hits[0].score >= CODE_CACHE_THRESHOLD:
+            best_hit = eligible_hits[0]
             logger.info(
                 f"✅ 命中缓存! Score: {best_hit.score:.4f}, URL: {best_hit.url_pattern}")
             logger.info(f"📋 原任务: {best_hit.goal[:50]}...")
@@ -297,9 +343,11 @@ def cache_lookup_node(state: AgentState, config: RunnableConfig) -> Command[Lite
                 goto="Executor"
             )
         else:
-            if hits:
+            if eligible_hits:
                 logger.info(
-                    f"   ❌ 最高分 {hits[0].score:.4f} 低于阈值 {CODE_CACHE_THRESHOLD}")
+                    f"   ❌ 最高分 {eligible_hits[0].score:.4f} 低于阈值 {CODE_CACHE_THRESHOLD}")
+            elif hits:
+                logger.info("   ❌ 命中均在失败黑名单，跳过缓存")
             else:
                 logger.info("   ❌ 无匹配缓存")
             return Command(
@@ -419,15 +467,19 @@ def _handle_cache_failure(state: AgentState, updates: dict) -> Command:
     本函数只负责：记录失败 + 追加熔断标记。
     """
     cache_hit_id = state.get("_cache_hit_id", "")
+    failed_cache_ids = list(state.get("_failed_code_cache_ids", []) or [])
     if cache_hit_id:
         try:
             from skills.code_cache import code_cache_manager
             code_cache_manager.record_failure(cache_hit_id, reason="执行/验收失败")
         except Exception as e:
             logger.info(f"   ⚠️ [CodeCache] 记录失败异常: {e}")
+        if cache_hit_id not in failed_cache_ids:
+            failed_cache_ids.append(cache_hit_id)
 
     updates["_cache_failed_this_round"] = True
     updates["_cache_hit_id"] = None
+    updates["_failed_code_cache_ids"] = failed_cache_ids
     return Command(update=updates, goto="Planner")
 
 
@@ -528,6 +580,8 @@ def observer_node(state: AgentState, config: RunnableConfig, observer) -> Comman
 
         # 获取历史累积的策略列表
         accumulated_strategies = state.get("locator_suggestions", [])
+        failed_dom_cache_ids = list(state.get("_failed_dom_cache_ids", []) or [])
+        task_started_at = _parse_iso_datetime(state.get("_task_started_at", ""))
 
         # 检查是否有失败记录，有则强制重新分析（之前的策略可能是错的）
         reflections = state.get("reflections", [])
@@ -550,6 +604,9 @@ def observer_node(state: AgentState, config: RunnableConfig, observer) -> Comman
                         dom_cache_hit_id, reason="后续执行失败")
             except Exception as e:
                 logger.info(f"   ⚠️ [DomCache] 记录失败异常: {e}")
+            if dom_cache_hit_id not in failed_dom_cache_ids:
+                failed_dom_cache_ids.append(dom_cache_hit_id)
+                logger.info(f"   ⛔ [DomCache] 标记失败命中ID: {dom_cache_hit_id}")
 
         # DOM Cache: 仅在需要分析且无失败记录时尝试命中
         dom_cache_hit = None
@@ -562,8 +619,26 @@ def observer_node(state: AgentState, config: RunnableConfig, observer) -> Comman
                         user_task=task,
                         current_url=current_url,
                         dom_skeleton=dom,
-                        top_k=DOM_CACHE_TOP_K,
+                        top_k=max(DOM_CACHE_TOP_K, 8),
                     )
+                    if failed_dom_cache_ids:
+                        raw_len = len(cache_hits)
+                        cache_hits = [
+                            hit for hit in cache_hits
+                            if (not hit.id) or (hit.id not in failed_dom_cache_ids)
+                        ]
+                        if len(cache_hits) < raw_len:
+                            logger.info(
+                                f"   ⏭️ [DomCache] 过滤失败缓存命中: {raw_len - len(cache_hits)} 条")
+                    if task_started_at is not None and cache_hits:
+                        raw_len = len(cache_hits)
+                        cache_hits = [
+                            hit for hit in cache_hits
+                            if not _is_hit_from_current_task(hit.created_at, task_started_at)
+                        ]
+                        if len(cache_hits) < raw_len:
+                            logger.info(
+                                f"   ⏭️ [DomCache] 过滤同任务新写入缓存: {raw_len - len(cache_hits)} 条")
                     if cache_hits and cache_hits[0].score >= DOM_CACHE_THRESHOLD:
                         dom_cache_hit = cache_hits[0]
                         logger.info(
@@ -612,6 +687,7 @@ def observer_node(state: AgentState, config: RunnableConfig, observer) -> Comman
             "locator_suggestions": [new_strategy_entry] if new_strategy_entry else [],
             "_observer_source": "dom_cache" if dom_cache_hit else "observer",
             "_dom_cache_hit_id": dom_cache_hit.id if dom_cache_hit else None,
+            "_failed_dom_cache_ids": failed_dom_cache_ids,
         }
 
         # 如果刚做完重新分析（因为失败触发），清空错误标记
@@ -806,7 +882,7 @@ def planner_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lite
     finished_steps = state.get("finished_steps", [])
 
     # 循环限制：防止死循环
-    MAX_LOOP_COUNT = 10
+    MAX_LOOP_COUNT = 20
     if loop_count >= MAX_LOOP_COUNT:
         logger.info(f"   ⚠️ 达到最大循环次数 ({MAX_LOOP_COUNT})，强制结束任务")
         return Command(
@@ -898,8 +974,11 @@ def planner_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lite
                     "coder_retry_count": 0,         # 重置重试计数
                     "_code_source": None,           # 清空代码来源
                     "_cache_failed_this_round": False,  # 重置缓存标记
+                    "_cache_hit_id": None,          # 清空 CodeCache 命中 ID
+                    "_failed_code_cache_ids": [],   # 清空 CodeCache 失败黑名单
                     "_observer_source": None,       # 清空观察来源
                     "_dom_cache_hit_id": None,      # 清空 DomCache 命中 ID
+                    "_failed_dom_cache_ids": [],    # 清空 DomCache 失败黑名单
                     "dom_skeleton": "",             # 清空 DOM（Observer 会重新获取）
                     "dom_hash": None,               # 清空 DOM 哈希
                     "loop_count": 1,                # 从 1 开始（因为这是第一次规划）
@@ -1246,16 +1325,12 @@ def verifier_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lit
 
             # 缓存代码失败：跳 Planner，标记失败
             if code_source == "cache":
-                return Command(
-                    update={
-                        "messages": [AIMessage(content=f"【缓存验收失败】{kw}")],
-                        "_cache_failed_this_round": True,
-                        "reflections": [f"缓存代码验收失败: {kw}"],
-                        "locator_suggestions": {"__replace__": current_suggestions[:-1]} if current_suggestions else None,
-                        "is_complete": False
-                    },
-                    goto="Planner"
-                )
+                return _handle_cache_failure(state, {
+                    "messages": [AIMessage(content=f"【缓存验收失败】{kw}")],
+                    "reflections": [f"缓存代码验收失败: {kw}"],
+                    "locator_suggestions": {"__replace__": current_suggestions[:-1]} if current_suggestions else None,
+                    "is_complete": False
+                })
 
             # LLM 代码失败：回 Observer
             return Command(
@@ -1304,6 +1379,10 @@ def verifier_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lit
 
     if is_success:
         updates["finished_steps"] = [summary]
+        # 一旦本步成功，释放失败窗口内的缓存黑名单
+        updates["_failed_code_cache_ids"] = []
+        updates["_failed_dom_cache_ids"] = []
+        updates["_cache_hit_id"] = None
 
         # 检查是否需要存代码或策略到缓存 → RAGNode
         code = state.get("generated_code", "")

@@ -39,6 +39,7 @@ class DomCacheHit(NamedTuple):
     url_pattern: str
     dom_hash: str
     task_intent: str
+    created_at: str = ""
 
 
 class DomCacheManager(VectorCacheBase):
@@ -164,6 +165,7 @@ class DomCacheManager(VectorCacheBase):
                     "dom_hash",
                     "task_intent",
                     "locator_suggestions",
+                    "created_at",
                     "expire_at",
                 ],
                 tag="DomCache",
@@ -204,6 +206,7 @@ class DomCacheManager(VectorCacheBase):
                         dom_hash=(read_hit_field(item, "dom_hash") or ""),
                         task_intent=(read_hit_field(
                             item, "task_intent") or ""),
+                        created_at=(read_hit_field(item, "created_at") or ""),
                     )
                 )
             return hits[:top_k]

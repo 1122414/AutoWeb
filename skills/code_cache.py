@@ -42,6 +42,7 @@ class CacheHit(NamedTuple):
     goal: str
     success_count: int
     user_task: str = ""
+    created_at: str = ""
 
 
 def extract_param_diffs(cached_task: str, current_task: str) -> list:
@@ -189,7 +190,7 @@ class CodeCacheManager(VectorCacheBase):
                 rerank=ranker,
                 limit=top_k,
                 output_fields=["cache_id", "code", "url_pattern",
-                               "goal", "success_count", "user_task"],
+                               "goal", "success_count", "user_task", "created_at"],
                 tag="CodeCache",
             )
 
@@ -209,6 +210,7 @@ class CodeCacheManager(VectorCacheBase):
                     "goal": read_hit_field(item, "goal"),
                     "success_count": read_hit_field(item, "success_count"),
                     "user_task": read_hit_field(item, "user_task"),
+                    "created_at": read_hit_field(item, "created_at"),
                 }
 
                 hits.append(
@@ -220,6 +222,7 @@ class CodeCacheManager(VectorCacheBase):
                         goal=metadata.get("goal", ""),
                         success_count=int(metadata.get("success_count", 0)),
                         user_task=metadata.get("user_task", ""),
+                        created_at=metadata.get("created_at", ""),
                     )
                 )
 

@@ -3,6 +3,7 @@ import sys
 import uuid
 import re
 import traceback
+from datetime import datetime
 from typing import List
 
 # 导入核心驱动
@@ -469,6 +470,11 @@ def interactive_loop(app, browser_instance, llm, observer):
                 "loop_count": 0,
                 "finished_steps": [],
                 "hitl_mode": session_hitl_mode,
+                "_task_started_at": datetime.now().isoformat(),
+                "_cache_failed_this_round": False,
+                "_cache_hit_id": None,
+                "_failed_code_cache_ids": [],
+                "_failed_dom_cache_ids": [],
             }
 
             try:
@@ -476,7 +482,11 @@ def interactive_loop(app, browser_instance, llm, observer):
                 for event in app.stream(input_state, config=config, stream_mode="updates"):
                     print_step_output(event)
 
-                print("\n✅ 流程结束 (图执行完毕)")
+                snapshot_after = app.get_state(config)
+                next_nodes = getattr(snapshot_after, "next", None)
+                values = getattr(snapshot_after, "values", {}) or {}
+                if (not next_nodes) and bool(values.get("is_complete", False)):
+                    print("\n✅ 流程结束 (图执行完毕)")
 
             except Exception as e:
                 print(f"\n❌ 流程中断: {e}")

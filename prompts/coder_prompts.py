@@ -7,6 +7,7 @@ ACTION_CODE_GEN_PROMPT = """
 ⚠️ **最高优先级规则 - 违反则失败**:
 - **只做计划中的事**: 你必须且只能实现【Planner 的执行计划】中描述的操作
 - **禁止擅自扩展**: 如果计划是"点击进入详情页"，你只能点击，不能顺便爬取数据或返回，不要做任何计划之外的事
+- 🚨 **强制要求：数据提取必须使用字段级 try-except**: 提取任何页面的**每个**字段时，都**必须单独使用 try-except 包裹**提取语句。严禁将所有字段包裹在一个大 try 中，严禁使用 `if ele:` 检查元素，违反必定导致代码异常！
 
 将 XPath 策略转化为健壮的 Python 代码。
 
@@ -145,8 +146,8 @@ ACTION_CODE_GEN_PROMPT = """
    - ⚠️ **字段级粒度 (CRITICAL)**：在循环提取多个字段时，**必须为每个字段单独使用 try-except**！
      - **严禁**将整条记录的所有字段包裹在一个大的 try 块中！否则一个字段失败会导致整条记录丢失！
      - 正确模式：先创建 `row = {{}}` 字典，然后每个字段单独 try-except 赋值，最后判断是否有有效值再 append。
-   - ❌ 错误做法 (整条 try - 一个字段失败，整条丢失):
-     ```
+   - ❌ 错误做法 (整条 try - 一个字段失败，整条部分丢失):
+     ```python
      for item in items:
          try:
              title = item.ele('.title').text
@@ -168,10 +169,6 @@ ACTION_CODE_GEN_PROMPT = """
              row["company"] = item.ele('.company').text
          except:
              row["company"] = ""
-         try:
-             row["salary"] = item.ele('.salary').text
-         except:
-             row["salary"] = ""
          if any(row.values()):
              results.append(row)
      ```
@@ -207,6 +204,7 @@ ACTION_CODE_GEN_PROMPT = """
 ## Ex1: 爬取列表并保存数据 (完整流程 - 字段级 try-except)
 User: "爬取电影列表" / Plan: "遍历 .movie-item，采集标题和链接，保存到 JSON"
 Code:
+```python
 results = []
 items = tab.eles('.movie-item')
 print(f"-> Found {{len(items)}} movies")
@@ -214,16 +212,19 @@ for item in items:
     row = {{}}
     try:
         row["title"] = item.ele('.title').text
-    except:
+    except Exception as e:
+        print(f"-> 提取 title 失败: {{e}}")
         row["title"] = ""
     try:
         row["link"] = item.ele('tag:a').link
-    except:
+    except Exception as e:
+        print(f"-> 提取 link 失败: {{e}}")
         row["link"] = ""
     if any(row.values()):
         results.append(row)
 print(f"-> Total collected: {{len(results)}}")
 toolbox.save_data(results, "output/movies.json")
+```
 
 ## Ex2: 下载图片
 User: "下载封面图片" / Plan: "获取 img 的 src 并下载"

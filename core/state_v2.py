@@ -65,6 +65,7 @@ class AgentState(EnvState, TaskState):
     """
     # 基础消息历史 (LangGraph 内置 Reducer: add_messages)
     messages: Annotated[List[BaseMessage], add_messages]
+    _task_started_at: Optional[str]      # 当前任务启动时间，用于同任务缓存隔离
 
     # 协作流转产生的临时数据 (由于 Node 是纯函数，这些通常作为 Node 的返回值传递，
     # 但为了方便下游 Node 读取，也可以存在 State 中，但不建议大量依赖)
@@ -86,10 +87,12 @@ class AgentState(EnvState, TaskState):
     _code_source: Optional[str]         # 代码来源: "cache" | "llm" | None
     _cache_failed_this_round: bool      # 本轮缓存代码是否已失败（用于防止死循环）
     _cache_hit_id: Optional[str]        # 缓存命中记录 ID（用于失败失效）
+    _failed_code_cache_ids: List[str]   # 当前失败窗口内禁用的 CodeCache 命中 ID
 
     # DOM 缓存控制
     _observer_source: Optional[str]     # 观察来源: "dom_cache" | "observer" | None
     _dom_cache_hit_id: Optional[str]    # DomCache 命中记录 ID（用于失败失效）
+    _failed_dom_cache_ids: List[str]    # 当前失败窗口内禁用的 DomCache 命中 ID
 
     # 连续失败保底
     _step_fail_count: int               # 连续步骤失败计数（成功时重置为 0）

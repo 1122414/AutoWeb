@@ -41,6 +41,7 @@ def _env_rule_list(name: str, default):
     except Exception:
         return default
 
+
 # ==========================
 # 基础配置
 # ==========================
@@ -170,7 +171,7 @@ VERIFIER_BASE_URL = os.getenv('VERIFIER_BASE_URL') or OPENAI_BASE_URL
 CODE_CACHE_ENABLED = os.getenv("CODE_CACHE_ENABLED", "True").lower() == "true"
 
 # 代码缓存相似度阈值 (0-1，越高越严格)
-CODE_CACHE_THRESHOLD = float(os.getenv("CODE_CACHE_THRESHOLD", "0.90"))
+CODE_CACHE_THRESHOLD = float(os.getenv("CODE_CACHE_THRESHOLD", "0.95"))
 
 # 代码缓存 Collection 名称 (与知识库分开)
 CODE_CACHE_COLLECTION = os.getenv("CODE_CACHE_COLLECTION", "code_cache")
@@ -187,7 +188,7 @@ CODE_CACHE_WEIGHT_URL = float(os.getenv("CODE_CACHE_WEIGHT_URL", "0.1"))
 CODE_CACHE_SIMILARITY_THRESHOLD = float(
     os.getenv("CODE_CACHE_SIMILARITY_THRESHOLD", "0.0"))
 CODE_CACHE_DUPLICATE_THRESHOLD = float(
-    os.getenv("CODE_CACHE_DUPLICATE_THRESHOLD", "0.90"))
+    os.getenv("CODE_CACHE_DUPLICATE_THRESHOLD", "0.95"))
 CODE_CACHE_NAV_MAX_LEN = int(os.getenv("CODE_CACHE_NAV_MAX_LEN", "200"))
 CODE_CACHE_MAX_CODE_WARN = int(os.getenv("CODE_CACHE_MAX_CODE_WARN", "6400"))
 
@@ -196,7 +197,7 @@ CODE_CACHE_MAX_CODE_WARN = int(os.getenv("CODE_CACHE_MAX_CODE_WARN", "6400"))
 # ==============================================================================
 DOM_CACHE_ENABLED = os.getenv("DOM_CACHE_ENABLED", "True").lower() == "true"
 DOM_CACHE_COLLECTION = os.getenv("DOM_CACHE_COLLECTION", "dom_cache")
-DOM_CACHE_THRESHOLD = float(os.getenv("DOM_CACHE_THRESHOLD", "0.9"))
+DOM_CACHE_THRESHOLD = float(os.getenv("DOM_CACHE_THRESHOLD", "0.95"))
 DOM_CACHE_TOP_K = int(os.getenv("DOM_CACHE_TOP_K", "3"))
 DOM_CACHE_TTL_HOURS = int(os.getenv("DOM_CACHE_TTL_HOURS", f"{24 * 7}"))
 DOM_CACHE_TASK_MIN_SIM = float(os.getenv("DOM_CACHE_TASK_MIN_SIM", "0.8"))
@@ -258,7 +259,8 @@ HITL_VERIFIER_FATAL_KEYWORDS = _env_csv(
 )
 HITL_VERIFIER_SUCCESS_KEYWORDS = _env_csv(
     "HITL_VERIFIER_SUCCESS_KEYWORDS",
-    ["success", "succeed", "completed", "done", "saved", "成功", "完成", "已保存", "执行完成"],
+    ["success", "succeed", "completed", "done",
+        "saved", "成功", "完成", "已保存", "执行完成"],
 )
 
 # ==============================================================================
