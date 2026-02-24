@@ -3,9 +3,10 @@ import time
 import hashlib
 import re
 import traceback
+import tiktoken
 from typing import Literal, Union
 from urllib.parse import urlparse
-from langchain_core.messages import HumanMessage, AIMessage
+from langchain_core.messages import HumanMessage, AIMessage, RemoveMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.types import Command
 
@@ -95,6 +96,114 @@ def _extract_locator_info(state: dict) -> str:
             if loc:
                 parts.append(loc)
     return " | ".join(parts) if parts else ""
+
+
+# ==============================================================================
+# 上下文裁剪辅助函数 (tiktoken 水位监控 + 分级裁剪)
+# ==============================================================================
+
+def _count_tokens(text: str) -> int:
+    """用 tiktoken 计算文本 Token 数（cl100k_base 编码，兼容绝大多数模型）"""
+    try:
+        enc = tiktoken.get_encoding("cl100k_base")
+        return len(enc.encode(text))
+    except Exception:
+        return len(text) // 2
+
+
+def _get_summarizer_llm():
+    """获取摘要压缩用的独立小模型实例"""
+    from langchain_openai import ChatOpenAI
+    from config import SUMMARIZER_MODEL_NAME, SUMMARIZER_API_KEY, SUMMARIZER_BASE_URL
+    return ChatOpenAI(
+        model=SUMMARIZER_MODEL_NAME,
+        api_key=SUMMARIZER_API_KEY,
+        base_url=SUMMARIZER_BASE_URL,
+        temperature=0,
+        max_tokens=512,
+    )
+
+
+def _prune_locator_suggestions(accumulated_strategies: list) -> list:
+    """
+    保留最近 N 组页面的定位策略。
+
+    策略：直接保留最后出现的 N 组，不再按 URL 强制去重覆盖，
+    避免同一个页面后续不同操作的策略互相覆盖。
+    """
+    from config import CONTEXT_MAX_UNIQUE_PAGES
+
+    if len(accumulated_strategies) <= CONTEXT_MAX_UNIQUE_PAGES:
+        return accumulated_strategies
+
+    pruned = accumulated_strategies[-CONTEXT_MAX_UNIQUE_PAGES:]
+
+    logger.info(
+        f"   ✂️ [Context] locator_suggestions 裁剪: "
+        f"{len(accumulated_strategies)} → 保留最近 {len(pruned)} 组"
+    )
+
+    return pruned
+
+
+def _prune_finished_steps(finished_steps: list, prompt_text: str) -> str:
+    """
+    tiktoken 水位监控触发的 finished_steps 滚动摘要。
+
+    逻辑：
+    1. 先构建完整的 finished_steps_str
+    2. 用 tiktoken 计算整个 prompt 的 Token 数
+    3. 如果超过阈值，用独立小模型将早期步骤压缩为摘要
+    """
+    from config import (PLANNER_CONTEXT_WINDOW, CONTEXT_PRUNE_RATIO,
+                        CONTEXT_RECENT_KEEP)
+
+    finished_steps_str = "\n".join(
+        [f"- {s}" for s in finished_steps]) if finished_steps else "(无)"
+
+    threshold = int(PLANNER_CONTEXT_WINDOW * CONTEXT_PRUNE_RATIO)
+    current_tokens = _count_tokens(prompt_text)
+
+    logger.info(
+        f"   📊 [Context] Token 水位: {current_tokens}/{threshold} "
+        f"({current_tokens * 100 // max(threshold, 1)}%)"
+    )
+
+    if current_tokens <= threshold:
+        return finished_steps_str
+
+    # 超阈值 → 用独立小模型压缩早期步骤
+    if not finished_steps or len(finished_steps) <= CONTEXT_RECENT_KEEP:
+        return finished_steps_str
+
+    logger.info(
+        f"   ✂️ [Context] 第二级裁剪: finished_steps 滚动摘要 "
+        f"(保留最近 {CONTEXT_RECENT_KEEP} 条, 压缩前 {len(finished_steps) - CONTEXT_RECENT_KEEP} 条)"
+    )
+
+    early = finished_steps[:-CONTEXT_RECENT_KEEP]
+    recent = finished_steps[-CONTEXT_RECENT_KEEP:]
+
+    try:
+        summarizer = _get_summarizer_llm()
+        summary_prompt = (
+            "请用1-2句话总结以下已完成的操作步骤，"
+            "保留关键信息（如爬取了哪些数据、到了第几页等）：\n"
+            + "\n".join([f"- {s}" for s in early])
+        )
+        resp = summarizer.invoke([HumanMessage(content=summary_prompt)])
+        early_summary = resp.content.strip()
+    except Exception as e:
+        logger.warning(f"   ⚠️ [Context] 摘要压缩失败: {e}，使用截断兜底")
+        early_summary = f"(已完成 {len(early)} 个早期步骤)"
+
+    recent_str = "\n".join([f"- {s}" for s in recent])
+    result = f"[早期摘要] {early_summary}\n[最近步骤]\n{recent_str}"
+
+    new_tokens = _count_tokens(prompt_text.replace(finished_steps_str, result))
+    logger.info(f"   ✅ [Context] 裁剪后 Token: {new_tokens}/{threshold}")
+
+    return result
 
 
 # ==============================================================================
@@ -802,12 +911,20 @@ def planner_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lite
     # 1. 从 State 读取 Observer 提供的定位策略（不再自己调用 observer）
     accumulated_strategies = state.get("locator_suggestions", [])
     if accumulated_strategies:
+        # 裁剪策略：按 URL 去重保留最近 N 个页面
+        accumulated_strategies = _prune_locator_suggestions(
+            accumulated_strategies)
         suggestions_str = json.dumps(
             accumulated_strategies, ensure_ascii=False, indent=2)
     else:
         suggestions_str = "无特定定位建议，请自行分析 DOM。"
 
+    # 裁剪 reflections：只保留最新的 N 条失败教训
+    from config import CONTEXT_MAX_REFLECTIONS
     reflections = state.get("reflections", [])
+    if len(reflections) > CONTEXT_MAX_REFLECTIONS:
+        reflections = reflections[-CONTEXT_MAX_REFLECTIONS:]
+
     reflection_str = ""
     if reflections:
         reflection_str = "\n⚠️ **之前的失败教训 (请在规划时重点规避)**:\n" + \
@@ -836,18 +953,25 @@ def planner_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lite
         )
         logger.info(f"   🚨 [Planner] 连续失败 {step_fail_count} 次，注入强制跳过指令")
 
-    finished_steps_str = "\n".join(
-        [f"- {s}" for s in finished_steps]) if finished_steps else "(无)"
-
-    # 2. 制定计划
-    prompt = PLANNER_STEP_PROMPT.format(
+    # 2. tiktoken 水位监控 + finished_steps 滚动摘要
+    # 我们先组装试算的 prompt（不包含 finished_steps 的原文），用来计算基础结构大概占多少 Token
+    trial_prompt_template = PLANNER_STEP_PROMPT.format(
         task=task,
         current_url=current_url,
-        finished_steps_str=finished_steps_str,
+        finished_steps_str="{finished_steps_str}",
         suggestions_str=suggestions_str,
         reflection_str=reflection_str,
         last_verification=last_verification
     ) + fail_override_hint
+
+    finished_steps_str = _prune_finished_steps(
+        finished_steps=finished_steps,
+        prompt_text=trial_prompt_template.replace("{finished_steps_str}", "")
+    )
+
+    # 制定最终计划
+    prompt = trial_prompt_template.replace(
+        "{finished_steps_str}", finished_steps_str)
     response = llm.invoke([HumanMessage(content=prompt)])
     content = response.content
     # 改进完成判断：当两个标记同时出现时，以【计划已生成】为准
@@ -858,8 +982,24 @@ def planner_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lite
     if has_finished_tag and has_plan_tag:
         logger.info("   ⚠️ [Planner] 检测到【任务已完成】和【计划已生成】同时出现，以计划为准")
 
+    # 消息裁剪：保留最近 M 轮历史对话，避免底层的 State(MessageState) 爆炸
+    from config import CONTEXT_MAX_MESSAGE_ROUNDS
+    messages_to_keep = []
+
+    current_messages = state.get("messages", [])
+    # 每轮对话通常包含一答一问。保留最近的 M * 2 条（如果是奇数也没关系）
+    keep_count = CONTEXT_MAX_MESSAGE_ROUNDS * 2 + 1  # 多留一条确保不断层
+    if len(current_messages) > keep_count:
+        # 把早于保留窗口的消息删除
+        to_delete = current_messages[:-keep_count]
+        for msg in to_delete:
+            if hasattr(msg, "id") and msg.id:
+                messages_to_keep.append(RemoveMessage(id=msg.id))
+
+    messages_to_keep.append(response)
+
     update_dict = {
-        "messages": [response],
+        "messages": messages_to_keep,
         "plan": content,
         "loop_count": loop_count + 1,
         "is_complete": is_finished,
