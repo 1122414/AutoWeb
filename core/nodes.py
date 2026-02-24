@@ -1130,6 +1130,7 @@ def verifier_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lit
 
     # 2. LLM 验收（优化 Prompt）
     prompt = VERIFIER_CHECK_PROMPT.format(
+        user_task=task,
         current_plan=current_plan,
         current_url=current_url,
         log=log[-2000:],
