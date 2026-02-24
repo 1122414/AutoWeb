@@ -1,8 +1,45 @@
 import os
+import json
 from dotenv import load_dotenv
 
 # 1. 在这里统一加载 .env，其他文件就不需要再写 load_dotenv() 了
 load_dotenv()
+
+
+def _env_bool(name: str, default: str = "False") -> bool:
+    return os.getenv(name, default).lower() == "true"
+
+
+def _env_csv(name: str, default):
+    raw = os.getenv(name, "")
+    if not raw.strip():
+        return default
+    return [x.strip() for x in raw.split(",") if x.strip()]
+
+
+def _env_rule_list(name: str, default):
+    """
+    Env JSON format:
+    [{"label":"xxx","pattern":"regex"}, ...]
+    """
+    raw = os.getenv(name, "")
+    if not raw.strip():
+        return default
+    try:
+        parsed = json.loads(raw)
+        if not isinstance(parsed, list):
+            return default
+        rules = []
+        for item in parsed:
+            if not isinstance(item, dict):
+                continue
+            label = str(item.get("label", "")).strip()
+            pattern = str(item.get("pattern", "")).strip()
+            if label and pattern:
+                rules.append((label, pattern))
+        return rules or default
+    except Exception:
+        return default
 
 # ==========================
 # 基础配置
@@ -170,6 +207,59 @@ DOM_CACHE_REQUIRE_URL_MATCH = os.getenv(
 DOM_CACHE_WEIGHT_URL = float(os.getenv("DOM_CACHE_WEIGHT_URL", "0.2"))
 DOM_CACHE_WEIGHT_DOM = float(os.getenv("DOM_CACHE_WEIGHT_DOM", "0.5"))
 DOM_CACHE_WEIGHT_TASK = float(os.getenv("DOM_CACHE_WEIGHT_TASK", "0.3"))
+
+# ==============================================================================
+# Human-in-the-Loop (HITL) 配置
+# ==============================================================================
+HITL_MODE_DEFAULT = os.getenv("HITL_MODE_DEFAULT", "off").strip().lower()
+HITL_FORCE_STEP_FAIL_THRESHOLD = int(
+    os.getenv("HITL_FORCE_STEP_FAIL_THRESHOLD", "2"))
+
+# Hard-gate toggles
+HITL_FORCE_EXEC_HIGH_RISK = _env_bool("HITL_FORCE_EXEC_HIGH_RISK", "True")
+HITL_FORCE_EXEC_IRREVERSIBLE = _env_bool(
+    "HITL_FORCE_EXEC_IRREVERSIBLE", "True")
+HITL_FORCE_VERIFIER_LOW_CONF = _env_bool(
+    "HITL_FORCE_VERIFIER_LOW_CONF", "True")
+HITL_FORCE_VERIFIER_LOG_CONFLICT = _env_bool(
+    "HITL_FORCE_VERIFIER_LOG_CONFLICT", "True")
+
+# Executor hard-gate rules (JSON override supported)
+# Env: HITL_EXEC_HIGH_RISK_RULES_JSON='[{"label":"x","pattern":"..."}]'
+HITL_EXEC_HIGH_RISK_RULES = _env_rule_list(
+    "HITL_EXEC_HIGH_RISK_RULES_JSON",
+    [
+        ("file_or_dir_delete",
+         r"\b(os\.(remove|rmdir|removedirs)|shutil\.rmtree)\s*\("),
+        ("system_command_exec",
+         r"\b(os\.system|subprocess\.(run|Popen|call|check_call|check_output))\s*\("),
+        ("outbound_write_request", r"\brequests\.(post|put|delete|patch)\s*\("),
+    ],
+)
+
+HITL_EXEC_IRREVERSIBLE_RULES = _env_rule_list(
+    "HITL_EXEC_IRREVERSIBLE_RULES_JSON",
+    [
+        ("form_submit", r"\.submit\s*\("),
+        ("irreversible_click",
+         r"(click|js_click)\s*\([^)]*(delete|pay|submit|confirm|checkout|purchase)"),
+    ],
+)
+
+# Verifier hard-gate rules
+HITL_VERIFIER_LOW_CONF_REGEX = os.getenv(
+    "HITL_VERIFIER_LOW_CONF_REGEX",
+    r"(不确定|无法确认|可能|也许|疑似|maybe|uncertain|not sure|likely)"
+)
+HITL_VERIFIER_FATAL_KEYWORDS = _env_csv(
+    "HITL_VERIFIER_FATAL_KEYWORDS",
+    ["runtime error", "traceback", "elementnotfound", "timeoutexception",
+        "execution failed", "critical"],
+)
+HITL_VERIFIER_SUCCESS_KEYWORDS = _env_csv(
+    "HITL_VERIFIER_SUCCESS_KEYWORDS",
+    ["success", "succeed", "completed", "done", "saved", "成功", "完成", "已保存", "执行完成"],
+)
 
 # ==============================================================================
 # 路由关键词 (Routing Keywords)

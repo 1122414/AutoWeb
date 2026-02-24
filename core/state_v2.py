@@ -97,3 +97,6 @@ class AgentState(EnvState, TaskState):
     # RAG Node 控制
     # RAG 任务类型: "store_kb" | "store_code" | "qa" | None
     rag_task_type: Optional[str]
+
+    # Human-in-the-Loop 模式: "off" | "review_all"
+    hitl_mode: Optional[str]

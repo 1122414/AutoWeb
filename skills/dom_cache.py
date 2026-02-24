@@ -49,7 +49,7 @@ class DomCacheManager(VectorCacheBase):
         super().__init__(
             weights=(DOM_CACHE_WEIGHT_URL, DOM_CACHE_WEIGHT_DOM,
                      DOM_CACHE_WEIGHT_TASK),
-            defaults=(0.2, 0.7, 0.1),
+            defaults=(0.2, 0.5, 0.3),
             tag="DomCache",
         )
 
