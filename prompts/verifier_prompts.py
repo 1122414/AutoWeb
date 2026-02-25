@@ -22,6 +22,11 @@ VERIFIER_CHECK_PROMPT = """
 格式:
 Status: [STEP_SUCCESS | STEP_FAIL]
 Summary: [简短描述：计划要求做什么，实际完成了什么，是否吻合]
+FailureScope: [LOCAL | GLOBAL]  # 默认 LOCAL
+FailedAction: [失败的具体动作；成功时可留空]
+FailedLocator: [失败定位器；无则留空]
+Evidence: [日志中的关键证据；无则留空]
+FixHint: [建议如何修复当前失败点；成功时可留空]
 """
 
 ERROR_RECOVERY_PROMPT = """

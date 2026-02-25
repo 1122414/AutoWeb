@@ -5,7 +5,7 @@ import re
 import traceback
 from datetime import datetime
 import tiktoken
-from typing import Literal, Optional, Union
+from typing import Any, Dict, Literal, Optional, Union
 from urllib.parse import urlparse
 from langchain_core.messages import HumanMessage, AIMessage, RemoveMessage
 from langchain_core.runnables import RunnableConfig
@@ -121,6 +121,143 @@ def _extract_locator_info(state: dict) -> str:
             if loc:
                 parts.append(loc)
     return " | ".join(parts) if parts else ""
+
+
+def _normalize_failure_scope(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    return "global" if text == "global" else "local"
+
+
+def _normalize_verification_source(value: Any, default: str = "verifier") -> str:
+    valid = {"verifier", "executor", "error_handler", "manual"}
+    text = str(value or default).strip().lower()
+    return text if text in valid else default
+
+
+def _build_verification_result(
+    *,
+    is_success: bool,
+    summary: str,
+    source: str,
+    is_done: bool = False,
+    failure_scope: str = "local",
+    failed_action: str = "",
+    failed_locator: str = "",
+    evidence: str = "",
+    fix_hint: str = "",
+) -> Dict[str, Any]:
+    success = bool(is_success)
+    return {
+        "is_success": success,
+        "is_done": bool(is_done) if success else False,
+        "summary": str(summary or "Step executed.").strip(),
+        "source": _normalize_verification_source(source),
+        "failure_scope": _normalize_failure_scope(failure_scope),
+        "failed_action": str(failed_action or "").strip(),
+        "failed_locator": str(failed_locator or "").strip(),
+        "evidence": str(evidence or "").strip(),
+        "fix_hint": str(fix_hint or "").strip(),
+    }
+
+
+def _coerce_verification_result(
+    verification: Optional[Dict[str, Any]],
+    *,
+    fallback_is_success: bool = False,
+    fallback_summary: str = "Step executed.",
+    fallback_source: str = "verifier",
+    fallback_is_done: bool = False,
+    fallback_failure_scope: str = "local",
+    fallback_failed_action: str = "",
+    fallback_failed_locator: str = "",
+    fallback_evidence: str = "",
+    fallback_fix_hint: str = "",
+) -> Dict[str, Any]:
+    payload = verification or {}
+    return _build_verification_result(
+        is_success=bool(payload.get("is_success", fallback_is_success)),
+        is_done=bool(payload.get("is_done", fallback_is_done)),
+        summary=str(payload.get("summary", fallback_summary)),
+        source=str(payload.get("source", fallback_source)),
+        failure_scope=str(payload.get(
+            "failure_scope", fallback_failure_scope)),
+        failed_action=str(payload.get(
+            "failed_action", fallback_failed_action)),
+        failed_locator=str(payload.get(
+            "failed_locator", fallback_failed_locator)),
+        evidence=str(payload.get("evidence", fallback_evidence)),
+        fix_hint=str(payload.get("fix_hint", fallback_fix_hint)),
+    )
+
+
+def _is_failed_verification(verification: Optional[Dict[str, Any]]) -> bool:
+    return bool(verification) and bool(verification.get("is_success", True)) is False
+
+
+def _parse_verifier_result_content(content: str) -> Dict[str, Any]:
+    summary = "Step executed."
+    failure_scope = "local"
+    failed_action = ""
+    failed_locator = ""
+    evidence = ""
+    fix_hint = ""
+    is_success = "Status: STEP_SUCCESS" in content
+
+    for raw_line in (content or "").split("\n"):
+        line = raw_line.strip()
+        line_lower = line.lower()
+        if line.startswith("Summary:"):
+            summary = line.replace("Summary:", "", 1).strip() or summary
+        elif line_lower.startswith("failurescope:"):
+            failure_scope = line.split(
+                ":", 1)[1].strip() if ":" in line else failure_scope
+        elif line_lower.startswith("failedaction:"):
+            failed_action = line.split(
+                ":", 1)[1].strip() if ":" in line else failed_action
+        elif line_lower.startswith("failedlocator:"):
+            failed_locator = line.split(
+                ":", 1)[1].strip() if ":" in line else failed_locator
+        elif line_lower.startswith("evidence:"):
+            evidence = line.split(
+                ":", 1)[1].strip() if ":" in line else evidence
+        elif line_lower.startswith("fixhint:"):
+            fix_hint = line.split(
+                ":", 1)[1].strip() if ":" in line else fix_hint
+
+    return {
+        "is_success": is_success,
+        "summary": summary,
+        "failure_scope": _normalize_failure_scope(failure_scope),
+        "failed_action": failed_action,
+        "failed_locator": failed_locator,
+        "evidence": evidence,
+        "fix_hint": fix_hint,
+    }
+
+
+def _verification_focus_text(verification: Optional[Dict[str, Any]]) -> str:
+    if not _is_failed_verification(verification):
+        return "(无)"
+    v = verification or {}
+    scope = _normalize_failure_scope(v.get("failure_scope", "local"))
+    action = str(v.get("failed_action", "")).strip() or "(未提供)"
+    locator = str(v.get("failed_locator", "")).strip() or "(未提供)"
+    evidence = str(v.get("evidence", "")).strip() or str(
+        v.get("summary", "")).strip() or "(未提供)"
+    fix_hint = str(v.get("fix_hint", "")).strip() or "(未提供)"
+    return (
+        f"- failure_scope: {scope}\n"
+        f"- failed_action: {action}\n"
+        f"- failed_locator: {locator}\n"
+        f"- evidence: {evidence}\n"
+        f"- fix_hint: {fix_hint}"
+    )
+
+
+def _looks_like_global_rewrite_plan(plan_text: str) -> bool:
+    text = (plan_text or "").lower()
+    keywords = ["全局", "全部重写", "从头", "重做", "重写", "推翻", "重新执行全部", "重来"]
+    return any(kw in text for kw in keywords)
 
 
 # ==============================================================================
@@ -290,8 +427,10 @@ def cache_lookup_node(state: AgentState, config: RunnableConfig) -> Command[Lite
             top_k=10
         )
 
-        failed_code_cache_ids = set(state.get("_failed_code_cache_ids", []) or [])
-        task_started_at = _parse_iso_datetime(state.get("_task_started_at", ""))
+        failed_code_cache_ids = set(
+            state.get("_failed_code_cache_ids", []) or [])
+        task_started_at = _parse_iso_datetime(
+            state.get("_task_started_at", ""))
         eligible_hits = [
             hit for hit in hits
             if (not hit.id) or (hit.id not in failed_code_cache_ids)
@@ -477,6 +616,19 @@ def _handle_cache_failure(state: AgentState, updates: dict) -> Command:
         if cache_hit_id not in failed_cache_ids:
             failed_cache_ids.append(cache_hit_id)
 
+    updates["verification_result"] = _coerce_verification_result(
+        updates.get("verification_result"),
+        fallback_is_success=False,
+        fallback_summary="缓存代码执行/验收失败，需要重新规划",
+        fallback_source="executor",
+        fallback_failure_scope="local",
+        fallback_failed_action=state.get("plan", ""),
+        fallback_evidence=updates.get("error", "") or (
+            updates.get("reflections", [
+                        ""])[-1] if updates.get("reflections") else ""
+        ),
+        fallback_fix_hint="更换定位器或改用新的执行方案，避免复用本次失败缓存",
+    )
     updates["_cache_failed_this_round"] = True
     updates["_cache_hit_id"] = None
     updates["_failed_code_cache_ids"] = failed_cache_ids
@@ -504,18 +656,39 @@ def error_handler_node(state: AgentState, config: RunnableConfig, llm) -> Comman
 
     is_terminate = "Status: TERMINATE" in content
 
+    plan = state.get("plan", "")
     updates = {
         "messages": [AIMessage(content=f"【系统故障】正在恢复...\n{content}")],
         # 清除错误标志，以便重试
-        "error": None
+        "error": None,
     }
 
     if is_terminate:
         logger.info("   ❌ ErrHandler: 决定终止任务。")
+        updates["verification_result"] = _build_verification_result(
+            is_success=False,
+            is_done=False,
+            summary=f"ErrorHandler 终止: {error_msg}",
+            source="error_handler",
+            failure_scope="global",
+            failed_action=plan,
+            evidence=error_msg,
+            fix_hint="当前错误不可恢复，任务终止",
+        )
         updates["is_complete"] = True  # 虽然失败了，但也算结束
         return Command(update=updates, goto="__end__")
     else:
         logger.info("   🔄 ErrHandler: 尝试回退到 Observer 重新感知环境。")
+        updates["verification_result"] = _build_verification_result(
+            is_success=False,
+            is_done=False,
+            summary=f"ErrorHandler 回退: {error_msg}",
+            source="error_handler",
+            failure_scope="local",
+            failed_action=plan,
+            evidence=error_msg,
+            fix_hint="回到 Observer 重新感知并修复失败点",
+        )
         return Command(update=updates, goto="Observer")
 
 
@@ -580,13 +753,18 @@ def observer_node(state: AgentState, config: RunnableConfig, observer) -> Comman
 
         # 获取历史累积的策略列表
         accumulated_strategies = state.get("locator_suggestions", [])
-        failed_dom_cache_ids = list(state.get("_failed_dom_cache_ids", []) or [])
-        task_started_at = _parse_iso_datetime(state.get("_task_started_at", ""))
+        failed_dom_cache_ids = list(
+            state.get("_failed_dom_cache_ids", []) or [])
+        task_started_at = _parse_iso_datetime(
+            state.get("_task_started_at", ""))
 
         # 检查是否有失败记录，有则强制重新分析（之前的策略可能是错的）
         reflections = state.get("reflections", [])
         error_type = state.get("error_type")
-        has_failure = len(reflections) > 0 or error_type is not None
+        verification = state.get("verification_result", {}) or {}
+        verification_failed = _is_failed_verification(verification)
+        has_failure = verification_failed or len(
+            reflections) > 0 or error_type is not None
 
         # 只有当 DOM 发生变化 或 存在失败记录时，才进行视觉分析
         should_analyze = (current_dom_hash != previous_dom_hash) or has_failure
@@ -662,8 +840,26 @@ def observer_node(state: AgentState, config: RunnableConfig, observer) -> Comman
                     logger.info(f"   🔄 [Observer] 检测到失败记录，强制重新分析 DOM...")
                 logger.info(
                     f"   -> 正在进行视觉定位分析 (Context: {len(finished_steps)} finished steps)...")
+                previous_failures = list(reflections or [])
+                observer_requirement = task
+                if verification_failed:
+                    focus_text = _verification_focus_text(verification)
+                    observer_requirement = (
+                        f"{task}\n\n"
+                        f"【本轮仅修复失败点】\n"
+                        f"{focus_text}\n"
+                        f"要求：优先修复 failed_locator/failed_action，禁止全局重写。"
+                    )
+                    previous_failures.append(
+                        f"Verifier失败摘要: {verification.get('summary', '')}")
                 locator_suggestions = observer.analyze_locator_strategy(
-                    dom, task, current_url, previous_steps=finished_steps, ignore_cache=has_failure, previous_failures=reflections)
+                    dom,
+                    observer_requirement,
+                    current_url,
+                    previous_steps=finished_steps,
+                    ignore_cache=has_failure,
+                    previous_failures=previous_failures,
+                )
 
                 if isinstance(locator_suggestions, dict):
                     locator_suggestions = [locator_suggestions]
@@ -982,6 +1178,7 @@ def planner_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lite
                     "dom_skeleton": "",             # 清空 DOM（Observer 会重新获取）
                     "dom_hash": None,               # 清空 DOM 哈希
                     "loop_count": 1,                # 从 1 开始（因为这是第一次规划）
+                    "_step_fail_count": 0,          # 重置连续失败计数
                     "is_complete": False
                 },
                 goto="CacheLookup"
@@ -1009,19 +1206,20 @@ def planner_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lite
         reflection_str = "\n⚠️ **之前的失败教训 (请在规划时重点规避)**:\n" + \
             "\n".join([f"- {r}" for r in reflections])
 
-    verification = state.get("verification_result", {})
+    verification = state.get("verification_result", {}) or {}
     last_verification = verification.get(
         "summary", "(无)") if verification else "(无)"
+    verification_focus = _verification_focus_text(verification)
 
     # 连续失败保底：跟踪连续步骤失败次数
     step_fail_count = state.get("_step_fail_count", 0)
-    is_last_step_fail = verification.get(
-        "is_success", True) is False if verification else False
-    if is_last_step_fail:
-        step_fail_count += 1
-        logger.info(f"   ⚠️ [Planner] 连续失败计数: {step_fail_count}")
-    else:
-        step_fail_count = 0
+    if verification:
+        is_last_step_fail = verification.get("is_success", True) is False
+        if is_last_step_fail:
+            step_fail_count += 1
+            logger.info(f"   ⚠️ [Planner] 连续失败计数: {step_fail_count}")
+        else:
+            step_fail_count = 0
 
     MAX_STEP_FAIL = 2  # 同一步骤最多失败 2 次，之后强制换方案
     fail_override_hint = ""
@@ -1040,7 +1238,8 @@ def planner_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lite
         finished_steps_str="{finished_steps_str}",
         suggestions_str=suggestions_str,
         reflection_str=reflection_str,
-        last_verification=last_verification
+        last_verification=last_verification,
+        verification_focus=verification_focus,
     ) + fail_override_hint
 
     finished_steps_str = _prune_finished_steps(
@@ -1053,6 +1252,16 @@ def planner_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lite
         "{finished_steps_str}", finished_steps_str)
     response = llm.invoke([HumanMessage(content=prompt)])
     content = response.content
+    logger.info(f"   📋 [Planner] 计划内容: {content[:200]}")
+    # 局部修复护栏：失败窗口内禁止 Planner 输出“全局重写”方案
+    if _is_failed_verification(verification) and step_fail_count < MAX_STEP_FAIL and _looks_like_global_rewrite_plan(content):
+        logger.info("   ⚠️ [Planner] 检测到全局重写倾向，注入局部修复约束并重试一次")
+        hard_local_fix = (
+            "\n\n【系统硬约束】\n"
+            "你必须仅修复 failed_action / failed_locator，禁止从头重做或全局改写。"
+        )
+        response = llm.invoke([HumanMessage(content=prompt + hard_local_fix)])
+        content = response.content
     # 改进完成判断：当两个标记同时出现时，以【计划已生成】为准
     # (Planner 推理过程中可能先写"【任务已完成】"然后自己推翻，生成新计划)
     has_finished_tag = "【任务已完成】" in content
@@ -1084,6 +1293,9 @@ def planner_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lite
         "is_complete": is_finished,
         "_step_fail_count": step_fail_count
     }
+    if verification:
+        # Planner 消费后再清理，防止重复计数/状态漂移
+        update_dict["verification_result"] = {}
 
     # 3. 动态路由
     if is_finished:
@@ -1213,6 +1425,16 @@ def executor_node(state: AgentState, config: RunnableConfig) -> Command[Literal[
                     "messages": [AIMessage(content=f"【缓存代码失败】{error_kw}，重新规划")],
                     "execution_log": execution_log,
                     "reflections": [f"缓存代码失败: {error_kw}，需要重新生成"],
+                    "verification_result": _build_verification_result(
+                        is_success=False,
+                        is_done=False,
+                        summary=f"缓存代码执行失败: {error_kw}",
+                        source="executor",
+                        failure_scope="local",
+                        failed_action=state.get("plan", ""),
+                        evidence=error_kw,
+                        fix_hint="改用新代码或调整定位器，避免继续复用失败缓存",
+                    ),
                 })
 
             # LLM 代码的错误处理逻辑保持不变
@@ -1238,7 +1460,17 @@ def executor_node(state: AgentState, config: RunnableConfig) -> Command[Literal[
                             "messages": [AIMessage(content=f"【语法错误超限】{execution_log[-500:]}")],
                             "execution_log": execution_log,
                             "error": f"Syntax error after 3 retries: {error_kw}",
-                            "error_type": "syntax_max_retry"
+                            "error_type": "syntax_max_retry",
+                            "verification_result": _build_verification_result(
+                                is_success=False,
+                                is_done=False,
+                                summary=f"语法错误重试超限: {error_kw}",
+                                source="executor",
+                                failure_scope="local",
+                                failed_action=state.get("plan", ""),
+                                evidence=error_kw,
+                                fix_hint="保留当前计划，只修复本步代码语法问题",
+                            ),
                         },
                         goto="ErrorHandler"
                     )
@@ -1251,7 +1483,18 @@ def executor_node(state: AgentState, config: RunnableConfig) -> Command[Literal[
                         "execution_log": execution_log,
                         "error": f"Locator error: {error_kw}",
                         "error_type": "locator",
-                        "reflections": [f"定位错误: {error_kw}，需要重新分析页面"]
+                        "reflections": [f"定位错误: {error_kw}，需要重新分析页面"],
+                        "verification_result": _build_verification_result(
+                            is_success=False,
+                            is_done=False,
+                            summary=f"定位失败: {error_kw}",
+                            source="executor",
+                            failure_scope="local",
+                            failed_action=state.get("plan", ""),
+                            failed_locator=error_kw,
+                            evidence=execution_log[-300:],
+                            fix_hint="仅修复失败定位器，不要全局改写流程",
+                        ),
                     },
                     goto="ErrorHandler"
                 )
@@ -1279,7 +1522,17 @@ def executor_node(state: AgentState, config: RunnableConfig) -> Command[Literal[
                 "execution_log": error_msg,
                 "error": str(e),
                 "error_type": "critical",
-                "reflections": [f"Execution crashed: {str(e)}"]
+                "reflections": [f"Execution crashed: {str(e)}"],
+                "verification_result": _build_verification_result(
+                    is_success=False,
+                    is_done=False,
+                    summary=f"执行崩溃: {str(e)}",
+                    source="executor",
+                    failure_scope="global",
+                    failed_action=state.get("plan", ""),
+                    evidence=error_msg,
+                    fix_hint="先恢复执行环境，再回到当前失败步骤修复",
+                ),
             },
             goto="ErrorHandler"
         )
@@ -1328,7 +1581,16 @@ def verifier_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lit
                 return _handle_cache_failure(state, {
                     "messages": [AIMessage(content=f"【缓存验收失败】{kw}")],
                     "reflections": [f"缓存代码验收失败: {kw}"],
-                    "locator_suggestions": {"__replace__": current_suggestions[:-1]} if current_suggestions else None,
+                    "verification_result": _build_verification_result(
+                        is_success=False,
+                        is_done=False,
+                        summary=f"缓存代码验收失败: {kw}",
+                        source="verifier",
+                        failure_scope="local",
+                        failed_action=current_plan,
+                        evidence=kw,
+                        fix_hint="更换执行方式或修复当前失败定位，不要复用该缓存代码",
+                    ),
                     "is_complete": False
                 })
 
@@ -1337,7 +1599,16 @@ def verifier_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lit
                 update={
                     "messages": [AIMessage(content=f"Status: STEP_FAIL ({kw})")],
                     "reflections": [f"Step Failed: {current_plan}. Error: {kw}"],
-                    "locator_suggestions": {"__replace__": current_suggestions[:-1]} if current_suggestions else None,
+                    "verification_result": _build_verification_result(
+                        is_success=False,
+                        is_done=False,
+                        summary=f"步骤失败: {kw}",
+                        source="verifier",
+                        failure_scope="local",
+                        failed_action=current_plan,
+                        evidence=kw,
+                        fix_hint="仅修复当前失败步骤，不要全局重写",
+                    ),
                     "is_complete": False
                 },
                 goto="Observer"
@@ -1353,12 +1624,9 @@ def verifier_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lit
     response = llm.invoke([HumanMessage(content=prompt)])
     content = response.content
 
-    is_success = "Status: STEP_SUCCESS" in content
-
-    summary = "Step executed."
-    for line in content.split("\n"):
-        if line.startswith("Summary:"):
-            summary = line.replace("Summary:", "").strip()
+    parsed = _parse_verifier_result_content(content)
+    is_success = parsed["is_success"]
+    summary = parsed["summary"]
 
     # 3. 返回验收结果
     logger.info(f"\n📋 [Verifier] LLM 判定:")
@@ -1370,11 +1638,17 @@ def verifier_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lit
         "messages": [response],
         "is_complete": False,  # Verifier 不再判断任务完成，交给 Planner
         "current_url": current_url,
-        "verification_result": {
-            "is_success": is_success,
-            "is_done": False,  # 由 Planner 判断
-            "summary": summary
-        }
+        "verification_result": _build_verification_result(
+            is_success=is_success,
+            is_done=False,  # 由 Planner 判断
+            summary=summary,
+            source="verifier",
+            failure_scope=parsed.get("failure_scope", "local"),
+            failed_action=parsed.get("failed_action", "") or current_plan,
+            failed_locator=parsed.get("failed_locator", ""),
+            evidence=parsed.get("evidence", ""),
+            fix_hint=parsed.get("fix_hint", ""),
+        ),
     }
 
     if is_success:
@@ -1404,9 +1678,12 @@ def verifier_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lit
     else:
         logger.info("   ❌ Step Failed")
         updates["reflections"] = [f"Step Failed: {summary}"]
-        # 清除本轮导致失败的最新那条策略，避免后续带错上下文
-        updates["locator_suggestions"] = {
-            "__replace__": current_suggestions[:-1]} if current_suggestions else None
+        failure_scope = _normalize_failure_scope(
+            updates["verification_result"].get("failure_scope", "local"))
+        # 仅在 global 失败时回滚整条最新策略；local 失败保留上下文做定向修复
+        if failure_scope == "global":
+            updates["locator_suggestions"] = {
+                "__replace__": current_suggestions[:-1]} if current_suggestions else None
 
         # 缓存代码验收失败：失效缓存 + 跳 Planner
         if code_source == "cache":

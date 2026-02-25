@@ -4,7 +4,13 @@ import uuid
 import re
 import traceback
 from datetime import datetime
-from typing import List
+from typing import Any, Dict, List
+
+# 强制设置终端输出编码为 UTF-8 (兼容 Windows)
+if sys.platform.startswith('win'):
+    import io
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
 
 # 导入核心驱动
 from drivers.drission_driver import BrowserDriver
@@ -67,6 +73,8 @@ def print_step_output(event):
     [UI层] 美化输出 V2 图执行过程中的状态更新
     """
     for node_name, updates in event.items():
+        if not isinstance(updates, dict):
+            continue
         print(f"\n🔄 [Node: {node_name}] 执行完成")
 
         if "plan" in updates and updates['plan']:
@@ -75,6 +83,20 @@ def print_step_output(event):
         if "generated_code" in updates and updates['generated_code']:
             code_preview = updates['generated_code'][:100].replace('\n', ' ')
             print(f"   💻 Generated Code: {code_preview}...")
+
+        verification = updates.get("verification_result") or {}
+        if verification:
+            is_success = bool(verification.get("is_success", False))
+            summary = str(verification.get("summary", "") or "")
+            source = str(verification.get("source", "") or "")
+            scope = str(verification.get("failure_scope", "") or "")
+            status_txt = "SUCCESS" if is_success else "FAIL"
+            print(
+                f"   [{'OK' if is_success else 'FAIL'}] Verification[{status_txt}]"
+                f"{' [' + source + ']' if source else ''}: {summary[:200]}"
+            )
+            if not is_success and scope:
+                print(f"   -> failure_scope: {scope}")
 
         if "execution_log" in updates and updates['execution_log']:
             log = updates['execution_log']
@@ -113,6 +135,30 @@ def _safe_int(value, default: int = 0) -> int:
         return int(value)
     except Exception:
         return default
+
+
+def _build_manual_verification_result(
+    *,
+    is_success: bool,
+    summary: str,
+    is_done: bool = False,
+    failure_scope: str = "local",
+    failed_action: str = "",
+    failed_locator: str = "",
+    evidence: str = "",
+    fix_hint: str = "",
+) -> Dict[str, Any]:
+    return {
+        "is_success": bool(is_success),
+        "is_done": bool(is_done) if is_success else False,
+        "summary": str(summary or "Manual review result"),
+        "source": "manual",
+        "failure_scope": "global" if str(failure_scope).lower() == "global" else "local",
+        "failed_action": str(failed_action or ""),
+        "failed_locator": str(failed_locator or ""),
+        "evidence": str(evidence or ""),
+        "fix_hint": str(fix_hint or ""),
+    }
 
 
 def _detect_executor_forced_reasons(values: dict) -> List[str]:
@@ -186,11 +232,11 @@ def interactive_loop(app, browser_instance, llm, observer):
     # 为当前会话生成唯一 Thread ID
     print(f"THREAD ID: {str(uuid.uuid4())}")
 
-    # LLM 鍜?Observer 瀹炰緥宸查€氳繃 partial 缁戝畾鍒拌妭鐐?
+    # LLM 和 Observer 实例已通过 partial 绑定到节点
     config = {
         "configurable": {
             "thread_id": str(uuid.uuid4()),
-            "browser": browser_instance,  # 娴忚鍣ㄥ疄渚嬩繚鐣欙紝鍥犱负闇€瑕佸姩鎬佽幏鍙?latest_tab
+            "browser": browser_instance,  # 浏览器实例保留，因为需要动态获取 latest_tab
         },
         "recursion_limit": 50
     }
@@ -329,8 +375,6 @@ def interactive_loop(app, browser_instance, llm, observer):
                             print("   🔔 HITL 已关闭且未触发强制审核点，自动接受验证结果")
                             if is_done:
                                 goto_node = "__end__"
-                            app.update_state(
-                                config, {"verification_result": {}}, as_node="Observer")
                             for event in app.stream(Command(goto=goto_node), config=config, stream_mode="updates"):
                                 print_step_output(event)
                             continue
@@ -353,19 +397,46 @@ def interactive_loop(app, browser_instance, llm, observer):
                         if user_override.lower() == "s":
                             print("   ✅ 人工覆盖: 强制成功")
                             app.update_state(config, {
-                                "verification_result": {},
+                                "verification_result": _build_manual_verification_result(
+                                    is_success=True,
+                                    is_done=False,
+                                    summary=summary,
+                                    failure_scope="local",
+                                    failed_action=snapshot.values.get(
+                                        "plan", ""),
+                                    evidence="manual_override_success",
+                                    fix_hint="manual accepted success, continue",
+                                ),
                                 "finished_steps": [summary]
                             }, as_node="Verifier")
                         elif user_override.lower() == "f":
                             print("   ❌ 人工覆盖: 强制失败")
                             app.update_state(config, {
-                                "verification_result": {},
+                                "verification_result": _build_manual_verification_result(
+                                    is_success=False,
+                                    is_done=False,
+                                    summary=f"Step Failed (Manual): {summary}",
+                                    failure_scope="local",
+                                    failed_action=snapshot.values.get(
+                                        "plan", ""),
+                                    evidence="manual_override_fail",
+                                    fix_hint="manual flagged failure, fix current step",
+                                ),
                                 "reflections": [f"Step Failed (Manual): {summary}"]
                             }, as_node="Verifier")
                         elif user_override.lower() == "d":
                             print("   🎉 人工覆盖: 强制完成任务")
                             app.update_state(config, {
-                                "verification_result": {},
+                                "verification_result": _build_manual_verification_result(
+                                    is_success=True,
+                                    is_done=True,
+                                    summary=summary,
+                                    failure_scope="global",
+                                    failed_action=snapshot.values.get(
+                                        "plan", ""),
+                                    evidence="manual_override_done",
+                                    fix_hint="manual marked task complete",
+                                ),
                                 "is_complete": True,
                                 "finished_steps": [summary]
                             }, as_node="Verifier")
@@ -374,11 +445,16 @@ def interactive_loop(app, browser_instance, llm, observer):
                             # 人工反馈：将用户输入注入 reflections，让 Planner 据此重新规划
                             print(f"   📜 人工反馈已注入，Planner 将据此重新规划")
                             app.update_state(config, {
-                                "verification_result": {
-                                    "is_success": is_success,
-                                    "is_done": False,
-                                    "summary": f"{summary} | 用户反馈: {user_override}"
-                                },
+                                "verification_result": _build_manual_verification_result(
+                                    is_success=False,
+                                    is_done=False,
+                                    summary=f"{summary} | user_feedback: {user_override}",
+                                    failure_scope="local",
+                                    failed_action=snapshot.values.get(
+                                        "plan", ""),
+                                    evidence="manual_feedback",
+                                    fix_hint="manual feedback requires local fix",
+                                ),
                                 "reflections": [f"用户反馈: {user_override}"],
                                 "_cache_failed_this_round": True,  # 强制跳过缓存，走 Coder 重新生成
                             }, as_node="Verifier")
@@ -387,9 +463,6 @@ def interactive_loop(app, browser_instance, llm, observer):
                             if is_done:
                                 print("   🎉 任务已完成！")
                                 goto_node = "__end__"
-                            # 清空 verification_result
-                            app.update_state(
-                                config, {"verification_result": {}}, as_node="Observer")
 
                     # 统一使用 Command(goto=goto_node) 跳转
                     for event in app.stream(Command(goto=goto_node), config=config, stream_mode="updates"):
