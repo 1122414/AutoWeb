@@ -81,11 +81,10 @@ class QwenReranker:
         ).eval()
 
         # 针对 Qwen Instruct 模型的打分 Token ID (Yes/No)
-        # 注意：不同模型的 token id 不同，这里适配 Qwen/Qwen2
         self.token_false_id = self.tokenizer.convert_tokens_to_ids("no")
         self.token_true_id = self.tokenizer.convert_tokens_to_ids("yes")
 
-        # 构造 Instruct Prompt (参考 BGE-Reranker-V2-Gemma 或类似 Instruct Reranker)
+        # 构造 Instruct Prompt
         self.prefix = "<|im_start|>system\nJudge whether the Document meets the requirements based on the Query. Answer 'yes' or 'no'.<|im_end|>\n<|im_start|>user\n"
         self.suffix = "<|im_end|>\n<|im_start|>assistant\n"
 
