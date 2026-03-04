@@ -1395,6 +1395,73 @@ def executor_node(state: AgentState, config: RunnableConfig) -> Command[Literal[
     browser = config["configurable"].get("browser")
     actor = BrowserActor(tab, browser)
 
+    from skills.code_guard import scan_code_safety
+    guard_result = scan_code_safety(code)
+    if not guard_result.get("is_safe", True):
+        reasons = guard_result.get("reasons", [])
+        reason_text = "; ".join(reasons) if reasons else "未知安全风险"
+        logger.warning(f"   🚫 [SecurityGuard] 拦截执行: {reason_text}")
+
+        if code_source == "cache":
+            return _handle_cache_failure(state, {
+                "messages": [AIMessage(content=f"【缓存代码安全拦截】{reason_text}")],
+                "execution_log": f"SecurityGuard Blocked: {reason_text}",
+                "reflections": [f"缓存代码触发安全拦截: {reason_text}"],
+                "verification_result": _build_verification_result(
+                    is_success=False,
+                    is_done=False,
+                    summary="缓存代码被安全检查拦截",
+                    source="executor",
+                    failure_scope="local",
+                    failed_action=state.get("plan", ""),
+                    evidence=reason_text,
+                    fix_hint="改用安全代码并避免危险模块/系统调用",
+                ),
+            })
+
+        coder_retry = state.get("coder_retry_count", 0)
+        if coder_retry < 3:
+            return Command(
+                update={
+                    "messages": [AIMessage(content=f"【安全拦截】{reason_text}")],
+                    "execution_log": f"SecurityGuard Blocked: {reason_text}",
+                    "coder_retry_count": coder_retry + 1,
+                    "error_type": "security",
+                    "reflections": [f"安全拦截: {reason_text}，需要生成无危险调用的代码"],
+                    "verification_result": _build_verification_result(
+                        is_success=False,
+                        is_done=False,
+                        summary="代码被安全检查拦截",
+                        source="executor",
+                        failure_scope="local",
+                        failed_action=state.get("plan", ""),
+                        evidence=reason_text,
+                        fix_hint="删除危险模块导入与系统级调用，仅保留页面自动化逻辑",
+                    ),
+                },
+                goto="Coder"
+            )
+
+        return Command(
+            update={
+                "messages": [AIMessage(content=f"【安全拦截超限】{reason_text}")],
+                "execution_log": f"SecurityGuard Blocked: {reason_text}",
+                "error": f"Security guard blocked code after 3 retries: {reason_text}",
+                "error_type": "security_max_retry",
+                "verification_result": _build_verification_result(
+                    is_success=False,
+                    is_done=False,
+                    summary="安全拦截重试超限",
+                    source="executor",
+                    failure_scope="local",
+                    failed_action=state.get("plan", ""),
+                    evidence=reason_text,
+                    fix_hint="人工审查计划与代码，再继续执行",
+                ),
+            },
+            goto="ErrorHandler"
+        )
+
     try:
         # 执行代码
         exec_output = actor.execute_python_strategy(

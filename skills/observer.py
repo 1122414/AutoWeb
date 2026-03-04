@@ -124,7 +124,7 @@ class BrowserObserver:
     def capture_dom_skeleton(self, tab) -> str:
         """
         [视觉] 获取当前页面的 DOM 骨架
-        直接调用注入的 JS，不再使用 Python 进行繁重的 lxml 解析
+        直接调用注入的 JS
         包含重试机制，应对动态页面渲染延迟
         """
         max_retries = 3
