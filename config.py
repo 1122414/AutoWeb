@@ -2,7 +2,7 @@ import os
 import json
 from dotenv import load_dotenv
 
-# 1. 在这里统一加载 .env，其他文件就不需要再写 load_dotenv() 了
+# 1. 在这里统一加载 .env
 load_dotenv()
 
 
@@ -192,6 +192,32 @@ CODE_CACHE_DUPLICATE_THRESHOLD = float(
 CODE_CACHE_NAV_MAX_LEN = int(os.getenv("CODE_CACHE_NAV_MAX_LEN", "200"))
 CODE_CACHE_MAX_CODE_WARN = int(os.getenv("CODE_CACHE_MAX_CODE_WARN", "6400"))
 
+# Code Cache 分阶段检索阈值
+CODE_CACHE_STAGE2_TASK_MIN_SIM = float(
+    os.getenv("CODE_CACHE_STAGE2_TASK_MIN_SIM", "0.80"))
+CODE_CACHE_STAGE3_GOAL_MIN_SIM = float(
+    os.getenv("CODE_CACHE_STAGE3_GOAL_MIN_SIM", "0.88"))
+CODE_CACHE_CANDIDATE_TOP_K = int(
+    os.getenv("CODE_CACHE_CANDIDATE_TOP_K", "30"))
+
+# Code Cache Dry-Run 配置（避免 SPA/懒加载假阴性）
+CODE_CACHE_DRY_RUN_ENABLED = _env_bool("CODE_CACHE_DRY_RUN_ENABLED", "True")
+CODE_CACHE_DRY_RUN_TIMEOUT_SECONDS = float(
+    os.getenv("CODE_CACHE_DRY_RUN_TIMEOUT_SECONDS", "0.8"))
+CODE_CACHE_DRY_RUN_POLL_INTERVAL_SECONDS = float(
+    os.getenv("CODE_CACHE_DRY_RUN_POLL_INTERVAL_SECONDS", "0.1"))
+CODE_CACHE_DRY_RUN_REQUIRE_VISIBLE = _env_bool(
+    "CODE_CACHE_DRY_RUN_REQUIRE_VISIBLE", "False")
+
+# Observer (DomCache) Dry-Run 配置（Dom 命中后前置探测）
+DOM_CACHE_DRY_RUN_ENABLED = _env_bool("DOM_CACHE_DRY_RUN_ENABLED", "True")
+DOM_CACHE_DRY_RUN_TIMEOUT_SECONDS = float(
+    os.getenv("DOM_CACHE_DRY_RUN_TIMEOUT_SECONDS", "0.8"))
+DOM_CACHE_DRY_RUN_POLL_INTERVAL_SECONDS = float(
+    os.getenv("DOM_CACHE_DRY_RUN_POLL_INTERVAL_SECONDS", "0.1"))
+DOM_CACHE_DRY_RUN_REQUIRE_VISIBLE = _env_bool(
+    "DOM_CACHE_DRY_RUN_REQUIRE_VISIBLE", "False")
+
 # ==============================================================================
 # DOM 缓存配置 (Milvus Hybrid Search)
 # ==============================================================================
@@ -203,11 +229,40 @@ DOM_CACHE_TTL_HOURS = int(os.getenv("DOM_CACHE_TTL_HOURS", f"{24 * 7}"))
 DOM_CACHE_TASK_MIN_SIM = float(os.getenv("DOM_CACHE_TASK_MIN_SIM", "0.8"))
 DOM_CACHE_REQUIRE_URL_MATCH = os.getenv(
     "DOM_CACHE_REQUIRE_URL_MATCH", "True").lower() == "true"
+DOM_CACHE_STEP_WINDOW = int(os.getenv("DOM_CACHE_STEP_WINDOW", "5"))
+DOM_CACHE_STEP_TEXT_MAX = int(os.getenv("DOM_CACHE_STEP_TEXT_MAX", "1200"))
 
 # DOM Cache 融合权重 (url + dom + task)
 DOM_CACHE_WEIGHT_URL = float(os.getenv("DOM_CACHE_WEIGHT_URL", "0.2"))
 DOM_CACHE_WEIGHT_DOM = float(os.getenv("DOM_CACHE_WEIGHT_DOM", "0.5"))
 DOM_CACHE_WEIGHT_TASK = float(os.getenv("DOM_CACHE_WEIGHT_TASK", "0.3"))
+DOM_CACHE_WEIGHT_STEP = float(os.getenv("DOM_CACHE_WEIGHT_STEP", "0.15"))
+
+# DOM Cache 分阶段检索阈值
+DOM_CACHE_STAGE2_TASK_MIN_SIM = float(
+    os.getenv("DOM_CACHE_STAGE2_TASK_MIN_SIM", "0.80"))
+DOM_CACHE_STAGE3_SCORE_THRESHOLD = float(
+    os.getenv("DOM_CACHE_STAGE3_SCORE_THRESHOLD", "0.90"))
+DOM_CACHE_STAGE3_WEIGHT_DOM = float(
+    os.getenv("DOM_CACHE_STAGE3_WEIGHT_DOM", "0.65"))
+DOM_CACHE_STAGE3_WEIGHT_STEP = float(
+    os.getenv("DOM_CACHE_STAGE3_WEIGHT_STEP", "0.35"))
+DOM_CACHE_CANDIDATE_TOP_K = int(
+    os.getenv("DOM_CACHE_CANDIDATE_TOP_K", "32"))
+DOM_CACHE_DUPLICATE_THRESHOLD = float(
+    os.getenv("DOM_CACHE_DUPLICATE_THRESHOLD", "0.95"))
+
+# 软删除黑名单（替代高频 Milvus Delete）
+CACHE_SOFT_BLACKLIST_ENABLED = _env_bool(
+    "CACHE_SOFT_BLACKLIST_ENABLED", "True")
+CACHE_SOFT_BLACKLIST_BACKEND = os.getenv(
+    "CACHE_SOFT_BLACKLIST_BACKEND", "redis").strip().lower()
+CACHE_SOFT_BLACKLIST_REDIS_URL = os.getenv(
+    "CACHE_SOFT_BLACKLIST_REDIS_URL",
+    os.getenv("REDIS_URL", "redis://localhost:6379/0")
+)
+CACHE_SOFT_BLACKLIST_TTL_SECONDS = int(
+    os.getenv("CACHE_SOFT_BLACKLIST_TTL_SECONDS", f"{24 * 3600}"))
 
 # ==============================================================================
 # Human-in-the-Loop (HITL) 配置

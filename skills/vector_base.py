@@ -113,6 +113,7 @@ class VectorCacheBase(ABC):
             name=self._collection_name,
             schema=schema,
             consistency_level="Bounded",
+            using="autoweb_cache",
         )
 
         vec_idx = {"metric_type": "COSINE",
@@ -123,7 +124,7 @@ class VectorCacheBase(ABC):
 
         # 标量倒排索引 (通用字段)
         for f in self._schema_fields(dim):
-            if f.name in ("url_pattern", "dom_hash", "cache_id") and f.dtype == DataType.VARCHAR:
+            if f.name in ("url_pattern", "dom_hash", "cache_id", "domain_key") and f.dtype == DataType.VARCHAR:
                 try:
                     collection.create_index(
                         field_name=f.name, index_params={"index_type": "INVERTED"})
@@ -136,18 +137,19 @@ class VectorCacheBase(ABC):
         return collection
 
     def _ensure_collection(self) -> Collection:
+        # 关键修复：使用独立的 alias，避免被 LangChain (MilvusClient URI 模式) 的 default alias 覆盖和破坏底层 gRPC 通道。
+        connect_milvus(MILVUS_URI, alias="autoweb_cache", tag=self._tag)
         if self._collection is not None:
             return self._collection
-        connect_milvus(MILVUS_URI, alias="default", tag=self._tag)
         dim = self._get_vector_dim()
         name = self._collection_name
 
-        if utility.has_collection(name):
-            current = Collection(name)
+        if utility.has_collection(name, using="autoweb_cache"):
+            current = Collection(name, using="autoweb_cache")
             if not self._is_schema_compatible(current, dim):
                 logger.warning(
                     f"⚠️ [{self._tag}] Incompatible schema in '{name}', dropping and recreating.")
-                utility.drop_collection(name)
+                utility.drop_collection(name, using="autoweb_cache")
                 current = self._create_collection(dim)
             else:
                 current.load()
@@ -172,6 +174,48 @@ class VectorCacheBase(ABC):
             return f"{domain}{path}"[:512]
         except Exception:
             return (url or "")[:512]
+
+    def _extract_domain_key(self, url: str) -> str:
+        """提取 eTLD+1，作为跨子域共享的硬隔离键。"""
+        try:
+            parsed = urlparse(url or "")
+            host = (parsed.hostname or "").strip().lower()
+            if not host:
+                return ""
+            try:
+                import tldextract
+
+                extractor = tldextract.TLDExtract(suffix_list_urls=None)
+                ext = extractor(host)
+                if ext.domain and ext.suffix:
+                    return f"{ext.domain}.{ext.suffix}"[:255]
+            except Exception:
+                pass
+
+            # 回退：尽量截取后两段
+            parts = [x for x in host.split(".") if x]
+            if len(parts) >= 2:
+                return ".".join(parts[-2:])[:255]
+            return host[:255]
+        except Exception:
+            return ""
+
+    def _escape_expr_value(self, value: str) -> str:
+        return str(value or "").replace('\\', '\\\\').replace('"', '\\"')
+
+    def _build_domain_expr(self, domain_key: str) -> str:
+        safe = self._escape_expr_value(domain_key)
+        return f'domain_key == "{safe}"'
+
+    def _build_cache_id_expr(self, cache_ids: List[str], base_expr: str = "") -> str:
+        ids = [x for x in (cache_ids or []) if x]
+        if not ids:
+            return base_expr or ""
+        escaped = [f'"{self._escape_expr_value(x)}"' for x in ids]
+        in_expr = f"cache_id in [{', '.join(escaped)}]"
+        if base_expr:
+            return f"({base_expr}) and ({in_expr})"
+        return in_expr
 
     def _compute_dom_hash(self, dom_skeleton: str, max_len: int = 2500) -> str:
         content = (dom_skeleton or "")[:max_len]

@@ -137,6 +137,7 @@ class QwenReranker:
 # 2. 核心辅助函数
 # ==============================================================================
 
+
 _cached_embedding_model = None
 
 
@@ -171,6 +172,27 @@ def get_embedding_model():
         )
 
     _cached_embedding_model = instance
+
+    # --- 添加健康探测，尽早发现本地服务未启动的问题 ---
+    if EMBEDDING_TYPE in ['local_vllm', 'local_ollama']:
+        print(f"🔌 [RAG] Probing {EMBEDDING_TYPE} connection...")
+        try:
+            # 发起一个最轻量的向量化请求以测试连通性
+            _cached_embedding_model.embed_query("ping")
+        except Exception as e:
+            error_msg = str(e).lower()
+            if "connection error" in error_msg or "wsarecv" in error_msg or "目标计算机积极拒绝" in error_msg or "conn" in error_msg:
+                raise RuntimeError(
+                    f"\n{'='*60}\n"
+                    f"❌ 致命错误: 无法连接到本地 Embedding API服务！\n"
+                    f"-> 当前配置类型: {EMBEDDING_TYPE}\n"
+                    f"-> 这说明您的 vLLM 或 Ollama 等本地模型服务**并没有启动**，或者端口配置错误。\n"
+                    f"-> 请检查命令行或 Docker 中是否成功运行了 Embedding 模型容器！\n"
+                    f"{'='*60}\n"
+                ) from e
+            else:
+                print(f"⚠️ [RAG] Embedding probe error: {e}")
+
     print(f"🔗 [RAG] Embedding model initialized ({EMBEDDING_TYPE})")
     return _cached_embedding_model
 

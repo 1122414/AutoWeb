@@ -101,13 +101,14 @@ def ensure_collection(embeddings) -> Collection:
     """
     # 连接 Milvus（统一走 vector_gateway）
     try:
-        connect_milvus(MILVUS_URI, alias="default", tag="RAGSchema")
+        connect_milvus(MILVUS_URI, alias="autoweb_cache", tag="RAGSchema")
     except MilvusException:
         pass  # 可能已连接
 
-    if utility.has_collection(KNOWLEDGE_COLLECTION_NAME):
+    if utility.has_collection(KNOWLEDGE_COLLECTION_NAME, using="autoweb_cache"):
         print(f"📦 [Schema] Collection '{KNOWLEDGE_COLLECTION_NAME}' 已存在")
-        collection = Collection(KNOWLEDGE_COLLECTION_NAME)
+        collection = Collection(
+            KNOWLEDGE_COLLECTION_NAME, using="autoweb_cache")
         return collection
 
     # 探测 embedding 维度
@@ -122,7 +123,8 @@ def ensure_collection(embeddings) -> Collection:
     collection = Collection(
         name=KNOWLEDGE_COLLECTION_NAME,
         schema=schema,
-        consistency_level="Bounded"
+        consistency_level="Bounded",
+        using="autoweb_cache",
     )
 
     # 创建向量索引

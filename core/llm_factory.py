@@ -4,6 +4,8 @@
 
 from langchain_openai import ChatOpenAI
 
+import httpx
+
 # 缓存：相同配置复用同一实例，避免重复创建
 _llm_cache: dict = {}
 
@@ -31,12 +33,16 @@ def create_llm(
     cache_key = (model_name, api_key, base_url, temperature, streaming)
 
     if cache_key not in _llm_cache:
+        # 配置 httpx Client 来增加超时防流式断流
+        http_client = httpx.Client(timeout=180.0)
         _llm_cache[cache_key] = ChatOpenAI(
             model=model_name,
             temperature=temperature,
             openai_api_key=api_key,
             openai_api_base=base_url,
-            streaming=streaming
+            streaming=streaming,
+            max_retries=3,
+            http_client=http_client
         )
 
     return _llm_cache[cache_key]

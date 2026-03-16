@@ -123,6 +123,177 @@ def _extract_locator_info(state: dict) -> str:
     return " | ".join(parts) if parts else ""
 
 
+def _extract_domain_key_from_url(url: str) -> str:
+    try:
+        parsed = urlparse(url or "")
+        host = (parsed.hostname or "").strip().lower()
+        if not host:
+            return ""
+        try:
+            import tldextract
+
+            extractor = tldextract.TLDExtract(suffix_list_urls=None)
+            ext = extractor(host)
+            if ext.domain and ext.suffix:
+                return f"{ext.domain}.{ext.suffix}"[:255]
+        except Exception:
+            pass
+        parts = [x for x in host.split(".") if x]
+        if len(parts) >= 2:
+            return ".".join(parts[-2:])[:255]
+        return host[:255]
+    except Exception:
+        return ""
+
+
+def _build_step_context(finished_steps: list) -> str:
+    from config import DOM_CACHE_STEP_WINDOW, DOM_CACHE_STEP_TEXT_MAX
+
+    steps = finished_steps or []
+    window = max(1, int(DOM_CACHE_STEP_WINDOW))
+    last_steps = steps[-window:] if steps else []
+    text = " | ".join([str(x).strip() for x in last_steps if str(x).strip()])
+    return text[:max(100, int(DOM_CACHE_STEP_TEXT_MAX))]
+
+
+def _extract_locator_candidates(locator_info: str, code: str) -> list:
+    candidates = []
+
+    info = str(locator_info or "").strip()
+    if info:
+        for part in info.split("|"):
+            item = part.strip()
+            if not item:
+                continue
+            loc = item.split("(", 1)[0].strip()
+            if loc:
+                candidates.append(loc)
+
+    code_text = code or ""
+    pattern = re.compile(r"(?:tab|new_tab|page)\.ele\(\s*(['\"])(.+?)\1")
+    for _, locator in pattern.findall(code_text):
+        loc = (locator or "").strip()
+        if loc:
+            candidates.append(loc)
+
+    seen = set()
+    dedup = []
+    for loc in candidates:
+        if loc in seen:
+            continue
+        seen.add(loc)
+        dedup.append(loc)
+    return dedup
+
+
+def _extract_locators_from_strategies(strategies: Any) -> list:
+    locators = []
+    if isinstance(strategies, dict):
+        strategies = [strategies]
+    if not isinstance(strategies, list):
+        return locators
+
+    for item in strategies:
+        if not isinstance(item, dict):
+            continue
+        loc = str(item.get("locator", "")).strip()
+        if loc:
+            locators.append(loc)
+        sub = item.get("sub_locators", {})
+        if isinstance(sub, dict):
+            for value in sub.values():
+                if isinstance(value, str) and value.strip():
+                    locators.append(value.strip())
+
+    seen = set()
+    dedup = []
+    for loc in locators:
+        if loc in seen:
+            continue
+        seen.add(loc)
+        dedup.append(loc)
+    return dedup
+
+
+def _normalize_locator_token(locator: str) -> str:
+    text = str(locator or "").strip().lower()
+    text = re.sub(r"\s+", "", text)
+    return text
+
+
+def _has_locator_overlap(failed_locator: str, candidates: list) -> bool:
+    failed = _normalize_locator_token(failed_locator)
+    if not failed:
+        return False
+    for item in candidates or []:
+        token = _normalize_locator_token(item)
+        if not token:
+            continue
+        if failed == token or failed in token or token in failed:
+            return True
+    return False
+
+
+def _probe_locator_with_polling(
+    tab,
+    locator: str,
+    timeout_seconds: float,
+    poll_interval_seconds: float,
+    require_visible: bool,
+) -> bool:
+    deadline = time.time() + max(0.1, float(timeout_seconds))
+    interval = max(0.05, float(poll_interval_seconds))
+
+    while time.time() < deadline:
+        try:
+            ele = tab.ele(locator, timeout=0)
+        except TypeError:
+            try:
+                ele = tab.ele(locator)
+            except Exception:
+                ele = None
+        except Exception:
+            ele = None
+
+        if ele:
+            if not require_visible:
+                return True
+            try:
+                if ele.states.is_displayed:
+                    return True
+            except Exception:
+                return True
+
+        time.sleep(interval)
+    return False
+
+
+def _dry_run_cache_hit_locators(
+    config: RunnableConfig,
+    locator_candidates: list,
+    timeout_seconds: float,
+    poll_interval_seconds: float,
+    require_visible: bool,
+) -> tuple[bool, str]:
+    tab = _get_tab(config)
+    if tab is None:
+        return False, "无可用浏览器标签页"
+    if not locator_candidates:
+        return True, ""
+
+    for loc in locator_candidates:
+        ok = _probe_locator_with_polling(
+            tab=tab,
+            locator=loc,
+            timeout_seconds=timeout_seconds,
+            poll_interval_seconds=poll_interval_seconds,
+            require_visible=require_visible,
+        )
+        if ok:
+            return True, ""
+    return False, locator_candidates[0]
+
+
 def _normalize_failure_scope(value: Any) -> str:
     text = str(value or "").strip().lower()
     return "global" if text == "global" else "local"
@@ -371,7 +542,7 @@ def _prune_finished_steps(finished_steps: list, prompt_text: str) -> str:
 # ==============================================================================
 # 代码缓存检索节点
 # ==============================================================================
-def cache_lookup_node(state: AgentState, config: RunnableConfig) -> Command[Literal["Coder", "Executor"]]:
+def cache_lookup_node(state: AgentState, config: RunnableConfig) -> Command[Literal["Coder", "Executor", "Observer"]]:
     """
     [CacheLookup] 尝试从缓存中检索可复用的代码
 
@@ -381,7 +552,14 @@ def cache_lookup_node(state: AgentState, config: RunnableConfig) -> Command[Lite
     - 命中时设置 _code_source = "cache"，跳到 Executor
     - 未命中时设置 _code_source = "llm"，跳到 Coder
     """
-    from config import CODE_CACHE_ENABLED, CODE_CACHE_THRESHOLD
+    from config import (
+        CODE_CACHE_DRY_RUN_ENABLED,
+        CODE_CACHE_DRY_RUN_POLL_INTERVAL_SECONDS,
+        CODE_CACHE_DRY_RUN_REQUIRE_VISIBLE,
+        CODE_CACHE_DRY_RUN_TIMEOUT_SECONDS,
+        CODE_CACHE_ENABLED,
+        CODE_CACHE_THRESHOLD,
+    )
 
     # 检查本轮是否已有缓存失败（防止死循环）
     if state.get("_cache_failed_this_round"):
@@ -470,6 +648,98 @@ def cache_lookup_node(state: AgentState, config: RunnableConfig) -> Command[Lite
                 final_code = apply_param_substitution(best_hit.code, diffs)
                 logger.info(
                     f"✅ [ParamSubst] 已替换 {len(diffs)} 个参数，零 LLM Token")
+
+            # Stage-4: Dry-Run 微轮询探测，避免 SPA 懒加载导致假阴性
+            if CODE_CACHE_DRY_RUN_ENABLED:
+                # Code 阶段 Dry-Run 只使用代码侧定位信息（不混入 observer locator）
+                loc_candidates = _extract_locator_candidates(
+                    best_hit.locator_info,
+                    final_code,
+                )
+                dry_ok, failed_locator = _dry_run_cache_hit_locators(
+                    config=config,
+                    locator_candidates=loc_candidates,
+                    timeout_seconds=CODE_CACHE_DRY_RUN_TIMEOUT_SECONDS,
+                    poll_interval_seconds=CODE_CACHE_DRY_RUN_POLL_INTERVAL_SECONDS,
+                    require_visible=CODE_CACHE_DRY_RUN_REQUIRE_VISIBLE,
+                )
+                if not dry_ok:
+                    reason = f"Dry-Run失败: locator={failed_locator}"
+                    logger.info(f"   ❌ [CacheLookup] {reason}")
+                    failed_cache_ids = list(state.get("_failed_code_cache_ids", []) or [])
+                    failed_dom_cache_ids = list(state.get("_failed_dom_cache_ids", []) or [])
+                    if best_hit.id and best_hit.id not in failed_cache_ids:
+                        failed_cache_ids.append(best_hit.id)
+
+                    observer_source = state.get("_observer_source", "")
+                    dom_cache_hit_id = state.get("_dom_cache_hit_id", "")
+                    dom_dual_invalidate = False
+
+                    if observer_source == "dom_cache" and dom_cache_hit_id:
+                        strategies = []
+                        loc_entries = state.get("locator_suggestions", []) or []
+                        if loc_entries and isinstance(loc_entries[-1], dict):
+                            strategies = loc_entries[-1].get("strategies", [])
+                        dom_locators = _extract_locators_from_strategies(strategies)
+                        dom_dual_invalidate = _has_locator_overlap(
+                            failed_locator,
+                            dom_locators,
+                        )
+
+                    try:
+                        from skills.code_cache import code_cache_manager
+                        from skills.dom_cache import dom_cache_manager
+                        from skills.cache_blacklist import cache_soft_blacklist
+
+                        if best_hit.id:
+                            code_cache_manager.record_failure(best_hit.id, reason=reason)
+                            cache_soft_blacklist.mark_failed(
+                                cache_type="codecache",
+                                domain_key=_extract_domain_key_from_url(current_url),
+                                cache_id=best_hit.id,
+                                reason=reason,
+                            )
+
+                        if dom_dual_invalidate and dom_cache_hit_id:
+                            dom_reason = f"Code Dry-Run联动失效: locator={failed_locator}"
+                            dom_cache_manager.record_failure(
+                                dom_cache_hit_id,
+                                reason=dom_reason,
+                            )
+                            cache_soft_blacklist.mark_failed(
+                                cache_type="domcache",
+                                domain_key=_extract_domain_key_from_url(current_url),
+                                cache_id=dom_cache_hit_id,
+                                reason=dom_reason,
+                            )
+                            if dom_cache_hit_id not in failed_dom_cache_ids:
+                                failed_dom_cache_ids.append(dom_cache_hit_id)
+                    except Exception as mark_exc:
+                        logger.info(f"   ⚠️ [CacheLookup] Dry-Run 失败打标异常: {mark_exc}")
+
+                    return Command(
+                        update={
+                            "messages": [AIMessage(content=f"【缓存Dry-Run失败】{reason}，回退Observer重建定位")],
+                            "reflections": [f"缓存代码Dry-Run失败: {reason}"],
+                            "verification_result": _build_verification_result(
+                                is_success=False,
+                                is_done=False,
+                                summary=f"缓存Dry-Run失败: {reason}",
+                                source="executor",
+                                failure_scope="local",
+                                failed_action=state.get("plan", ""),
+                                failed_locator=failed_locator,
+                                evidence=reason,
+                                fix_hint="请由Observer重新生成定位策略，避免复用该缓存命中",
+                            ),
+                            "_cache_failed_this_round": True,
+                            "_cache_hit_id": None,
+                            "_failed_code_cache_ids": failed_cache_ids,
+                            "_failed_dom_cache_ids": failed_dom_cache_ids,
+                            "_code_source": "llm",
+                        },
+                        goto="Observer"
+                    )
 
             # 直接使用缓存代码（替换后），跳到 Executor
             return Command(
@@ -583,6 +853,7 @@ def _save_dom_to_cache(state: AgentState, current_url: str):
 
     task = state.get("user_task", "")
     dom = state.get("dom_skeleton", "")
+    step_context = _build_step_context(state.get("finished_steps", []))
 
     try:
         from skills.dom_cache import dom_cache_manager
@@ -591,6 +862,7 @@ def _save_dom_to_cache(state: AgentState, current_url: str):
             current_url=current_url,
             dom_skeleton=dom,
             locator_suggestions=strategies,
+            step_context=step_context,
         )
         logger.info("   💾 [DomCache] 已提交缓存写入任务")
         return {"true": "[DomCache] 任务已提交"}
@@ -610,7 +882,14 @@ def _handle_cache_failure(state: AgentState, updates: dict) -> Command:
     if cache_hit_id:
         try:
             from skills.code_cache import code_cache_manager
+            from skills.cache_blacklist import cache_soft_blacklist
             code_cache_manager.record_failure(cache_hit_id, reason="执行/验收失败")
+            cache_soft_blacklist.mark_failed(
+                cache_type="codecache",
+                domain_key=_extract_domain_key_from_url(state.get("current_url", "")),
+                cache_id=cache_hit_id,
+                reason="执行/验收失败",
+            )
         except Exception as e:
             logger.info(f"   ⚠️ [CodeCache] 记录失败异常: {e}")
         if cache_hit_id not in failed_cache_ids:
@@ -778,8 +1057,15 @@ def observer_node(state: AgentState, config: RunnableConfig, observer) -> Comman
                 from config import DOM_CACHE_ENABLED
                 if DOM_CACHE_ENABLED:
                     from skills.dom_cache import dom_cache_manager
+                    from skills.cache_blacklist import cache_soft_blacklist
                     dom_cache_manager.record_failure(
                         dom_cache_hit_id, reason="后续执行失败")
+                    cache_soft_blacklist.mark_failed(
+                        cache_type="domcache",
+                        domain_key=_extract_domain_key_from_url(current_url),
+                        cache_id=dom_cache_hit_id,
+                        reason="后续执行失败",
+                    )
             except Exception as e:
                 logger.info(f"   ⚠️ [DomCache] 记录失败异常: {e}")
             if dom_cache_hit_id not in failed_dom_cache_ids:
@@ -790,13 +1076,23 @@ def observer_node(state: AgentState, config: RunnableConfig, observer) -> Comman
         dom_cache_hit = None
         if should_analyze and not has_failure:
             try:
-                from config import DOM_CACHE_ENABLED, DOM_CACHE_THRESHOLD, DOM_CACHE_TOP_K
+                from config import (
+                    DOM_CACHE_DRY_RUN_ENABLED,
+                    DOM_CACHE_DRY_RUN_POLL_INTERVAL_SECONDS,
+                    DOM_CACHE_DRY_RUN_REQUIRE_VISIBLE,
+                    DOM_CACHE_DRY_RUN_TIMEOUT_SECONDS,
+                    DOM_CACHE_ENABLED,
+                    DOM_CACHE_THRESHOLD,
+                    DOM_CACHE_TOP_K,
+                )
                 if DOM_CACHE_ENABLED:
                     from skills.dom_cache import dom_cache_manager
+                    step_context = _build_step_context(finished_steps)
                     cache_hits = dom_cache_manager.search(
                         user_task=task,
                         current_url=current_url,
                         dom_skeleton=dom,
+                        step_context=step_context,
                         top_k=max(DOM_CACHE_TOP_K, 8),
                     )
                     if failed_dom_cache_ids:
@@ -823,6 +1119,39 @@ def observer_node(state: AgentState, config: RunnableConfig, observer) -> Comman
                             f"   ✅ [DomCache] 命中缓存 score={dom_cache_hit.score:.4f}, "
                             f"url={dom_cache_hit.url_pattern}"
                         )
+
+                    # Dom 阶段前置 Dry-Run：只校验 DomCache 的定位策略
+                    if dom_cache_hit and dom_cache_hit.locator_suggestions and DOM_CACHE_DRY_RUN_ENABLED:
+                        dom_locators = _extract_locators_from_strategies(
+                            dom_cache_hit.locator_suggestions)
+                        dom_dry_ok, dom_failed_locator = _dry_run_cache_hit_locators(
+                            config=config,
+                            locator_candidates=dom_locators,
+                            timeout_seconds=DOM_CACHE_DRY_RUN_TIMEOUT_SECONDS,
+                            poll_interval_seconds=DOM_CACHE_DRY_RUN_POLL_INTERVAL_SECONDS,
+                            require_visible=DOM_CACHE_DRY_RUN_REQUIRE_VISIBLE,
+                        )
+                        if not dom_dry_ok:
+                            reason = f"Dom Dry-Run失败: locator={dom_failed_locator}"
+                            logger.info(f"   ❌ [DomCache] {reason}")
+                            try:
+                                from skills.cache_blacklist import cache_soft_blacklist
+                                dom_cache_manager.record_failure(
+                                    dom_cache_hit.id,
+                                    reason=reason,
+                                )
+                                cache_soft_blacklist.mark_failed(
+                                    cache_type="domcache",
+                                    domain_key=_extract_domain_key_from_url(current_url),
+                                    cache_id=dom_cache_hit.id,
+                                    reason=reason,
+                                )
+                            except Exception as dom_mark_exc:
+                                logger.info(f"   ⚠️ [DomCache] Dry-Run失败打标异常: {dom_mark_exc}")
+
+                            if dom_cache_hit.id and dom_cache_hit.id not in failed_dom_cache_ids:
+                                failed_dom_cache_ids.append(dom_cache_hit.id)
+                            dom_cache_hit = None
             except Exception as e:
                 logger.info(f"   ⚠️ [DomCache] 检索异常: {e}")
 

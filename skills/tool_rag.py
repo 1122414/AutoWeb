@@ -69,7 +69,7 @@ class KnowledgeBaseManager:
                 from rag.milvus_schema import get_vector_store
                 from skills.vector_gateway import connect_milvus
 
-                connect_milvus(MILVUS_URI, alias="default",
+                connect_milvus(MILVUS_URI, alias="autoweb_cache",
                                tag="KnowledgeBaseManager")
                 self._embeddings = get_embedding_model()
                 self._vector_store = get_vector_store(self._embeddings)

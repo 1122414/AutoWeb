@@ -81,7 +81,7 @@ def run_with_retry(
     raise last_exc
 
 
-def connect_milvus(uri: str, alias: str = "default", tag: str = "VectorGateway") -> None:
+def connect_milvus(uri: str, alias: str = "autoweb_cache", tag: str = "VectorGateway") -> None:
     host, port = parse_milvus_uri(uri)
     run_with_retry(
         operation=f"connect_milvus({host}:{port})",
@@ -136,8 +136,6 @@ def hybrid_search(
             "limit": limit,
             "output_fields": output_fields,
         }
-        if expr:
-            kwargs["expr"] = expr
         res = run_with_retry(
             operation="hybrid_search",
             fn=lambda: collection.hybrid_search(**kwargs),

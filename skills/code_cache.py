@@ -6,6 +6,7 @@ import re
 from datetime import datetime
 from typing import Dict, List, NamedTuple, Optional
 from urllib.parse import urlparse
+import numpy as np
 
 from pymilvus import (
     AnnSearchRequest,
@@ -16,6 +17,9 @@ from pymilvus import (
 
 from config import (
     CODE_CACHE_COLLECTION,
+    CODE_CACHE_CANDIDATE_TOP_K,
+    CODE_CACHE_STAGE2_TASK_MIN_SIM,
+    CODE_CACHE_STAGE3_GOAL_MIN_SIM,
     CODE_CACHE_WEIGHT_GOAL,
     CODE_CACHE_WEIGHT_LOCATOR,
     CODE_CACHE_WEIGHT_URL,
@@ -25,6 +29,7 @@ from config import (
     CODE_CACHE_NAV_MAX_LEN,
     CODE_CACHE_MAX_CODE_WARN,
 )
+from skills.cache_blacklist import cache_soft_blacklist
 from skills.vector_base import VectorCacheBase
 from skills.logger import logger
 from skills.vector_gateway import (
@@ -42,6 +47,7 @@ class CacheHit(NamedTuple):
     goal: str
     success_count: int
     user_task: str = ""
+    locator_info: str = ""
     created_at: str = ""
 
 
@@ -120,6 +126,7 @@ class CodeCacheManager(VectorCacheBase):
             FieldSchema("locator_info", DataType.VARCHAR, max_length=6400),
             FieldSchema("user_task", DataType.VARCHAR, max_length=6400),
             FieldSchema("url_pattern", DataType.VARCHAR, max_length=512),
+            FieldSchema("domain_key", DataType.VARCHAR, max_length=255),
             FieldSchema("code", DataType.VARCHAR, max_length=16000),
             FieldSchema("cache_id", DataType.VARCHAR, max_length=128),
             FieldSchema("dom_hash", DataType.VARCHAR, max_length=64),
@@ -153,18 +160,44 @@ class CodeCacheManager(VectorCacheBase):
             "url_vector": vectors[3],
         }
 
-    def _build_ann_requests(self, vectors: Dict[str, list], limit: int) -> List[AnnSearchRequest]:
+    def _build_ann_requests(self, vectors: Dict[str, list], limit: int, expr: str = None) -> List[AnnSearchRequest]:
         params = {"metric_type": "COSINE", "params": {}}
         return [
             AnnSearchRequest(data=[vectors["goal_vector"]],
-                             anns_field="goal_vector", param=params, limit=limit),
+                             anns_field="goal_vector", param=params, limit=limit, expr=expr),
             AnnSearchRequest(data=[vectors["locator_vector"]],
-                             anns_field="locator_vector", param=params, limit=limit),
+                             anns_field="locator_vector", param=params, limit=limit, expr=expr),
             AnnSearchRequest(data=[vectors["user_task_vector"]],
-                             anns_field="user_task_vector", param=params, limit=limit),
+                             anns_field="user_task_vector", param=params, limit=limit, expr=expr),
             AnnSearchRequest(data=[vectors["url_vector"]],
-                             anns_field="url_vector", param=params, limit=limit),
+                             anns_field="url_vector", param=params, limit=limit, expr=expr),
         ]
+
+    def _build_stage1_requests(self, vectors: Dict[str, list], limit: int, expr: str = None) -> List[AnnSearchRequest]:
+        params = {"metric_type": "COSINE", "params": {}}
+        return [
+            AnnSearchRequest(data=[vectors["user_task_vector"]],
+                             anns_field="user_task_vector", param=params, limit=limit, expr=expr),
+            AnnSearchRequest(data=[vectors["url_vector"]],
+                             anns_field="url_vector", param=params, limit=limit, expr=expr),
+        ]
+
+    def _build_goal_request(self, vectors: Dict[str, list], limit: int, expr: str = None) -> List[AnnSearchRequest]:
+        params = {"metric_type": "COSINE", "params": {}}
+        return [
+            AnnSearchRequest(data=[vectors["goal_vector"]],
+                             anns_field="goal_vector", param=params, limit=limit, expr=expr),
+        ]
+
+    def _cosine_similarity(self, a: list, b: list) -> float:
+        if not a or not b or len(a) != len(b):
+            return 0.0
+        va = np.asarray(a, dtype=np.float32)
+        vb = np.asarray(b, dtype=np.float32)
+        denom = float(np.linalg.norm(va) * np.linalg.norm(vb))
+        if denom <= 0.0:
+            return 0.0
+        return float(np.dot(va, vb) / denom)
 
     def search(
         self,
@@ -178,29 +211,73 @@ class CodeCacheManager(VectorCacheBase):
         try:
             collection = self._ensure_collection()
             url_pattern = self._normalize_url(url)
+            domain_key = self._extract_domain_key(url)
+            if not domain_key:
+                logger.info("⏭️ [CodeCache] Skip search: empty domain_key")
+                return []
+
             vectors = self._embed_fields(
                 goal=goal, locator_info=locator_info, user_task=user_task, url_pattern=url_pattern)
-            ann_limit = max(top_k, 10)
-            requests = self._build_ann_requests(vectors, limit=ann_limit)
-            ranker = WeightedRanker(*self._weights)
+            ann_limit = max(top_k, CODE_CACHE_CANDIDATE_TOP_K)
+            base_expr = self._build_domain_expr(domain_key)
 
-            search_res = hybrid_search(
+            stage1_res = hybrid_search(
                 collection=collection,
-                reqs=requests,
-                rerank=ranker,
-                limit=top_k,
-                output_fields=["cache_id", "code", "url_pattern",
-                               "goal", "success_count", "user_task", "created_at"],
+                reqs=self._build_stage1_requests(
+                    vectors, limit=ann_limit, expr=base_expr),
+                rerank=WeightedRanker(0.85, 0.15),
+                limit=ann_limit,
+                expr=base_expr,
+                output_fields=[
+                    "cache_id", "code", "url_pattern", "domain_key", "goal",
+                    "success_count", "user_task", "locator_info", "created_at"
+                ],
                 tag="CodeCache",
             )
 
-            raw_hits = search_res[0] if search_res else []
+            stage2_items = []
+            query_task_vec = vectors["user_task_vector"]
+            for item in (stage1_res[0] if stage1_res else []):
+                hit_user_task = (read_hit_field(
+                    item, "user_task") or "").strip()
+                hit_user_vec = self._get_embeddings().embed_query(hit_user_task or "")
+                task_sim = self._cosine_similarity(
+                    query_task_vec, hit_user_vec)
+                if task_sim < CODE_CACHE_STAGE2_TASK_MIN_SIM:
+                    continue
+                stage2_items.append(item)
+
+            candidate_ids = [
+                (read_hit_field(item, "cache_id") or "") for item in stage2_items
+            ]
+            candidate_ids = [x for x in candidate_ids if x][:ann_limit]
+            if not candidate_ids:
+                logger.info("❌ [CodeCache] No stage2 candidates")
+                return []
+
+            stage3_expr = self._build_cache_id_expr(
+                candidate_ids, base_expr=base_expr)
+            stage3_res = hybrid_search(
+                collection=collection,
+                reqs=self._build_goal_request(
+                    vectors, limit=ann_limit, expr=stage3_expr),
+                rerank=WeightedRanker(1.0),
+                limit=ann_limit,
+                expr=stage3_expr,
+                output_fields=[
+                    "cache_id", "code", "url_pattern", "domain_key", "goal",
+                    "success_count", "user_task", "locator_info", "created_at"
+                ],
+                tag="CodeCache",
+            )
+
+            raw_hits = stage3_res[0] if stage3_res else []
             hits: List[CacheHit] = []
             for item in raw_hits:
                 raw_score = getattr(
                     item, "score", getattr(item, "distance", 0.0))
                 sim = self._to_similarity(float(raw_score))
-                if sim < CODE_CACHE_SIMILARITY_THRESHOLD:
+                if sim < max(CODE_CACHE_SIMILARITY_THRESHOLD, CODE_CACHE_STAGE3_GOAL_MIN_SIM):
                     continue
 
                 metadata = {
@@ -210,6 +287,7 @@ class CodeCacheManager(VectorCacheBase):
                     "goal": read_hit_field(item, "goal"),
                     "success_count": read_hit_field(item, "success_count"),
                     "user_task": read_hit_field(item, "user_task"),
+                    "locator_info": read_hit_field(item, "locator_info"),
                     "created_at": read_hit_field(item, "created_at"),
                 }
 
@@ -222,9 +300,24 @@ class CodeCacheManager(VectorCacheBase):
                         goal=metadata.get("goal", ""),
                         success_count=int(metadata.get("success_count", 0)),
                         user_task=metadata.get("user_task", ""),
+                        locator_info=metadata.get("locator_info", ""),
                         created_at=metadata.get("created_at", ""),
                     )
                 )
+
+            if hits:
+                allowed_ids = set(
+                    cache_soft_blacklist.filter_allowed_ids(
+                        cache_type="codecache",
+                        domain_key=domain_key,
+                        cache_ids=[h.id for h in hits if h.id],
+                    )
+                )
+                if allowed_ids:
+                    hits = [h for h in hits if (
+                        not h.id) or (h.id in allowed_ids)]
+                else:
+                    hits = [h for h in hits if not h.id]
 
             if hits:
                 logger.info(
@@ -250,19 +343,82 @@ class CodeCacheManager(VectorCacheBase):
                 return True
         return False
 
+    def _search_duplicate_hit(
+        self,
+        goal: str,
+        url: str,
+        user_task: str,
+        locator_info: str,
+    ) -> Optional[CacheHit]:
+        collection = self._ensure_collection()
+        url_pattern = self._normalize_url(url)
+        domain_key = self._extract_domain_key(url)
+        if not domain_key:
+            return None
+
+        vectors = self._embed_fields(
+            goal=goal,
+            locator_info=locator_info,
+            user_task=user_task,
+            url_pattern=url_pattern,
+        )
+        base_expr = self._build_domain_expr(domain_key)
+        res = hybrid_search(
+            collection=collection,
+            reqs=self._build_ann_requests(vectors, limit=1, expr=base_expr),
+            rerank=WeightedRanker(*self._weights),
+            limit=1,
+            expr=base_expr,
+            output_fields=[
+                "cache_id", "code", "url_pattern", "domain_key", "goal",
+                "success_count", "user_task", "locator_info", "created_at"
+            ],
+            tag="CodeCache",
+        )
+
+        items = res[0] if res else []
+        if not items:
+            return None
+
+        item = items[0]
+        raw_score = getattr(item, "score", getattr(item, "distance", 0.0))
+        sim = self._to_similarity(float(raw_score))
+        hit = CacheHit(
+            id=(read_hit_field(item, "cache_id") or ""),
+            code=(read_hit_field(item, "code") or ""),
+            score=sim,
+            url_pattern=(read_hit_field(item, "url_pattern") or ""),
+            goal=(read_hit_field(item, "goal") or ""),
+            success_count=int(read_hit_field(item, "success_count") or 0),
+            user_task=(read_hit_field(item, "user_task") or ""),
+            locator_info=(read_hit_field(item, "locator_info") or ""),
+            created_at=(read_hit_field(item, "created_at") or ""),
+        )
+
+        if hit.id:
+            allowed_ids = set(
+                cache_soft_blacklist.filter_allowed_ids(
+                    cache_type="codecache",
+                    domain_key=domain_key,
+                    cache_ids=[hit.id],
+                )
+            )
+            if hit.id not in allowed_ids:
+                return None
+        return hit
+
     def _is_duplicate(self, goal: str, url: str, user_task: str, locator_info: str) -> bool:
         try:
-            hits = self.search(
-                user_task=user_task,
+            hit = self._search_duplicate_hit(
                 goal=goal,
                 url=url,
+                user_task=user_task,
                 locator_info=locator_info,
-                top_k=1,
             )
-            if hits and hits[0].score >= CODE_CACHE_DUPLICATE_THRESHOLD:
+            if hit and hit.score >= CODE_CACHE_DUPLICATE_THRESHOLD:
                 logger.info(
                     "   ⚠️ [CodeCache] Similar content already exists "
-                    f"(score={hits[0].score:.4f} >= {CODE_CACHE_DUPLICATE_THRESHOLD}), skip save"
+                    f"(score={hit.score:.4f} >= {CODE_CACHE_DUPLICATE_THRESHOLD}), skip save"
                 )
                 return True
             return False
@@ -304,6 +460,7 @@ class CodeCacheManager(VectorCacheBase):
                 [(locator_info or "")[:6400]],
                 [(user_task or "")[:6400]],
                 [url_pattern[:512]],
+                [self._extract_domain_key(url)[:255]],
                 [(code or "")[:16000]],
                 [cache_id],
                 [dom_hash],
