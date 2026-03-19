@@ -37,6 +37,11 @@ DRISSION_LOCATOR_PROMPT = """
      - 如果没有 `_index`，则默认使用 1-based 索引。
 
 3. **Locator 安全性铁律 (Class & Space)**:
+   - **禁止 contains(@class) 子串陷阱 (BEM Trap - CRITICAL)**：
+      - 使用 BEM 命名法的网站（如 B站、YouTube），Block 的 class 名（如 `video-card`）是其所有子元素 class 名（如 `video-card__image`、`video-card__info--title`）的**前缀子串**。
+      - ❌ **严禁** `//div[contains(@class,'video-card')]` → 这会把容器和所有内部子元素全部匹配，导致返回数百个错误结果！
+      - ✅ **必须使用精确匹配**：`//div[@class='video-card']` 或 DrissionPage 语法 `@@class=video-card`。
+      - ✅ 如果 class 值中可能混有其他类名，使用空格边界匹配：`//div[contains(concat(' ',normalize-space(@class),' '),' video-card ')]`（注意值前后各有一个空格）。
    - **多类名处理 (Multi-Class - CRITICAL)**：
      - 如果元素有多个 Class (如 `class="page-link page-next"`)，且单个 Class 不唯一：
        - **必须**使用全量匹配以确保唯一性。

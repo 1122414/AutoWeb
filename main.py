@@ -9,8 +9,18 @@ from typing import Any, Dict, List
 # 强制设置终端输出编码为 UTF-8 (兼容 Windows)
 if sys.platform.startswith('win'):
     import io
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
+    sys.stdout = io.TextIOWrapper(
+        sys.stdout.buffer,
+        encoding='utf-8',
+        line_buffering=True,
+        write_through=True,
+    )
+    sys.stderr = io.TextIOWrapper(
+        sys.stderr.buffer,
+        encoding='utf-8',
+        line_buffering=True,
+        write_through=True,
+    )
 
 # 导入核心驱动
 from drivers.drission_driver import BrowserDriver

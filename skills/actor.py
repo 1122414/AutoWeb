@@ -2,12 +2,39 @@ import io
 import os
 import time
 import json
+import sys
 import contextlib
 from typing import Dict, Any, List, Optional
 from DrissionPage.common import Settings
 from drivers.drission_driver import BrowserDriver
 import skills.toolbox as toolbox
 from skills.logger import logger, save_code_log
+
+
+class _TeeStream:
+    """将写入同时转发到多个流（用于实时控制台输出 + 日志捕获）。"""
+
+    def __init__(self, *streams):
+        self._streams = [s for s in streams if s is not None]
+
+    def write(self, data):
+        text = "" if data is None else str(data)
+        for stream in self._streams:
+            try:
+                stream.write(text)
+            except Exception:
+                pass
+        # 行级实时输出：遇到换行后立即刷新
+        if "\n" in text or "\r" in text:
+            self.flush()
+        return len(text)
+
+    def flush(self):
+        for stream in self._streams:
+            try:
+                stream.flush()
+            except Exception:
+                pass
 
 
 class BrowserActor:
@@ -151,6 +178,8 @@ class BrowserActor:
         start_url = self._safe_tab_url(start_tab)
         logs = []
         output_buffer = io.StringIO()
+        tee_stdout = _TeeStream(sys.stdout, output_buffer)
+        tee_stderr = _TeeStream(sys.stderr, output_buffer)
 
         try:
             # 动态添加日志处理器，捕获当前执行上下文中所有 logger 输出
@@ -161,8 +190,8 @@ class BrowserActor:
             logger._logger.addHandler(temp_handler)
 
             try:
-                # 执行代码并捕获 print 和 logger 输出
-                with contextlib.redirect_stdout(output_buffer), contextlib.redirect_stderr(output_buffer):
+                # 执行代码并捕获 print 和 logger 输出（同时实时回显到控制台）
+                with contextlib.redirect_stdout(tee_stdout), contextlib.redirect_stderr(tee_stderr):
                     exec(strategy_code, {}, local_scope)
             finally:
                 logger._logger.removeHandler(temp_handler)
