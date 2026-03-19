@@ -26,6 +26,63 @@ class BrowserActor:
         self.tab.get(url)
         self.tab.wait.load_start()
 
+    def _safe_tab_url(self, tab) -> str:
+        try:
+            return str(tab.url or "")
+        except Exception:
+            return ""
+
+    def _resolve_latest_tab(self):
+        latest_tab = None
+        if self.browser is not None:
+            try:
+                latest_tab = self.browser.latest_tab
+            except Exception:
+                latest_tab = None
+        return latest_tab or self.tab
+
+    def _wait_navigation_snapshot(
+        self,
+        start_tab,
+        start_url: str,
+        timeout_seconds: float = 8.0,
+        poll_interval_seconds: float = 0.2,
+    ):
+        timeout = max(0.5, float(timeout_seconds))
+        interval = max(0.05, float(poll_interval_seconds))
+        deadline = time.time() + timeout
+
+        last_tab = self._resolve_latest_tab()
+        last_url = self._safe_tab_url(last_tab)
+
+        while time.time() < deadline:
+            current_tab = self._resolve_latest_tab()
+            current_url = self._safe_tab_url(current_tab)
+
+            tab_switched = current_tab is not start_tab
+            url_changed = bool(start_url) and (current_url != start_url)
+
+            last_tab = current_tab
+            last_url = current_url
+
+            if tab_switched or url_changed:
+                try:
+                    current_tab.wait.load_start(timeout=2)
+                except Exception:
+                    pass
+                return current_tab, current_url, tab_switched, url_changed
+
+            time.sleep(interval)
+
+        final_tab = self._resolve_latest_tab()
+        final_url = self._safe_tab_url(final_tab)
+        return (
+            final_tab,
+            final_url,
+            final_tab is not start_tab,
+            bool(start_url) and (final_url != start_url),
+        )
+
     def perform_action(self, action_plan: Dict[str, Any]) -> Dict[str, Any]:
         """
         执行单个原子动作
@@ -90,7 +147,8 @@ class BrowserActor:
             "browser": self.browser,
         }
 
-        start_url = self.tab.url
+        start_tab = self._resolve_latest_tab()
+        start_url = self._safe_tab_url(start_tab)
         logs = []
         output_buffer = io.StringIO()
 
@@ -114,10 +172,20 @@ class BrowserActor:
             if stdout_content:
                 logs.append(f"--- [Code Output] ---\n{stdout_content.strip()}")
 
-            # 检查 URL 变化
-            self.tab.wait(5)
-            end_url = self.tab.url
-            if start_url != end_url:
+            # 检查 URL / 标签页变化（执行后重新采样 latest_tab，避免误判）
+            end_tab, end_url, tab_switched, url_changed = self._wait_navigation_snapshot(
+                start_tab=start_tab,
+                start_url=start_url,
+            )
+            self.tab = end_tab
+
+            if tab_switched and url_changed:
+                logs.append(
+                    f"--- [System Log] ---\nTab Switched + URL Changed: {start_url} -> {end_url}")
+            elif tab_switched:
+                logs.append(
+                    f"--- [System Log] ---\nTab Switched: {start_url} -> {end_url}")
+            elif url_changed:
                 logs.append(
                     f"--- [System Log] ---\nURL Changed: {start_url} -> {end_url}")
             else:

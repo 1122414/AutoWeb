@@ -99,7 +99,24 @@ ACTION_CODE_GEN_PROMPT = """
 ### 3.3 循环爬取/翻页场景
 - **列表页 -> 详情页循环**：点击进入(新标签) -> 提取数据 -> `new_tab.close()` -> 回到列表页继续。**严禁**在不关闭新标签页的情况下连续打开多个详情页。
 - **翻页逻辑**：翻页操作通常不产生新标签页，仅需判断 `tab.url` 是否改变或特定元素是否刷新。
-4. **流程控制**: 仅在 Explicit Loop 时使用 `for`。禁止 `while True`。
+4. **流程控制 - 循环安全 (CRITICAL)**:
+   - **严禁 `while True`** 和任何没有明确上限的循环！
+   - **所有循环必须有 max_iterations 保护**，防止死循环卡死程序：
+   ```
+   # ✅ 正确: 翻页循环必须有上限
+   MAX_PAGES = 20
+   for page_num in range(MAX_PAGES):
+       # ... 采集当前页数据 ...
+       try:
+           next_btn = tab.ele("x://button[@class='next']")
+           next_btn.click(by_js=True)
+           tab.wait(2)
+       except:
+           print(f"-\u003e 翻页结束，共翻 {{page_num + 1}} 页")
+           break
+   ```
+   - ❌ **严禁**仅靠数据量判断退出（`if count >= 40: break`），因为如果采集失败 count 永远不增长，程序就会死循环！
+   - ✅ **必须**用 `for ... in range(MAX)` 或同时设置最大迭代次数作为兜底出口。
 5. **数据安全 (Data Saving - CRITICAL)**: 
    - **严禁**手动编写 `open()`/`csv.writer()` 代码保存数据！
    - **必须**使用 `toolbox.save_data(results, 'data/movies.json')`。

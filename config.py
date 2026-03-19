@@ -7,7 +7,9 @@ load_dotenv()
 
 
 def _env_bool(name: str, default: str = "False") -> bool:
-    return os.getenv(name, default).lower() == "true"
+    raw = os.getenv(name, default)
+    value = str(raw or "").strip().lower()
+    return value in {"1", "true", "t", "yes", "y", "on"}
 
 
 def _env_csv(name: str, default):
@@ -203,20 +205,21 @@ CODE_CACHE_CANDIDATE_TOP_K = int(
 # Code Cache Dry-Run 配置（避免 SPA/懒加载假阴性）
 CODE_CACHE_DRY_RUN_ENABLED = _env_bool("CODE_CACHE_DRY_RUN_ENABLED", "True")
 CODE_CACHE_DRY_RUN_TIMEOUT_SECONDS = float(
-    os.getenv("CODE_CACHE_DRY_RUN_TIMEOUT_SECONDS", "0.8"))
-CODE_CACHE_DRY_RUN_POLL_INTERVAL_SECONDS = float(
-    os.getenv("CODE_CACHE_DRY_RUN_POLL_INTERVAL_SECONDS", "0.1"))
-CODE_CACHE_DRY_RUN_REQUIRE_VISIBLE = _env_bool(
-    "CODE_CACHE_DRY_RUN_REQUIRE_VISIBLE", "False")
+    os.getenv("CODE_CACHE_DRY_RUN_TIMEOUT_SECONDS", "5"))
 
 # Observer (DomCache) Dry-Run 配置（Dom 命中后前置探测）
 DOM_CACHE_DRY_RUN_ENABLED = _env_bool("DOM_CACHE_DRY_RUN_ENABLED", "True")
 DOM_CACHE_DRY_RUN_TIMEOUT_SECONDS = float(
-    os.getenv("DOM_CACHE_DRY_RUN_TIMEOUT_SECONDS", "0.8"))
-DOM_CACHE_DRY_RUN_POLL_INTERVAL_SECONDS = float(
-    os.getenv("DOM_CACHE_DRY_RUN_POLL_INTERVAL_SECONDS", "0.1"))
-DOM_CACHE_DRY_RUN_REQUIRE_VISIBLE = _env_bool(
-    "DOM_CACHE_DRY_RUN_REQUIRE_VISIBLE", "False")
+    os.getenv("DOM_CACHE_DRY_RUN_TIMEOUT_SECONDS", "5"))
+
+# Observer(LLM) Dry-Run 配置（Observer 实时生成定位后立即探测）
+OBSERVER_DRY_RUN_ENABLED = _env_bool("OBSERVER_DRY_RUN_ENABLED", "True")
+OBSERVER_DRY_RUN_TIMEOUT_SECONDS = float(
+    os.getenv("OBSERVER_DRY_RUN_TIMEOUT_SECONDS", "5"))
+OBSERVER_DRY_RUN_MAX_RETRIES = int(
+    os.getenv("OBSERVER_DRY_RUN_MAX_RETRIES", "2"))
+OBSERVER_DRY_RUN_FAIL_RATIO_THRESHOLD = float(
+    os.getenv("OBSERVER_DRY_RUN_FAIL_RATIO_THRESHOLD", "0.5"))
 
 # ==============================================================================
 # DOM 缓存配置 (Milvus Hybrid Search)

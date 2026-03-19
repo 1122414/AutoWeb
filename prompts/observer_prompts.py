@@ -52,6 +52,8 @@ DRISSION_LOCATOR_PROMPT = """
 4. **对象原则**:
    - 严禁定位到 TextNode (如 `/text()`) 或 Attribute (如 `/@href`)。
    - 必须定位到 Element 节点 (如 `x://a`)。
+   - ❌ **反面示例**: `//a[@class='bili-video-card__image']/@href` → 这会返回一个字符串而非元素，DrissionPage 无法操作！
+   - ✅ **正确做法**: `//a[@class='bili-video-card__image']` → 定位到 `<a>` 元素本身，代码中再用 `.attr('href')` 取值。
 
 5. **新标签页预判 (opens_new_tab - CRITICAL)**:
    - 当 `action_suggestion` 为 `click` 时，必须精准判断点击后是否会打开新标签页。

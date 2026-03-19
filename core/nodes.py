@@ -234,64 +234,134 @@ def _has_locator_overlap(failed_locator: str, candidates: list) -> bool:
     return False
 
 
-def _probe_locator_with_polling(
-    tab,
-    locator: str,
-    timeout_seconds: float,
-    poll_interval_seconds: float,
-    require_visible: bool,
-) -> bool:
-    deadline = time.time() + max(0.1, float(timeout_seconds))
-    interval = max(0.05, float(poll_interval_seconds))
+def _sanitize_locator(locator: str) -> str:
+    """
+    [L2 后处理] 自动修正 LLM 常见的 locator 幻觉错误。
+    - 去掉 XPath 尾部的 /@attr（如 /@href、/@src）
+    - 去掉 XPath 尾部的 /text()
+    - 将相对 XPath .// 转为绝对 //（Dry-Run 统一用 tab 全局查找）
+    - 去掉 DP 语法中的 @@attr=xxx 后缀（LLM 幻觉：试图取属性值）
+    """
+    loc = str(locator or "").strip()
+    if not loc:
+        return loc
+    # XPath 幻觉
+    loc = re.sub(r'/@[\w-]+$', '', loc)
+    loc = re.sub(r'/text\(\)$', '', loc)
+    # 相对 XPath → 绝对
+    if loc.startswith('x:.//'):
+        loc = loc.replace("x:.", "x:", 1)
+    if loc.startswith('.//'):
+        loc = loc.replace(".", "x:", 1)
+    # DP 语法幻觉：@@tag=xxx / @@attr=xxx（非 HTML 属性，无效条件）
+    loc = re.sub(r'@@(?:tag|attr)=\S+', '', loc)
+    return loc.strip()
 
-    while time.time() < deadline:
-        try:
-            ele = tab.ele(locator, timeout=0)
-        except TypeError:
-            try:
-                ele = tab.ele(locator)
-            except Exception:
-                ele = None
-        except Exception:
-            ele = None
 
-        if ele:
-            if not require_visible:
-                return True
-            try:
-                if ele.states.is_displayed:
-                    return True
-            except Exception:
-                return True
+def _is_valid_element(ele) -> bool:
+    if ele is None:
+        return False
+    try:
+        class_name = getattr(ele.__class__, "__name__", "").strip().lower()
+    except Exception:
+        class_name = ""
+    if class_name == "noneelement":
+        return False
+    try:
+        if "noneelement" in repr(ele).lower():
+            return False
+    except Exception:
+        pass
+    return True
 
-        time.sleep(interval)
-    return False
+
+def _probe_locator(search_root, locator: str, timeout: float) -> dict:
+    """
+    [Dry-Run 唯一探测入口]
+    直接调用 DrissionPage 的 ele()，让 DP 自行处理语法识别和内建等待。
+    返回 {"ok": bool, "element": ele|None, "reason": str}
+    """
+    if search_root is None:
+        return {"ok": False, "element": None, "reason": "search_root为空"}
+    loc = _sanitize_locator(str(locator or "").strip())
+    if not loc:
+        return {"ok": False, "element": None, "reason": "locator为空"}
+    try:
+        ele = search_root.ele(loc, timeout=timeout)
+        if _is_valid_element(ele):
+            return {"ok": True, "element": ele, "reason": ""}
+        return {"ok": False, "element": None, "reason": "not-found"}
+    except Exception as e:
+        return {"ok": False, "element": None, "reason": f"Exception:{type(e).__name__}"}
+
+
+def _dry_run_observer_strategies(
+    config, strategies, timeout_seconds, **_ignored
+) -> tuple[bool, list[str], int]:
+    tab = _get_tab(config)
+    if tab is None:
+        return False, ["无可用浏览器标签页"], 0
+
+    strategy_list = _normalize_strategy_list(strategies)
+    if not strategy_list:
+        return False, ["无可校验locator"], 0
+
+    failed_locators = []
+    validated_count = 0
+    for idx, item in enumerate(strategy_list, 1):
+        main_loc = str(item.get("locator", "")).strip()
+        if not main_loc:
+            failed_locators.append(f"[{idx}] main:(空)")
+            continue
+
+        validated_count += 1
+        main_result = _probe_locator(tab, main_loc, timeout_seconds)
+        if not main_result["ok"]:
+            failed_locators.append(
+                f"[{idx}] main:{main_loc} | {main_result['reason']}")
+
+        for key, val in (item.get("sub_locators") or {}).items():
+            sub_loc = str(val or "").strip()
+            if not sub_loc:
+                continue
+            validated_count += 1
+            sub_result = _probe_locator(tab, sub_loc, timeout_seconds)
+            if not sub_result["ok"]:
+                failed_locators.append(
+                    f"[{idx}] sub[{key}]:{sub_loc} | {sub_result['reason']}")
+
+    if not validated_count and not failed_locators:
+        failed_locators.append("无可校验locator")
+    return len(failed_locators) == 0, failed_locators, validated_count
 
 
 def _dry_run_cache_hit_locators(
-    config: RunnableConfig,
-    locator_candidates: list,
-    timeout_seconds: float,
-    poll_interval_seconds: float,
-    require_visible: bool,
+    config, locator_candidates, timeout_seconds, **_ignored
 ) -> tuple[bool, str]:
     tab = _get_tab(config)
     if tab is None:
         return False, "无可用浏览器标签页"
     if not locator_candidates:
-        return True, ""
+        return False, "无可校验locator"
 
     for loc in locator_candidates:
-        ok = _probe_locator_with_polling(
-            tab=tab,
-            locator=loc,
-            timeout_seconds=timeout_seconds,
-            poll_interval_seconds=poll_interval_seconds,
-            require_visible=require_visible,
-        )
-        if ok:
-            return True, ""
-    return False, locator_candidates[0]
+        locator = str(loc or "").strip()
+        if not locator:
+            return False, "空locator"
+        result = _probe_locator(tab, locator, timeout_seconds)
+        if not result["ok"]:
+            logger.info(
+                f"   ❌ [DryRunProbe] locator={locator}, reason={result['reason']}")
+            return False, locator
+    return True, ""
+
+
+def _normalize_strategy_list(strategies: Any) -> list:
+    if isinstance(strategies, dict):
+        return [strategies]
+    if isinstance(strategies, list):
+        return [item for item in strategies if isinstance(item, dict)]
+    return []
 
 
 def _normalize_failure_scope(value: Any) -> str:
@@ -554,8 +624,6 @@ def cache_lookup_node(state: AgentState, config: RunnableConfig) -> Command[Lite
     """
     from config import (
         CODE_CACHE_DRY_RUN_ENABLED,
-        CODE_CACHE_DRY_RUN_POLL_INTERVAL_SECONDS,
-        CODE_CACHE_DRY_RUN_REQUIRE_VISIBLE,
         CODE_CACHE_DRY_RUN_TIMEOUT_SECONDS,
         CODE_CACHE_ENABLED,
         CODE_CACHE_THRESHOLD,
@@ -656,18 +724,28 @@ def cache_lookup_node(state: AgentState, config: RunnableConfig) -> Command[Lite
                     best_hit.locator_info,
                     final_code,
                 )
+                dry_run_started_at = time.time()
+                logger.info(
+                    f"   🔎 [CacheLookup] Dry-Run开始: candidates={len(loc_candidates)}"
+                )
                 dry_ok, failed_locator = _dry_run_cache_hit_locators(
                     config=config,
                     locator_candidates=loc_candidates,
                     timeout_seconds=CODE_CACHE_DRY_RUN_TIMEOUT_SECONDS,
-                    poll_interval_seconds=CODE_CACHE_DRY_RUN_POLL_INTERVAL_SECONDS,
-                    require_visible=CODE_CACHE_DRY_RUN_REQUIRE_VISIBLE,
                 )
+                dry_run_elapsed = time.time() - dry_run_started_at
+                if dry_ok:
+                    logger.info(
+                        f"   ✅ [CacheLookup] Dry-Run通过: validated={len(loc_candidates)}, "
+                        f"elapsed={dry_run_elapsed:.2f}s"
+                    )
                 if not dry_ok:
                     reason = f"Dry-Run失败: locator={failed_locator}"
                     logger.info(f"   ❌ [CacheLookup] {reason}")
-                    failed_cache_ids = list(state.get("_failed_code_cache_ids", []) or [])
-                    failed_dom_cache_ids = list(state.get("_failed_dom_cache_ids", []) or [])
+                    failed_cache_ids = list(
+                        state.get("_failed_code_cache_ids", []) or [])
+                    failed_dom_cache_ids = list(
+                        state.get("_failed_dom_cache_ids", []) or [])
                     if best_hit.id and best_hit.id not in failed_cache_ids:
                         failed_cache_ids.append(best_hit.id)
 
@@ -677,10 +755,12 @@ def cache_lookup_node(state: AgentState, config: RunnableConfig) -> Command[Lite
 
                     if observer_source == "dom_cache" and dom_cache_hit_id:
                         strategies = []
-                        loc_entries = state.get("locator_suggestions", []) or []
+                        loc_entries = state.get(
+                            "locator_suggestions", []) or []
                         if loc_entries and isinstance(loc_entries[-1], dict):
                             strategies = loc_entries[-1].get("strategies", [])
-                        dom_locators = _extract_locators_from_strategies(strategies)
+                        dom_locators = _extract_locators_from_strategies(
+                            strategies)
                         dom_dual_invalidate = _has_locator_overlap(
                             failed_locator,
                             dom_locators,
@@ -692,10 +772,12 @@ def cache_lookup_node(state: AgentState, config: RunnableConfig) -> Command[Lite
                         from skills.cache_blacklist import cache_soft_blacklist
 
                         if best_hit.id:
-                            code_cache_manager.record_failure(best_hit.id, reason=reason)
+                            code_cache_manager.record_failure(
+                                best_hit.id, reason=reason)
                             cache_soft_blacklist.mark_failed(
                                 cache_type="codecache",
-                                domain_key=_extract_domain_key_from_url(current_url),
+                                domain_key=_extract_domain_key_from_url(
+                                    current_url),
                                 cache_id=best_hit.id,
                                 reason=reason,
                             )
@@ -708,14 +790,16 @@ def cache_lookup_node(state: AgentState, config: RunnableConfig) -> Command[Lite
                             )
                             cache_soft_blacklist.mark_failed(
                                 cache_type="domcache",
-                                domain_key=_extract_domain_key_from_url(current_url),
+                                domain_key=_extract_domain_key_from_url(
+                                    current_url),
                                 cache_id=dom_cache_hit_id,
                                 reason=dom_reason,
                             )
                             if dom_cache_hit_id not in failed_dom_cache_ids:
                                 failed_dom_cache_ids.append(dom_cache_hit_id)
                     except Exception as mark_exc:
-                        logger.info(f"   ⚠️ [CacheLookup] Dry-Run 失败打标异常: {mark_exc}")
+                        logger.info(
+                            f"   ⚠️ [CacheLookup] Dry-Run 失败打标异常: {mark_exc}")
 
                     return Command(
                         update={
@@ -886,7 +970,8 @@ def _handle_cache_failure(state: AgentState, updates: dict) -> Command:
             code_cache_manager.record_failure(cache_hit_id, reason="执行/验收失败")
             cache_soft_blacklist.mark_failed(
                 cache_type="codecache",
-                domain_key=_extract_domain_key_from_url(state.get("current_url", "")),
+                domain_key=_extract_domain_key_from_url(
+                    state.get("current_url", "")),
                 cache_id=cache_hit_id,
                 reason="执行/验收失败",
             )
@@ -971,7 +1056,7 @@ def error_handler_node(state: AgentState, config: RunnableConfig, llm) -> Comman
         return Command(update=updates, goto="Observer")
 
 
-def observer_node(state: AgentState, config: RunnableConfig, observer) -> Command[Literal["Planner"]]:
+def observer_node(state: AgentState, config: RunnableConfig, observer) -> Command[Literal["Planner", "Observer"]]:
     """[Observer] 环境感知节点：捕获 DOM 并生成定位策略"""
     logger.info("\n👁️ [Observer] 正在感知环境...")
 
@@ -1048,6 +1133,10 @@ def observer_node(state: AgentState, config: RunnableConfig, observer) -> Comman
         # 只有当 DOM 发生变化 或 存在失败记录时，才进行视觉分析
         should_analyze = (current_dom_hash != previous_dom_hash) or has_failure
         new_strategy_entry = None
+        observer_dry_run_exhausted = False
+        observer_dry_run_last_note = ""
+        observer_dry_run_last_locator = ""
+        observer_dry_run_failed_locators = []
 
         # DOM Cache: 如果上轮是 DomCache 命中且后续失败，记录失败（不删除，供用户审查）
         observer_source = state.get("_observer_source", "")
@@ -1078,8 +1167,6 @@ def observer_node(state: AgentState, config: RunnableConfig, observer) -> Comman
             try:
                 from config import (
                     DOM_CACHE_DRY_RUN_ENABLED,
-                    DOM_CACHE_DRY_RUN_POLL_INTERVAL_SECONDS,
-                    DOM_CACHE_DRY_RUN_REQUIRE_VISIBLE,
                     DOM_CACHE_DRY_RUN_TIMEOUT_SECONDS,
                     DOM_CACHE_ENABLED,
                     DOM_CACHE_THRESHOLD,
@@ -1122,17 +1209,27 @@ def observer_node(state: AgentState, config: RunnableConfig, observer) -> Comman
 
                     # Dom 阶段前置 Dry-Run：只校验 DomCache 的定位策略
                     if dom_cache_hit and dom_cache_hit.locator_suggestions and DOM_CACHE_DRY_RUN_ENABLED:
-                        dom_locators = _extract_locators_from_strategies(
-                            dom_cache_hit.locator_suggestions)
-                        dom_dry_ok, dom_failed_locator = _dry_run_cache_hit_locators(
-                            config=config,
-                            locator_candidates=dom_locators,
-                            timeout_seconds=DOM_CACHE_DRY_RUN_TIMEOUT_SECONDS,
-                            poll_interval_seconds=DOM_CACHE_DRY_RUN_POLL_INTERVAL_SECONDS,
-                            require_visible=DOM_CACHE_DRY_RUN_REQUIRE_VISIBLE,
+                        dom_dry_run_started_at = time.time()
+                        logger.info(
+                            f"   🔎 [DomCache] Dry-Run开始: strategies={len(dom_cache_hit.locator_suggestions)}"
                         )
+                        dom_dry_ok, dom_failed_locators, dom_validated_count = _dry_run_observer_strategies(
+                            config=config,
+                            strategies=dom_cache_hit.locator_suggestions,
+                            timeout_seconds=DOM_CACHE_DRY_RUN_TIMEOUT_SECONDS,
+                        )
+                        dom_dry_run_elapsed = time.time() - dom_dry_run_started_at
+                        if dom_dry_ok:
+                            logger.info(
+                                f"   ✅ [DomCache] Dry-Run通过: validated={dom_validated_count}, "
+                                f"elapsed={dom_dry_run_elapsed:.2f}s"
+                            )
                         if not dom_dry_ok:
-                            reason = f"Dom Dry-Run失败: locator={dom_failed_locator}"
+                            failed_preview = "; ".join(dom_failed_locators[:5])
+                            reason = (
+                                f"Dom Dry-Run失败: failed_count={len(dom_failed_locators)}, "
+                                f"failed={failed_preview}"
+                            )
                             logger.info(f"   ❌ [DomCache] {reason}")
                             try:
                                 from skills.cache_blacklist import cache_soft_blacklist
@@ -1142,12 +1239,14 @@ def observer_node(state: AgentState, config: RunnableConfig, observer) -> Comman
                                 )
                                 cache_soft_blacklist.mark_failed(
                                     cache_type="domcache",
-                                    domain_key=_extract_domain_key_from_url(current_url),
+                                    domain_key=_extract_domain_key_from_url(
+                                        current_url),
                                     cache_id=dom_cache_hit.id,
                                     reason=reason,
                                 )
                             except Exception as dom_mark_exc:
-                                logger.info(f"   ⚠️ [DomCache] Dry-Run失败打标异常: {dom_mark_exc}")
+                                logger.info(
+                                    f"   ⚠️ [DomCache] Dry-Run失败打标异常: {dom_mark_exc}")
 
                             if dom_cache_hit.id and dom_cache_hit.id not in failed_dom_cache_ids:
                                 failed_dom_cache_ids.append(dom_cache_hit.id)
@@ -1169,6 +1268,12 @@ def observer_node(state: AgentState, config: RunnableConfig, observer) -> Comman
                     logger.info(f"   🔄 [Observer] 检测到失败记录，强制重新分析 DOM...")
                 logger.info(
                     f"   -> 正在进行视觉定位分析 (Context: {len(finished_steps)} finished steps)...")
+                from config import (
+                    OBSERVER_DRY_RUN_ENABLED,
+                    OBSERVER_DRY_RUN_FAIL_RATIO_THRESHOLD,
+                    OBSERVER_DRY_RUN_TIMEOUT_SECONDS,
+                )
+
                 previous_failures = list(reflections or [])
                 observer_requirement = task
                 if verification_failed:
@@ -1181,25 +1286,135 @@ def observer_node(state: AgentState, config: RunnableConfig, observer) -> Comman
                     )
                     previous_failures.append(
                         f"Verifier失败摘要: {verification.get('summary', '')}")
-                locator_suggestions = observer.analyze_locator_strategy(
-                    dom,
-                    observer_requirement,
-                    current_url,
-                    previous_steps=finished_steps,
-                    ignore_cache=has_failure,
-                    previous_failures=previous_failures,
-                )
 
-                if isinstance(locator_suggestions, dict):
-                    locator_suggestions = [locator_suggestions]
+                base_observer_requirement = observer_requirement
+                max_attempts = 1
+                if OBSERVER_DRY_RUN_ENABLED:
+                    # 约束：每轮仅做一次全量 Dry-Run，失败后直接回到 Observer
+                    max_attempts = 1
 
-                page_context = finished_steps[-1] if finished_steps else "初始页面"
-                new_strategy_entry = {
-                    "page_context": page_context,
-                    "url": current_url,
-                    "strategies": locator_suggestions
-                }
-                logger.info(f"   -> 新增策略条目: {page_context[:30]}...")
+                locator_suggestions = []
+                dry_run_feedback_notes = []
+
+                for attempt_idx in range(max_attempts):
+                    attempt_requirement = base_observer_requirement
+                    if dry_run_feedback_notes and observer_dry_run_failed_locators:
+                        failed_list_for_prompt = "\n".join(
+                            [f"- {x}" for x in observer_dry_run_failed_locators[:30]]
+                        )
+                        attempt_requirement = (
+                            f"{base_observer_requirement}\n\n"
+                            f"【Observer Dry-Run 失败反馈】\n"
+                            f"以下定位在上一轮 Dry-Run 中失败，请逐项修复：\n"
+                            f"{failed_list_for_prompt}\n"
+                            f"要求：仅修复失败定位器，禁止全局重写。"
+                        )
+
+                    analyzed = observer.analyze_locator_strategy(
+                        dom,
+                        attempt_requirement,
+                        current_url,
+                        previous_steps=finished_steps,
+                        ignore_cache=has_failure or attempt_idx > 0,
+                        previous_failures=previous_failures + dry_run_feedback_notes,
+                    )
+
+                    if isinstance(analyzed, dict):
+                        analyzed = [analyzed]
+                    elif not isinstance(analyzed, list):
+                        analyzed = []
+
+                    locator_suggestions = analyzed
+
+                    if not OBSERVER_DRY_RUN_ENABLED:
+                        break
+
+                    observer_dry_run_started_at = time.time()
+                    logger.info(
+                        f"   🔎 [Observer] Dry-Run开始: round={attempt_idx + 1}/{max_attempts}, "
+                        f"strategies={len(locator_suggestions)}"
+                    )
+                    dry_ok, failed_locators, validated_count = _dry_run_observer_strategies(
+                        config=config,
+                        strategies=locator_suggestions,
+                        timeout_seconds=OBSERVER_DRY_RUN_TIMEOUT_SECONDS,
+                    )
+                    observer_dry_run_elapsed = time.time() - observer_dry_run_started_at
+
+                    # L3: 基于失败率的阈值判断
+                    fail_ratio = (
+                        len(failed_locators) / validated_count
+                        if validated_count > 0 else 1.0
+                    )
+                    logger.info(
+                        f"   📊 [Observer] Dry-Run统计: "
+                        f"validated={validated_count}, failed={len(failed_locators)}, "
+                        f"fail_ratio={fail_ratio:.0%}, threshold={OBSERVER_DRY_RUN_FAIL_RATIO_THRESHOLD:.0%}, "
+                        f"elapsed={observer_dry_run_elapsed:.2f}s"
+                    )
+
+                    if dry_ok or fail_ratio < OBSERVER_DRY_RUN_FAIL_RATIO_THRESHOLD:
+                        logger.info(
+                            f"   ✅ [Observer] Dry-Run{'通过' if dry_ok else '放行(低于阈值)'}: "
+                            f"round={attempt_idx + 1}/{max_attempts}, "
+                            f"validated={validated_count}, "
+                            f"elapsed={observer_dry_run_elapsed:.2f}s"
+                        )
+                        observer_dry_run_last_locator = ""
+                        observer_dry_run_last_note = ""
+                        observer_dry_run_failed_locators = []
+                        break
+
+                    observer_dry_run_failed_locators = list(
+                        failed_locators or [])
+                    observer_dry_run_last_locator = (
+                        observer_dry_run_failed_locators[0]
+                        if observer_dry_run_failed_locators else "无可校验locator"
+                    )
+                    observer_dry_run_last_note = (
+                        f"Observer Dry-Run失败(第 {attempt_idx + 1}/{max_attempts} 轮): "
+                        f"failed_count={len(observer_dry_run_failed_locators)}"
+                    )
+                    failed_preview = "; ".join(
+                        observer_dry_run_failed_locators[:20])
+                    dry_run_feedback_notes.append(
+                        f"{observer_dry_run_last_note}; failed={failed_preview}"
+                    )
+                    logger.info(
+                        f"   ❌ [Observer] {observer_dry_run_last_note}")
+                    logger.info(
+                        "   📊 [ObserverDryRunStat] "
+                        f"consecutive_failures={len(dry_run_feedback_notes)}, "
+                        f"max_attempts={max_attempts}, "
+                        f"failed_count={len(observer_dry_run_failed_locators)}, "
+                        f"first_failed_locator={observer_dry_run_last_locator or '(未命中定位器)'}"
+                    )
+
+                    if attempt_idx == max_attempts - 1:
+                        observer_dry_run_exhausted = True
+                        locator_suggestions = []
+                        failed_summary = "; ".join(
+                            observer_dry_run_failed_locators[:10])
+                        logger.info(
+                            "   ⚠️ [Observer] Dry-Run 重试耗尽，清空本轮失效定位策略，避免误导 Coder")
+                        logger.info(
+                            "   📊 [ObserverDryRunSummary] "
+                            f"consecutive_failures={len(dry_run_feedback_notes)}, "
+                            f"failed_count={len(observer_dry_run_failed_locators)}, "
+                            f"failed_locators={failed_summary}, "
+                            f"url={current_url}"
+                        )
+
+                if locator_suggestions:
+                    page_context = finished_steps[-1] if finished_steps else "初始页面"
+                    new_strategy_entry = {
+                        "page_context": page_context,
+                        "url": current_url,
+                        "strategies": locator_suggestions
+                    }
+                    logger.info(f"   -> 新增策略条目: {page_context[:30]}...")
+                else:
+                    logger.info("   ⏭️ [Observer] 本轮未产出可用策略，跳过策略写入")
         else:
             logger.info("   -> 页面无变化，复用历史策略 (Skipping Observer Analysis)...")
 
@@ -1215,12 +1430,40 @@ def observer_node(state: AgentState, config: RunnableConfig, observer) -> Comman
             "_failed_dom_cache_ids": failed_dom_cache_ids,
         }
 
+        if observer_dry_run_exhausted:
+            failed_text = "\n".join(
+                [f"- {x}" for x in observer_dry_run_failed_locators[:30]]
+            ) or "- (无)"
+            failed_summary = " | ".join(
+                observer_dry_run_failed_locators[:10])
+            update_dict["messages"] = [
+                AIMessage(content=(
+                    f"【Observer Dry-Run失败】{observer_dry_run_last_note}\n"
+                    f"失败定位如下：\n{failed_text}\n"
+                    "已回到 Observer 重新定位。"
+                ))
+            ]
+            update_dict["reflections"] = [
+                f"{observer_dry_run_last_note}; failed={failed_summary}"
+            ]
+            update_dict["verification_result"] = _build_verification_result(
+                is_success=False,
+                is_done=False,
+                summary="Observer 生成定位器 Dry-Run 连续失败",
+                source="manual",
+                failure_scope="local",
+                failed_action=task,
+                failed_locator=failed_summary or observer_dry_run_last_locator,
+                evidence=f"{observer_dry_run_last_note}\n{failed_text}",
+                fix_hint="Observer 仅修复 failed_locator，禁止全局改写后重试",
+            )
+
         # 如果刚做完重新分析（因为失败触发），清空错误标记
-        if has_failure and should_analyze:
+        if has_failure and should_analyze and not observer_dry_run_exhausted:
             update_dict["reflections"] = []  # 清空旧的反思
             update_dict["error_type"] = None
 
-        return Command(update=update_dict, goto="Planner")
+        return Command(update=update_dict, goto="Observer" if observer_dry_run_exhausted else "Planner")
 
     except Exception as e:
         logger.info(f"   ⚠️ 环境感知失败: {e}")
