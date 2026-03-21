@@ -143,23 +143,20 @@ class DomCacheManager(VectorCacheBase):
         }
 
     def _build_task_request(self, vectors: Dict[str, list], limit: int, expr: str = None) -> List[AnnSearchRequest]:
-        params = {"metric_type": "COSINE", "params": {}}
-        return [
-            AnnSearchRequest(data=[vectors["task_vector"]],
-                             anns_field="task_vector", param=params, limit=limit, expr=expr),
-        ]
+        return self._build_ann_requests_for_fields(
+            vectors,
+            ["task_vector"],
+            limit,
+            expr
+        )
 
     def _build_stage3_requests(self, vectors: Dict[str, list], limit: int, expr: str = None) -> List[AnnSearchRequest]:
-        params = {"metric_type": "COSINE", "params": {}}
-        reqs = [
-            AnnSearchRequest(data=[vectors["dom_vector"]],
-                             anns_field="dom_vector", param=params, limit=limit, expr=expr),
-        ]
-        reqs.append(
-            AnnSearchRequest(data=[vectors["step_vector"]],
-                             anns_field="step_vector", param=params, limit=limit, expr=expr)
+        return self._build_ann_requests_for_fields(
+            vectors,
+            ["dom_vector", "step_vector"],
+            limit,
+            expr
         )
-        return reqs
 
     def _decode_locator_suggestions(self, raw: str) -> List[Dict]:
         try:
@@ -167,16 +164,6 @@ class DomCacheManager(VectorCacheBase):
             return val if isinstance(val, list) else []
         except Exception:
             return []
-
-    def _cosine_similarity(self, a: list, b: list) -> float:
-        if not a or not b or len(a) != len(b):
-            return 0.0
-        va = np.asarray(a, dtype=np.float32)
-        vb = np.asarray(b, dtype=np.float32)
-        denom = float(np.linalg.norm(va) * np.linalg.norm(vb))
-        if denom <= 0.0:
-            return 0.0
-        return float(np.dot(va, vb) / denom)
 
     def search(
         self,

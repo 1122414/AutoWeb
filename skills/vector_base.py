@@ -283,3 +283,41 @@ class VectorCacheBase(ABC):
         logger.info(f"📧 [{self._tag}] Waiting for background tasks...")
         self._executor.shutdown(wait=True)
         logger.info(f"✅ [{self._tag}] Background tasks finished")
+
+    def _cosine_similarity(self, a: list, b: list) -> float:
+        if not a or not b or len(a) != len(b):
+            return 0.0
+        va = np.asarray(a, dtype=np.float32)
+        vb = np.asarray(b, dtype=np.float32)
+        denom = float(np.linalg.norm(va) * np.linalg.norm(vb))
+        if denom <= 0.0:
+            return 0.0
+        return float(np.dot(va, vb) / denom)
+
+    def _build_ann_request(
+        self,
+        vector: list,
+        field: str,
+        limit: int,
+        expr: str = None
+    ) -> AnnSearchRequest:
+        params = {"metric_type": "COSINE", "params": {}}
+        return AnnSearchRequest(
+            data=[vector],
+            anns_field=field,
+            param=params,
+            limit=limit,
+            expr=expr
+        )
+
+    def _build_ann_requests_for_fields(
+        self,
+        vectors: Dict[str, list],
+        fields: List[str],
+        limit: int,
+        expr: str = None
+    ) -> List[AnnSearchRequest]:
+        return [
+            self._build_ann_request(vectors[field], field, limit, expr)
+            for field in fields if field in vectors
+        ]

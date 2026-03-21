@@ -1,6 +1,5 @@
-# =============================================================================
-# 1. DrissionPage 专用定位策略 (针对自动化操作)
-# =============================================================================
+from prompts.base_prompts import LOCATOR_SAFETY_RULES
+
 DRISSION_LOCATOR_PROMPT = """
 你是一位精通 DrissionPage (v4.x) 的自动化架构师。
 请分析下方的 【DOM 简易骨架】，提取符合【用户操作需求】的定位策略。
@@ -24,7 +23,7 @@ DRISSION_LOCATOR_PROMPT = """
 1. 根据【已完成步骤】和【用户最终目标】，推断当前操作：
    - ⚠️ **先看当前 URL**！根据 URL 判断你在哪个页面！**
    - **单步操作**：如果还在导航中（如点击分类、登录），仅关注下一步。
-   - **批量/循环操作**：**仅当**判断当前页面已是**最终数据目标页**（Target Page）时，若目标涉及“爬取”、“遍历”，请同时识别**列表项**和**翻页/循环控制器**。
+   - **批量/循环操作**：**仅当**判断当前页面已是**最终数据目标页**（Target Page）时，若目标涉及"爬取"、"遍历"，请同时识别**列表项**和**翻页/循环控制器**。
    - ⚠️ **纠错机制**：如果提供了【上一次尝试失败的反思】，说明你上次生成的定位策略在执行时报错了或者没有找到目标元素。你**必须仔细阅读错误原因**，并在本次生成中**绝对避免同样的错误**（比如更换其他可用的同义元素、改用不同特征的 XPath/Class 等）。
 
 2. 在【压缩之后的DOM骨架】中寻找支持这一步操作的元素。
@@ -36,43 +35,27 @@ DRISSION_LOCATOR_PROMPT = """
        - 例如：想点击 "剧集" (在 `text` 中是第 2 个)，其对应的 `_index` 为 2，则 Locator 为 `x://div[2]/a`。
      - 如果没有 `_index`，则默认使用 1-based 索引。
 
-3. **Locator 安全性铁律 (Class & Space)**:
-   - **禁止 contains(@class) 子串陷阱 (BEM Trap - CRITICAL)**：
-      - 使用 BEM 命名法的网站（如 B站、YouTube），Block 的 class 名（如 `video-card`）是其所有子元素 class 名（如 `video-card__image`、`video-card__info--title`）的**前缀子串**。
-      - ❌ **严禁** `//div[contains(@class,'video-card')]` → 这会把容器和所有内部子元素全部匹配，导致返回数百个错误结果！
-      - ✅ **必须使用精确匹配**：`//div[@class='video-card']` 或 DrissionPage 语法 `@@class=video-card`。
-      - ✅ 如果 class 值中可能混有其他类名，使用空格边界匹配：`//div[contains(concat(' ',normalize-space(@class),' '),' video-card ')]`（注意值前后各有一个空格）。
-   - **多类名处理 (Multi-Class - CRITICAL)**：
-     - 如果元素有多个 Class (如 `class="page-link page-next"`)，且单个 Class 不唯一：
-       - **必须**使用全量匹配以确保唯一性。
-       - **语法**：`@@class=page-link page-next` (DrissionPage 专用语法，保留空格) 或 XPath `//a[@class='page-link page-next']`。
-       - **严禁**只取其中一部分 (如 `.page-next`)，这会导致定位到错误的隐藏元素！
-   - **禁止 CSS 后代选择器 (No Descendant Selectors)**:
-     - ❌ **严禁使用**空格分隔的 CSS 选择器 (如 `.module-items .module-poster-item`)。
-     - ✅ **必须使用** XPath 或链式结构 (如 `x://div[@class='module-items']//div[@class='module-poster-item']`)。
-     - 原因: 这种简写会丢失父元素的精确特征（如 trailing space），导致匹配失败。
-   - **空格敏感**:
-     - 注意 HTML 源码中的 Class 可能包含额外的空格 (如 `"active "`)，使用 `@@class=...` 时必须原样保留。
+""" + LOCATOR_SAFETY_RULES + """
 
 4. **对象原则**:
-   - 严禁定位到 TextNode (如 `/text()`) 或 Attribute (如 `/@href`)。
-   - 必须定位到 Element 节点 (如 `x://a`)。
-   - ❌ **反面示例**: `//a[@class='bili-video-card__image']/@href` → 这会返回一个字符串而非元素，DrissionPage 无法操作！
-   - ✅ **正确做法**: `//a[@class='bili-video-card__image']` → 定位到 `<a>` 元素本身，代码中再用 `.attr('href')` 取值。
+    - 严禁定位到 TextNode (如 `/text()`) 或 Attribute (如 `/@href`)。
+    - 必须定位到 Element 节点 (如 `x://a`)。
+    - ❌ **反面示例**: `//a[@class='bili-video-card__image']/@href` → 这会返回一个字符串而非元素，DrissionPage 无法操作！
+    - ✅ **正确做法**: `//a[@class='bili-video-card__image']` → 定位到 `<a>` 元素本身，代码中再用 `.attr('href')` 取值。
 
 5. **新标签页预判 (opens_new_tab - CRITICAL)**:
-   - 当 `action_suggestion` 为 `click` 时，必须精准判断点击后是否会打开新标签页。
-   - ⚠️ **严禁将 `rel="noopener"` 或 `rel="noreferrer"` 作为判断依据**！它们是安全属性，不控制跳转方式！
-   - **判定为 `true` 的条件**（优先级从高到低）：
-     1. 元素自身或其父级 `<a>` 标签包含 `target="_blank"` 属性
-     2. 页面 `<head>` 中存在 `<base target="_blank">` 且该元素为链接
-     3. 元素的 `onclick` 属性或 `href` 中明确包含 `window.open` 代码
-     4. 元素包含语义提示，如 `aria-label="在新窗口打开"` 或文本包含 "Open in new tab"
-   - **判定为 `false` 的条件**：
-     1. 普通 `<a>` 链接且**无** `target="_blank"`（忽略 `rel` 属性，它不影响跳转）
-     2. `href` 以 `javascript:`(非 window.open)、`mailto:`、`tel:` 或 `#` 开头
-     3. 普通 `<button>` 元素（除非有明确 JS 弹窗证据）
-   - **决策策略**: 遇到不确定的 `<div>` 或 `<span>` 伪装按钮，**默认为 `false`**（保持在当前 Page 对象操作更安全）
+    - 当 `action_suggestion` 为 `click` 时，必须精准判断点击后是否会打开新标签页。
+    - ⚠️ **严禁将 `rel="noopener"` 或 `rel="noreferrer"` 作为判断依据**！它们是安全属性，不控制跳转方式！
+    - **判定为 `true` 的条件**（优先级从高到低）：
+      1. 元素自身或其父级 `<a>` 标签包含 `target="_blank"` 属性
+      2. 页面 `<head>` 中存在 `<base target="_blank">` 且该元素为链接
+      3. 元素的 `onclick` 属性或 `href` 中明确包含 `window.open` 代码
+      4. 元素包含语义提示，如 `aria-label="在新窗口打开"` 或文本包含 "Open in new tab"
+    - **判定为 `false` 的条件**：
+      1. 普通 `<a>` 链接且**无** `target="_blank"`（忽略 `rel` 属性，它不影响跳转）
+      2. `href` 以 `javascript:`(非 window.open)、`mailto:`、`tel:` 或 `#` 开头
+      3. 普通 `<button>` 元素（除非有明确 JS 弹窗证据）
+    - **决策策略**: 遇到不确定的 `<div>` 或 `<span>` 伪装按钮，**默认为 `false`**（保持在当前 Page 对象操作更安全）
 
 【Few-Shot Examples】
 1. **场景：点击普通按钮**

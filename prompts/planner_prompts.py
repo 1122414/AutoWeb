@@ -1,9 +1,5 @@
+from prompts.base_prompts import PromptTemplate
 
-# =============================================================================
-# Planner Prompts for AutoWeb V2
-# =============================================================================
-
-# 1. Start Page Strategy Prompt (Initial Navigation)
 PLANNER_START_PROMPT = """
 你是一个网页自动化规划专家。
 
@@ -20,14 +16,11 @@ PLANNER_START_PROMPT = """
 1. 打开网址 https://...
 """
 
-# 1.5 Continue from Existing Page (New Session on Existing Page)
-PLANNER_CONTINUE_PROMPT = """
-你是网页自动化规划专家。
-
-⚠️ **核心禁令（违反则失败）**:
-- 若计划涉及"进入新页面"，只能写"点击进入xxx"，**绝对禁止**同时规划新页面内的操作！
-- **搜索也是跨页面**：搜索会跳转到结果页，必须拆分为两步（先搜索，下一轮再点击结果）
-- **禁止词**: "随后"、"然后点击"、"然后返回"、"以便分析"
+PLANNER_CONTINUE_PROMPT = PromptTemplate.critical_rule(
+    "- 若计划涉及'进入新页面'，只能写'点击进入xxx'，**绝对禁止**同时规划新页面内的操作！\n"
+    "- **搜索也是跨页面**：搜索会跳转到结果页，必须拆分为两步（先搜索，下一轮再点击结果）\n"
+    "- **禁止词**: '随后'、'然后点击'、'然后返回'、'以便分析'"
+) + """
 
 【用户任务】{task}
 【当前 URL】{current_url}
@@ -48,13 +41,11 @@ PLANNER_CONTINUE_PROMPT = """
 ❌ 搜索"关键词"然后点击第一个结果（禁止！搜索和点击必须分开）
 """
 
-# 2. Iterative Planning Prompt (Main Loop)
-PLANNER_STEP_PROMPT = """
+PLANNER_STEP_PROMPT = PromptTemplate.critical_rule(
+    "- 若计划涉及'进入新页面'，只能写'点击进入xxx'，**绝对禁止**同时规划新页面内的操作！\n"
+    "- **禁止词**: '随后'、'然后返回'、'以便分析'、'分析结构'、'准备翻页'、'分析后'"
+) + """
 你是一个精通网页自动化的规划专家。目前采用【迭代式规划】模式。
-
-⚠️ **核心禁令（违反则失败）**:
-- 若计划涉及"进入新页面"，只能写"点击进入xxx"，**绝对禁止**同时规划新页面内的操作！
-- **禁止词**: "随后"、"然后返回"、"以便分析"、"分析结构"、"准备翻页"、"分析后"
 
 【用户最终目标】
 {task}
@@ -155,9 +146,7 @@ Example Output 5 (Finished):
 所有数据抓取完毕并已保存。
 """
 
-# 3. Force Skip Prompt (Consecutive Failure Override)
 PLANNER_FORCE_SKIP_PROMPT = """
-
 🚨 **强制跳过指令（系统级 - 不可违反）**:
 上一步计划已连续失败 {step_fail_count} 次，失败摘要: {last_verification}
 你**必须**放弃上一步的操作方向，采取以下策略之一：

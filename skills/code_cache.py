@@ -161,43 +161,28 @@ class CodeCacheManager(VectorCacheBase):
         }
 
     def _build_ann_requests(self, vectors: Dict[str, list], limit: int, expr: str = None) -> List[AnnSearchRequest]:
-        params = {"metric_type": "COSINE", "params": {}}
-        return [
-            AnnSearchRequest(data=[vectors["goal_vector"]],
-                             anns_field="goal_vector", param=params, limit=limit, expr=expr),
-            AnnSearchRequest(data=[vectors["locator_vector"]],
-                             anns_field="locator_vector", param=params, limit=limit, expr=expr),
-            AnnSearchRequest(data=[vectors["user_task_vector"]],
-                             anns_field="user_task_vector", param=params, limit=limit, expr=expr),
-            AnnSearchRequest(data=[vectors["url_vector"]],
-                             anns_field="url_vector", param=params, limit=limit, expr=expr),
-        ]
+        return self._build_ann_requests_for_fields(
+            vectors,
+            ["goal_vector", "locator_vector", "user_task_vector", "url_vector"],
+            limit,
+            expr
+        )
 
     def _build_stage1_requests(self, vectors: Dict[str, list], limit: int, expr: str = None) -> List[AnnSearchRequest]:
-        params = {"metric_type": "COSINE", "params": {}}
-        return [
-            AnnSearchRequest(data=[vectors["user_task_vector"]],
-                             anns_field="user_task_vector", param=params, limit=limit, expr=expr),
-            AnnSearchRequest(data=[vectors["url_vector"]],
-                             anns_field="url_vector", param=params, limit=limit, expr=expr),
-        ]
+        return self._build_ann_requests_for_fields(
+            vectors,
+            ["user_task_vector", "url_vector"],
+            limit,
+            expr
+        )
 
     def _build_goal_request(self, vectors: Dict[str, list], limit: int, expr: str = None) -> List[AnnSearchRequest]:
-        params = {"metric_type": "COSINE", "params": {}}
-        return [
-            AnnSearchRequest(data=[vectors["goal_vector"]],
-                             anns_field="goal_vector", param=params, limit=limit, expr=expr),
-        ]
-
-    def _cosine_similarity(self, a: list, b: list) -> float:
-        if not a or not b or len(a) != len(b):
-            return 0.0
-        va = np.asarray(a, dtype=np.float32)
-        vb = np.asarray(b, dtype=np.float32)
-        denom = float(np.linalg.norm(va) * np.linalg.norm(vb))
-        if denom <= 0.0:
-            return 0.0
-        return float(np.dot(va, vb) / denom)
+        return self._build_ann_requests_for_fields(
+            vectors,
+            ["goal_vector"],
+            limit,
+            expr
+        )
 
     def search(
         self,
