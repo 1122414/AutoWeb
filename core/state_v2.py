@@ -81,7 +81,7 @@ class AgentState(EnvState, TaskState):
 
     # Executor 微循环控制
     coder_retry_count: int              # Coder 重试计数（语法错误时微循环，最多3次）
-    error_type: Optional[str]           # 错误类型: "syntax" | "locator" | None
+    error_type: Optional[str]           # 错误类型: "syntax" | "locator" | "security" | "security_max_retry" | "syntax_max_retry" | "critical" | None
 
     # 代码缓存控制
     _code_source: Optional[str]         # 代码来源: "cache" | "llm" | None
@@ -98,7 +98,7 @@ class AgentState(EnvState, TaskState):
     _step_fail_count: int               # 连续步骤失败计数（成功时重置为 0）
 
     # RAG Node 控制
-    # RAG 任务类型: "store_kb" | "store_code" | "qa" | None
+    # RAG 任务类型: "store_kb" | "store_cache" | "qa" | None
     rag_task_type: Optional[str]
 
     # Human-in-the-Loop 模式: "off" | "review_all"
