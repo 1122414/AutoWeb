@@ -618,6 +618,7 @@ def interactive_loop(app, browser_instance, llm, observer):
                 "_action_source": None,
                 "_action_cache_hit_id": None,
                 "_failed_action_cache_ids": [],
+                "_dpcli_action_disabled": False,
                 "_failed_dom_cache_ids": [],
             }
 

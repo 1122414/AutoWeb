@@ -93,6 +93,7 @@ class AgentState(EnvState, TaskState):
     _action_source: Optional[str]
     _action_cache_hit_id: Optional[str]
     _failed_action_cache_ids: List[str]
+    _dpcli_action_disabled: bool
     _cache_failed_this_round: bool      # 本轮缓存代码是否已失败（用于防止死循环）
     _cache_hit_id: Optional[str]        # 缓存命中记录 ID（用于失败失效）
     _failed_code_cache_ids: List[str]   # 当前失败窗口内禁用的 CodeCache 命中 ID

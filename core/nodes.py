@@ -15,6 +15,7 @@ from core.state_v2 import AgentState
 from skills.actor import BrowserActor
 from skills.logger import logger
 from prompts.coder_prompts import ACTION_CODE_GEN_PROMPT, CODER_TASK_WRAPPER
+from prompts.dpcli_action_prompts import DPCLI_ACTION_GEN_PROMPT
 from prompts.planner_prompts import PLANNER_START_PROMPT, PLANNER_STEP_PROMPT, PLANNER_CONTINUE_PROMPT, PLANNER_FORCE_SKIP_PROMPT
 from prompts.verifier_prompts import VERIFIER_CHECK_PROMPT, ERROR_RECOVERY_PROMPT
 from config import RAG_STORE_KEYWORDS, RAG_QA_KEYWORDS, RAG_GOAL_KEYWORDS, RAG_DONE_KEYWORDS, CONTINUE_KEYWORDS
@@ -1748,6 +1749,7 @@ def planner_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lite
                     "_action_source": None,
                     "_action_cache_hit_id": None,
                     "_failed_action_cache_ids": [],
+                    "_dpcli_action_disabled": False,
                     "_cache_failed_this_round": False,  # 重置缓存标记
                     "_cache_hit_id": None,          # 清空 CodeCache 命中 ID
                     "_failed_code_cache_ids": [],   # 清空 CodeCache 失败黑名单
@@ -1907,9 +1909,161 @@ def planner_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lite
         return Command(update=update_dict, goto="CacheLookup")
 
 
-def coder_node(state: AgentState, config: RunnableConfig, llm) -> Command[Literal["Executor"]]:
+def _extract_json_object(text: str) -> Optional[Dict[str, Any]]:
+    content = str(text or "").strip()
+    if not content:
+        return None
+    if "```" in content:
+        fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```",
+                           content, flags=re.DOTALL)
+        if fenced:
+            content = fenced.group(1).strip()
+    try:
+        parsed = json.loads(content)
+    except json.JSONDecodeError:
+        start = content.find("{")
+        end = content.rfind("}")
+        if start < 0 or end <= start:
+            return None
+        try:
+            parsed = json.loads(content[start:end + 1])
+        except json.JSONDecodeError:
+            return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _should_use_dpcli_action(state: AgentState) -> bool:
+    from config import DPCLI_ENABLED
+    if state.get("_dpcli_action_disabled"):
+        return False
+    if state.get("execution_mode") == "dp_cli":
+        return True
+    if not DPCLI_ENABLED:
+        return False
+
+    plan_text = str(state.get("plan") or "").lower()
+    dpcli_keywords = [
+        "open", "打开", "访问", "url",
+        "click", "点击", "选择",
+        "type", "输入", "填写", "搜索",
+        "snapshot", "页面", "查找",
+        "extract", "提取", "爬取", "列表", "详情",
+        "next page", "下一页", "翻页",
+    ]
+    fallback_keywords = ["下载", "download", "api", "http_request", "文件", "toolbox"]
+    return any(kw in plan_text for kw in dpcli_keywords) and not any(
+        kw in plan_text for kw in fallback_keywords)
+
+
+def _dpcli_action_context(state: AgentState) -> str:
+    context = {
+        "current_url": state.get("current_url", ""),
+        "plan": state.get("plan", ""),
+        "last_result": state.get("dpcli_result"),
+    }
+    snapshot = state.get("dpcli_snapshot")
+    if isinstance(snapshot, dict):
+        data = snapshot.get("data") or {}
+        index = data.get("index") if isinstance(data, dict) else {}
+        if isinstance(index, dict):
+            context["snapshot"] = {
+                "page": data.get("page"),
+                "page_identity": data.get("page_identity"),
+                "interactable_elements": (index.get("interactable_elements") or [])[:30],
+                "data_regions": (index.get("data_regions") or [])[:5],
+                "surface_index": (index.get("surface_index") or [])[:40],
+                "stats": index.get("stats"),
+            }
+    else:
+        context["locator_suggestions"] = state.get("locator_suggestions", [])[-3:]
+        dom = state.get("dom_skeleton", "") or ""
+        if dom:
+            context["dom_skeleton_preview"] = dom[:4000]
+    return json.dumps(context, ensure_ascii=False, indent=2)
+
+
+def _validate_dpcli_action(action: Dict[str, Any]) -> Optional[str]:
+    skill = str(action.get("skill") or "").strip()
+    params = action.get("params") or {}
+    if not skill:
+        return "missing skill"
+    if not isinstance(params, dict):
+        return "params must be an object"
+    allowed = {
+        "open", "snapshot", "find", "click", "type", "expand",
+        "list-items", "extract", "resolve-locator", "session.inspect",
+    }
+    if skill not in allowed:
+        return f"unsupported skill: {skill}"
+    if skill == "open" and not params.get("url"):
+        return "open requires params.url"
+    if skill == "type" and not params.get("text"):
+        return "type requires params.text"
+    if skill in {"click", "type"} and not (params.get("ref") or params.get("locator")):
+        return f"{skill} requires ref or locator"
+    if skill in {"expand", "resolve-locator"} and not params.get("ref"):
+        return f"{skill} requires ref"
+    if skill == "list-items" and not params.get("group_ref"):
+        return "list-items requires group_ref"
+    if skill == "extract" and not (params.get("target_ref") or params.get("ref")):
+        return "extract requires target_ref"
+    return None
+
+
+def _dpcli_action_coder_node(state: AgentState, config: RunnableConfig, llm) -> Command:
+    plan = state.get("plan", "")
+    prompt = CODER_TASK_WRAPPER.format(
+        plan=plan,
+        base_prompt=DPCLI_ACTION_GEN_PROMPT.replace(
+            "{context}", _dpcli_action_context(state)),
+    )
+    response = llm.invoke([HumanMessage(content=prompt)])
+    action = _extract_json_object(getattr(response, "content", response))
+    validation_error = _validate_dpcli_action(action or {})
+
+    if validation_error:
+        retry_count = state.get("coder_retry_count", 0)
+        if retry_count < 2:
+            return Command(
+                update={
+                    "messages": [AIMessage(content=f"【dp_cli action生成失败】{validation_error}")],
+                    "coder_retry_count": retry_count + 1,
+                    "execution_mode": "dp_cli",
+                    "error_type": "dpcli_action_json",
+                    "reflections": [f"dp_cli action JSON invalid: {validation_error}"],
+                },
+                goto="Coder",
+            )
+        logger.info("   ⚠️ dp_cli action 连续生成失败，回退 Python Coder")
+        return Command(update={
+            "execution_mode": "python_code",
+            "generated_action": None,
+            "_action_source": None,
+            "_dpcli_action_disabled": True,
+        }, goto="Coder")
+
+    return Command(
+        update={
+            "messages": [AIMessage(content=f"【dp_cli action生成】\n{json.dumps(action, ensure_ascii=False, indent=2)}")],
+            "generated_action": action,
+            "generated_code": None,
+            "execution_mode": "dp_cli",
+            "coder_retry_count": 0,
+            "_action_source": "llm",
+            "_code_source": None,
+            "_dpcli_action_disabled": False,
+        },
+        goto="Executor",
+    )
+
+
+def coder_node(state: AgentState, config: RunnableConfig, llm) -> Command[Literal["Executor", "Coder"]]:
     """[Coder] 编写代码"""
     logger.info("\n💻 [Coder] 正在编写代码...")
+
+    if _should_use_dpcli_action(state):
+        logger.info("   -> Coder 使用 dp_cli action JSON 模式")
+        return _dpcli_action_coder_node(state, config, llm)
 
     plan = state.get("plan", "")
 

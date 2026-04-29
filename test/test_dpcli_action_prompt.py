@@ -1,0 +1,66 @@
+import unittest
+
+import test_dpcli_executor_node  # noqa: F401 - installs lightweight dependency stubs
+from core.nodes import _extract_json_object, _validate_dpcli_action, coder_node
+
+
+class _Response:
+    def __init__(self, content):
+        self.content = content
+
+
+class _LLM:
+    def __init__(self, content):
+        self.content = content
+
+    def invoke(self, _messages):
+        return _Response(self.content)
+
+
+class DPCLIActionPromptTests(unittest.TestCase):
+    def test_extract_json_object_from_fenced_json(self):
+        parsed = _extract_json_object('```json\n{"skill":"click","params":{"ref":"e1"}}\n```')
+
+        self.assertEqual(parsed["skill"], "click")
+        self.assertEqual(parsed["params"]["ref"], "e1")
+
+    def test_validate_rejects_click_without_target(self):
+        self.assertEqual(
+            _validate_dpcli_action({"skill": "click", "params": {}}),
+            "click requires ref or locator",
+        )
+
+    def test_coder_outputs_dpcli_action(self):
+        state = {
+            "plan": "点击搜索按钮",
+            "execution_mode": "dp_cli",
+            "current_url": "https://example.test",
+            "dpcli_snapshot": {
+                "data": {
+                    "page": {"url": "https://example.test"},
+                    "index": {"interactable_elements": [{"ref": "e1", "role": "button", "name": "Search"}]},
+                }
+            },
+        }
+        llm = _LLM('{"skill":"click","params":{"ref":"e1"},"reason":"search"}')
+
+        command = coder_node(state, {"configurable": {}}, llm)
+
+        self.assertEqual(command.goto, "Executor")
+        self.assertEqual(command.update["execution_mode"], "dp_cli")
+        self.assertEqual(command.update["generated_action"]["skill"], "click")
+        self.assertIsNone(command.update["generated_code"])
+
+    def test_invalid_action_retries_coder(self):
+        state = {"plan": "点击搜索按钮", "execution_mode": "dp_cli", "coder_retry_count": 0}
+        llm = _LLM('{"skill":"click","params":{},"reason":"bad"}')
+
+        command = coder_node(state, {"configurable": {}}, llm)
+
+        self.assertEqual(command.goto, "Coder")
+        self.assertEqual(command.update["coder_retry_count"], 1)
+        self.assertEqual(command.update["error_type"], "dpcli_action_json")
+
+
+if __name__ == "__main__":
+    unittest.main()
