@@ -1735,12 +1735,19 @@ def planner_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lite
                     "finished_steps": None,         # 清空历史步骤
                     "reflections": None,            # 清空反思记录
                     "generated_code": None,         # 清空生成的代码
+                    "generated_action": None,
+                    "execution_mode": None,
+                    "dpcli_result": None,
+                    "dpcli_snapshot": None,
                     "execution_log": None,          # 清空执行日志
                     "verification_result": None,    # 清空验收结果
                     "error": None,                  # 清空错误信息
                     "error_type": None,             # 清空错误类型
                     "coder_retry_count": 0,         # 重置重试计数
                     "_code_source": None,           # 清空代码来源
+                    "_action_source": None,
+                    "_action_cache_hit_id": None,
+                    "_failed_action_cache_ids": [],
                     "_cache_failed_this_round": False,  # 重置缓存标记
                     "_cache_hit_id": None,          # 清空 CodeCache 命中 ID
                     "_failed_code_cache_ids": [],   # 清空 CodeCache 失败黑名单
@@ -1939,15 +1946,116 @@ def coder_node(state: AgentState, config: RunnableConfig, llm) -> Command[Litera
         update={
             "messages": [AIMessage(content=f"【代码生成】\n{response.content}")],
             "generated_code": code,
-            "_code_source": "llm"
+            "generated_action": None,
+            "execution_mode": "python_code",
+            "_code_source": "llm",
+            "_action_source": None,
         },
         goto="Executor"
     )
 
 
-def executor_node(state: AgentState, config: RunnableConfig) -> Command[Literal["Verifier", "Coder", "Planner", "ErrorHandler"]]:
+def _dpcli_result_url(result: Dict[str, Any]) -> str:
+    data = result.get("data") if isinstance(result, dict) else {}
+    if not isinstance(data, dict):
+        return ""
+    page = data.get("page")
+    if isinstance(page, dict):
+        return str(page.get("url") or "")
+    return ""
+
+
+def _dpcli_error(result: Dict[str, Any]) -> Dict[str, Any]:
+    error = result.get("error") if isinstance(result, dict) else {}
+    return error if isinstance(error, dict) else {"code": "unknown", "message": str(error or "")}
+
+
+def _dpcli_failure_goto(error_code: str) -> str:
+    if error_code in {"ref_stale", "ref_not_found", "element_not_found", "element_not_interactable"}:
+        return "Observer"
+    if error_code in {"invalid_ref_type", "invalid_input", "invalid_action"}:
+        return "Coder"
+    return "ErrorHandler"
+
+
+def _executor_dpcli_branch(state: AgentState, config: RunnableConfig) -> Command:
+    action = state.get("generated_action")
+    if not isinstance(action, dict):
+        reason = "generated_action is missing or not a JSON object"
+        return Command(
+            update={
+                "messages": [AIMessage(content=f"【dp_cli动作无效】{reason}")],
+                "execution_log": reason,
+                "error_type": "dpcli_invalid_action",
+                "verification_result": _build_verification_result(
+                    is_success=False,
+                    is_done=False,
+                    summary=reason,
+                    source="executor",
+                    failure_scope="local",
+                    failed_action=str(action),
+                    evidence=reason,
+                    fix_hint="重新生成结构化 dp_cli action JSON",
+                ),
+            },
+            goto="Coder",
+        )
+
+    from config import DPCLI_HEADLESS, DPCLI_SESSION
+    from skills.dpcli_executor import DPCLIExecutor
+
+    session = state.get("dpcli_session") or DPCLI_SESSION
+    executor = DPCLIExecutor(session=session, headless=DPCLI_HEADLESS)
+    result = executor.execute_action(action)
+    result_log = json.dumps(result, ensure_ascii=False, indent=2)
+    current_url = _dpcli_result_url(result) or state.get("current_url", "")
+    update: Dict[str, Any] = {
+        "messages": [AIMessage(content=f"【dp_cli执行报告】\n{result_log}")],
+        "execution_log": result_log,
+        "dpcli_result": result,
+        "dpcli_session": session,
+        "current_url": current_url,
+    }
+    if result.get("action") == "snapshot" and result.get("ok"):
+        update["dpcli_snapshot"] = result
+
+    if result.get("ok"):
+        update.update({
+            "coder_retry_count": 0,
+            "error_type": None,
+        })
+        return Command(update=update, goto="Verifier")
+
+    error = _dpcli_error(result)
+    error_code = str(error.get("code") or "unknown")
+    route = _dpcli_failure_goto(error_code)
+    params = action.get("params") or {}
+    update.update({
+        "error": str(error.get("message") or error_code),
+        "error_type": f"dpcli_{error_code}",
+        "reflections": [f"dp_cli action failed: {error_code}"],
+        "verification_result": _build_verification_result(
+            is_success=False,
+            is_done=False,
+            summary=f"dp_cli action failed: {error_code}",
+            source="executor",
+            failure_scope="local",
+            failed_action=json.dumps(action, ensure_ascii=False),
+            failed_locator=str(params.get("ref") or params.get("locator") or ""),
+            evidence=json.dumps(error, ensure_ascii=False),
+            fix_hint="ref 失效或元素不可用时请重新 snapshot；参数无效时重新生成 action",
+        ),
+    })
+    return Command(update=update, goto=route)
+
+
+def executor_node(state: AgentState, config: RunnableConfig) -> Command[Literal["Verifier", "Coder", "Planner", "Observer", "ErrorHandler"]]:
     """[Executor] 执行代码，并根据 _code_source 和错误类型进行分类路由"""
     logger.info("\n⚡ [Executor] 正在执行代码...")
+    if state.get("execution_mode") == "dp_cli":
+        logger.info("   -> execution_mode=dp_cli, 使用结构化 action 执行")
+        return _executor_dpcli_branch(state, config)
+
     tab = _get_tab(config)
     code = state.get("generated_code", "")
     code_source = state.get("_code_source", "llm")

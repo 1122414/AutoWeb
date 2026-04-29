@@ -2,6 +2,7 @@ import os
 import sys
 import uuid
 import re
+import json
 import traceback
 from datetime import datetime
 from typing import Any, Dict, List
@@ -94,6 +95,11 @@ def print_step_output(event):
             code_preview = updates['generated_code'][:100].replace('\n', ' ')
             print(f"   💻 Generated Code: {code_preview}...")
 
+        if "generated_action" in updates and updates["generated_action"]:
+            action_preview = json.dumps(
+                updates["generated_action"], ensure_ascii=False)
+            print(f"   🧭 Generated Action: {action_preview[:160]}...")
+
         verification = updates.get("verification_result") or {}
         if verification:
             is_success = bool(verification.get("is_success", False))
@@ -173,11 +179,26 @@ def _build_manual_verification_result(
 
 def _detect_executor_forced_reasons(values: dict) -> List[str]:
     reasons: List[str] = []
+    execution_mode = values.get("execution_mode") or "python_code"
+    action = values.get("generated_action") or {}
     code = values.get("generated_code", "") or ""
-    if not code:
-        return reasons
 
-    if HITL_FORCE_EXEC_HIGH_RISK:
+    if execution_mode == "dp_cli" and isinstance(action, dict):
+        skill = str(action.get("skill") or "").strip()
+        params = action.get("params") or {}
+        if skill == "eval":
+            reasons.append("High-risk dp_cli action: eval")
+        if skill == "open" and isinstance(params, dict):
+            url = str(params.get("url") or "").strip().lower()
+            if url and not url.startswith(("http://", "https://", "about:", "file:")):
+                reasons.append("High-risk dp_cli open URL scheme")
+        if skill == "batch-detail-extract" and isinstance(params, dict):
+            items = params.get("items") or []
+            limit = params.get("limit")
+            if isinstance(items, list) and len(items) > 100 and not limit:
+                reasons.append("Large dp_cli detail batch without limit")
+
+    if code and HITL_FORCE_EXEC_HIGH_RISK:
         for label, pattern in HITL_EXEC_HIGH_RISK_RULES:
             if re.search(pattern, code, re.IGNORECASE):
                 reasons.append(f"High-risk code action: {label}")
@@ -188,7 +209,7 @@ def _detect_executor_forced_reasons(values: dict) -> List[str]:
         reasons.append(
             f"Consecutive step failures too high: {step_fail_count}")
 
-    if HITL_FORCE_EXEC_IRREVERSIBLE:
+    if code and HITL_FORCE_EXEC_IRREVERSIBLE:
         for label, pattern in HITL_EXEC_IRREVERSIBLE_RULES:
             if re.search(pattern, code, re.IGNORECASE):
                 reasons.append(f"Irreversible page action: {label}")
@@ -281,16 +302,27 @@ def interactive_loop(app, browser_instance, llm, observer):
                         continue
 
                     current_code = snapshot.values.get("generated_code", "")
+                    current_action = snapshot.values.get("generated_action") or {}
+                    execution_mode = snapshot.values.get(
+                        "execution_mode") or "python_code"
                     if current_code:
                         print("\n📜 当前生成的代码:")
                         print("-" * 50)
                         print(
                             current_code[:500] + ("..." if len(current_code) > 500 else ""))
                         print("-" * 50)
+                    if execution_mode == "dp_cli" and current_action:
+                        action_text = json.dumps(
+                            current_action, ensure_ascii=False, indent=2)
+                        print("\n📋 当前生成的 dp_cli action:")
+                        print("-" * 50)
+                        print(action_text[:1000] +
+                              ("..." if len(action_text) > 1000 else ""))
+                        print("-" * 50)
 
                     print("\n   命令选项:")
                     print("   'c' 或 'continue' - 批准执行")
-                    print("   'e' 或 'edit'     - 编辑代码后执行")
+                    print("   'e' 或 'edit'     - 编辑代码/action 后执行")
                     print("   'hitl on/off'     - 切换 HITL 模式")
                     print("   'q' 或 'quit'     - 退出")
                     print("   其他内容          - 作为新指令")
@@ -316,21 +348,43 @@ def interactive_loop(app, browser_instance, llm, observer):
                         continue
 
                     elif user_input.lower() in ("e", "edit"):
-                        edit_file = "temp_code_edit.py"
+                        is_dpcli_action = execution_mode == "dp_cli"
+                        edit_file = "temp_action_edit.json" if is_dpcli_action else "temp_code_edit.py"
                         with open(edit_file, "w", encoding="utf-8") as f:
-                            f.write(current_code)
+                            if is_dpcli_action:
+                                json.dump(current_action, f,
+                                          ensure_ascii=False, indent=2)
+                            else:
+                                f.write(current_code)
                         print(f"   📜 代码已保存到 {edit_file}")
                         print(f"   请使用编辑器修改文件，保存后按 Enter 继续...")
                         input("   [按 Enter 继续]")
 
                         with open(edit_file, "r", encoding="utf-8") as f:
-                            edited_code = f.read()
+                            edited_content = f.read()
 
-                        if edited_code != current_code:
+                        if is_dpcli_action:
+                            try:
+                                edited_action = json.loads(edited_content)
+                            except json.JSONDecodeError as exc:
+                                print(f"   ❌ action JSON 解析失败: {exc}")
+                                continue
+                            if edited_action != current_action:
+                                print("   ✅ 检测到 action 修改，正在更新状态...")
+                                app.update_state(
+                                    config,
+                                    {"generated_action": edited_action,
+                                     "execution_mode": "dp_cli"},
+                                    as_node="Coder",
+                                )
+                                print("   🚀 开始执行修改后的 action...")
+                            else:
+                                print("   ℹ️ action 未修改，继续执行原 action...")
+                        elif edited_content != current_code:
                             print("   ✅ 检测到代码修改，正在更新状态...")
                             # 更新状态并使用 as_node="Coder" 保持一致性
                             app.update_state(
-                                config, {"generated_code": edited_code}, as_node="Coder")
+                                config, {"generated_code": edited_content}, as_node="Coder")
                             print("   🚀 开始执行修改后的代码...")
                         else:
                             print("   ℹ️ 代码未修改，继续执行原代码...")
@@ -557,6 +611,13 @@ def interactive_loop(app, browser_instance, llm, observer):
                 "_cache_failed_this_round": False,
                 "_cache_hit_id": None,
                 "_failed_code_cache_ids": [],
+                "generated_action": None,
+                "execution_mode": None,
+                "dpcli_result": None,
+                "dpcli_snapshot": None,
+                "_action_source": None,
+                "_action_cache_hit_id": None,
+                "_failed_action_cache_ids": [],
                 "_failed_dom_cache_ids": [],
             }
 

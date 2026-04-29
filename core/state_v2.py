@@ -70,6 +70,11 @@ class AgentState(EnvState, TaskState):
     # 协作流转产生的临时数据 (由于 Node 是纯函数，这些通常作为 Node 的返回值传递，
     # 但为了方便下游 Node 读取，也可以存在 State 中，但不建议大量依赖)
     generated_code: Optional[str]       # Coder 生成的最新代码
+    generated_action: Optional[Dict[str, Any]]
+    execution_mode: Optional[str]       # "python_code" | "dp_cli" | None
+    dpcli_session: Optional[str]
+    dpcli_result: Optional[Dict[str, Any]]
+    dpcli_snapshot: Optional[Dict[str, Any]]
     execution_log: Optional[str]        # Executor 运行代码后的日志/返回值
 
     # Verifier 验收结果（供 Human-in-the-Loop 覆盖）
@@ -85,6 +90,9 @@ class AgentState(EnvState, TaskState):
 
     # 代码缓存控制
     _code_source: Optional[str]         # 代码来源: "cache" | "llm" | None
+    _action_source: Optional[str]
+    _action_cache_hit_id: Optional[str]
+    _failed_action_cache_ids: List[str]
     _cache_failed_this_round: bool      # 本轮缓存代码是否已失败（用于防止死循环）
     _cache_hit_id: Optional[str]        # 缓存命中记录 ID（用于失败失效）
     _failed_code_cache_ids: List[str]   # 当前失败窗口内禁用的 CodeCache 命中 ID
