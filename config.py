@@ -143,6 +143,10 @@ DPCLI_BATCH_TIMEOUT_SECONDS = float(
 DPCLI_OBSERVER_ENABLED = _env_bool("DPCLI_OBSERVER_ENABLED", "False")
 DPCLI_OBSERVER_FALLBACK_TO_DOM = _env_bool(
     "DPCLI_OBSERVER_FALLBACK_TO_DOM", "True")
+ACTION_CACHE_ENABLED = _env_bool("ACTION_CACHE_ENABLED", "False")
+ACTION_CACHE_THRESHOLD = float(os.getenv("ACTION_CACHE_THRESHOLD", "0.75"))
+ACTION_CACHE_STORE_PATH = os.getenv(
+    "ACTION_CACHE_STORE_PATH", os.path.join(os.getenv("OUTPUT_DIR", "./output"), "action_cache.json"))
 
 # ==============================================================================
 # 存储与输出路径

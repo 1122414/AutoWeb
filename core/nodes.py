@@ -628,6 +628,9 @@ def cache_lookup_node(state: AgentState, config: RunnableConfig) -> Command[Lite
         CODE_CACHE_DRY_RUN_TIMEOUT_SECONDS,
         CODE_CACHE_ENABLED,
         CODE_CACHE_THRESHOLD,
+        ACTION_CACHE_ENABLED,
+        ACTION_CACHE_THRESHOLD,
+        DPCLI_ENABLED,
     )
 
     # 检查本轮是否已有缓存失败（防止死循环）
@@ -639,8 +642,8 @@ def cache_lookup_node(state: AgentState, config: RunnableConfig) -> Command[Lite
         )
 
     # 检查是否启用缓存
-    if not CODE_CACHE_ENABLED:
-        logger.info("⏭️ [CacheLookup] 代码缓存已禁用，跳过检索")
+    if not CODE_CACHE_ENABLED and not (DPCLI_ENABLED and ACTION_CACHE_ENABLED):
+        logger.info("⏭️ [CacheLookup] 缓存已禁用，跳过检索")
         return Command(
             update={"_code_source": "llm"},
             goto="Coder"
@@ -662,6 +665,43 @@ def cache_lookup_node(state: AgentState, config: RunnableConfig) -> Command[Lite
             update={"_code_source": "llm"},
             goto="Coder"
         )
+
+    if DPCLI_ENABLED and ACTION_CACHE_ENABLED:
+        try:
+            from skills.action_cache import action_cache_manager
+            failed_action_ids = set(state.get("_failed_action_cache_ids", []) or [])
+            hits = [
+                hit for hit in action_cache_manager.search(
+                    user_task=user_task,
+                    goal=plan,
+                    url=current_url,
+                    snapshot_view=state.get("dpcli_snapshot_view"),
+                    top_k=5,
+                )
+                if hit.id not in failed_action_ids
+            ]
+            if hits and hits[0].score >= ACTION_CACHE_THRESHOLD:
+                best_hit = hits[0]
+                logger.info(
+                    f"✅ [ActionCache] 命中 action 缓存: score={best_hit.score:.4f}")
+                return Command(
+                    update={
+                        "messages": [AIMessage(content=f"【ActionCache命中】复用历史 dp_cli action (Score: {best_hit.score:.4f})")],
+                        "generated_action": best_hit.action,
+                        "generated_code": None,
+                        "execution_mode": "dp_cli",
+                        "_action_source": "action_cache",
+                        "_action_cache_hit_id": best_hit.id,
+                        "_code_source": None,
+                    },
+                    goto="Executor",
+                )
+        except Exception as action_cache_exc:
+            logger.info(f"   ⚠️ [ActionCache] 检索异常: {action_cache_exc}")
+
+    if not CODE_CACHE_ENABLED:
+        logger.info("   ⏭️ [CacheLookup] CodeCache 关闭且 ActionCache 未命中")
+        return Command(update={"_code_source": "llm"}, goto="Coder")
 
     try:
         from skills.code_cache import code_cache_manager
@@ -2294,6 +2334,18 @@ def _executor_dpcli_branch(state: AgentState, config: RunnableConfig) -> Command
             fix_hint="ref 失效或元素不可用时请重新 snapshot；参数无效时重新生成 action",
         ),
     })
+    if state.get("_action_source") == "action_cache":
+        failed_ids = list(state.get("_failed_action_cache_ids", []) or [])
+        hit_id = state.get("_action_cache_hit_id")
+        if hit_id and hit_id not in failed_ids:
+            failed_ids.append(hit_id)
+        update["_failed_action_cache_ids"] = failed_ids
+        try:
+            from skills.action_cache import action_cache_manager
+            if hit_id:
+                action_cache_manager.record_failure(hit_id, reason=error_code)
+        except Exception as cache_exc:
+            logger.info(f"   ⚠️ [ActionCache] 记录失败异常: {cache_exc}")
     return Command(update=update, goto=route)
 
 
@@ -2654,6 +2706,22 @@ def verifier_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lit
         updates["_cache_hit_id"] = None
 
         if state.get("execution_mode") == "dp_cli":
+            try:
+                from config import ACTION_CACHE_ENABLED
+                if ACTION_CACHE_ENABLED and state.get("_action_source") != "action_cache":
+                    from skills.action_cache import action_cache_manager
+                    cache_id = action_cache_manager.save(
+                        user_task=task,
+                        goal=current_plan,
+                        url=current_url,
+                        action=state.get("generated_action") or {},
+                        snapshot_view=state.get("dpcli_snapshot_view"),
+                        result_summary=summary,
+                    )
+                    logger.info(f"   💾 [ActionCache] 已写入: {cache_id}")
+            except Exception as action_store_exc:
+                logger.info(f"   ⚠️ [ActionCache] 写入异常: {action_store_exc}")
+
             try:
                 from skills.dpcli_crawl_policy import (
                     build_detail_batch_action,
