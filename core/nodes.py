@@ -1833,6 +1833,7 @@ def planner_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lite
                     "dpcli_result": None,
                     "dpcli_snapshot": None,
                     "dpcli_snapshot_view": None,
+                    "dpcli_detail_batch_ran": False,
                     "execution_log": None,          # 清空执行日志
                     "verification_result": None,    # 清空验收结果
                     "error": None,                  # 清空错误信息
@@ -2532,7 +2533,7 @@ def executor_node(state: AgentState, config: RunnableConfig) -> Command[Literal[
         )
 
 
-def verifier_node(state: AgentState, config: RunnableConfig, llm) -> Command[Literal["Observer", "Planner", "RAGNode"]]:
+def verifier_node(state: AgentState, config: RunnableConfig, llm) -> Command[Literal["Observer", "Planner", "Executor", "RAGNode"]]:
     """[Verifier] 验收并决定下一步"""
     logger.info("\n🔍 [Verifier] 正在验收...")
 
@@ -2651,6 +2652,30 @@ def verifier_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lit
         updates["_failed_code_cache_ids"] = []
         updates["_failed_dom_cache_ids"] = []
         updates["_cache_hit_id"] = None
+
+        if state.get("execution_mode") == "dp_cli":
+            try:
+                from skills.dpcli_crawl_policy import (
+                    build_detail_batch_action,
+                    should_run_detail_batch,
+                )
+                policy_state = dict(state)
+                policy_state.update(updates)
+                if should_run_detail_batch(policy_state):
+                    detail_action = build_detail_batch_action(policy_state)
+                    item_count = len(detail_action.get("params", {}).get("items", []))
+                    logger.info(
+                        f"   📦 dp_cli extract OK + 详情任务({item_count}) → batch-detail-extract")
+                    updates.update({
+                        "generated_action": detail_action,
+                        "generated_code": None,
+                        "execution_mode": "dp_cli",
+                        "dpcli_detail_batch_ran": True,
+                        "_action_source": "policy",
+                    })
+                    return Command(update=updates, goto="Executor")
+            except Exception as policy_exc:
+                logger.info(f"   ⚠️ dp_cli 详情批处理策略跳过: {policy_exc}")
 
         # 检查是否需要存代码或策略到缓存 → RAGNode
         code = state.get("generated_code", "")

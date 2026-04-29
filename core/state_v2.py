@@ -76,6 +76,7 @@ class AgentState(EnvState, TaskState):
     dpcli_result: Optional[Dict[str, Any]]
     dpcli_snapshot: Optional[Dict[str, Any]]
     dpcli_snapshot_view: Optional[Dict[str, Any]]
+    dpcli_detail_batch_ran: bool
     execution_log: Optional[str]        # Executor 运行代码后的日志/返回值
 
     # Verifier 验收结果（供 Human-in-the-Loop 覆盖）
