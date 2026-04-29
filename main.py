@@ -615,6 +615,7 @@ def interactive_loop(app, browser_instance, llm, observer):
                 "execution_mode": None,
                 "dpcli_result": None,
                 "dpcli_snapshot": None,
+                "dpcli_snapshot_view": None,
                 "_action_source": None,
                 "_action_cache_hit_id": None,
                 "_failed_action_cache_ids": [],

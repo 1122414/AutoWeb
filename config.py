@@ -140,6 +140,9 @@ DPCLI_HEADLESS = _env_bool("DPCLI_HEADLESS", "False")
 DPCLI_TIMEOUT_SECONDS = float(os.getenv("DPCLI_TIMEOUT_SECONDS", "60"))
 DPCLI_BATCH_TIMEOUT_SECONDS = float(
     os.getenv("DPCLI_BATCH_TIMEOUT_SECONDS", "900"))
+DPCLI_OBSERVER_ENABLED = _env_bool("DPCLI_OBSERVER_ENABLED", "False")
+DPCLI_OBSERVER_FALLBACK_TO_DOM = _env_bool(
+    "DPCLI_OBSERVER_FALLBACK_TO_DOM", "True")
 
 # ==============================================================================
 # 存储与输出路径

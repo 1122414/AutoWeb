@@ -1057,7 +1057,95 @@ def error_handler_node(state: AgentState, config: RunnableConfig, llm) -> Comman
         return Command(update=updates, goto="Observer")
 
 
-def observer_node(state: AgentState, config: RunnableConfig, observer) -> Command[Literal["Planner", "Observer"]]:
+def _compact_dpcli_snapshot(snapshot: Dict[str, Any], last_result: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    data = snapshot.get("data") if isinstance(snapshot, dict) else {}
+    if not isinstance(data, dict):
+        return {"error": "invalid dp_cli snapshot"}
+    index = data.get("index") if isinstance(data.get("index"), dict) else {}
+    return {
+        "page": data.get("page") or {},
+        "page_identity": data.get("page_identity") or {},
+        "interactable_elements": (index.get("interactable_elements") or [])[:30],
+        "data_regions": (index.get("data_regions") or [])[:5],
+        "surface_index": (index.get("surface_index") or [])[:40],
+        "stats": index.get("stats") or {},
+        "last_result": last_result,
+    }
+
+
+def _render_dpcli_snapshot_text(view: Dict[str, Any]) -> str:
+    return json.dumps({
+        "source": "dp_cli_snapshot",
+        "page": view.get("page"),
+        "page_identity": view.get("page_identity"),
+        "interactable_elements": view.get("interactable_elements"),
+        "data_regions": view.get("data_regions"),
+        "surface_index": view.get("surface_index"),
+        "stats": view.get("stats"),
+        "last_result": view.get("last_result"),
+    }, ensure_ascii=False, indent=2)
+
+
+def _observer_dpcli_snapshot(state: AgentState) -> Optional[Command]:
+    from config import (
+        DPCLI_HEADLESS,
+        DPCLI_OBSERVER_ENABLED,
+        DPCLI_OBSERVER_FALLBACK_TO_DOM,
+        DPCLI_SESSION,
+    )
+    if not DPCLI_OBSERVER_ENABLED:
+        return None
+
+    from skills.dpcli_executor import DPCLIExecutor
+
+    session = state.get("dpcli_session") or DPCLI_SESSION
+    result = DPCLIExecutor(session=session, headless=DPCLI_HEADLESS).snapshot(
+        mode="agent_summary")
+    if result.get("ok"):
+        view = _compact_dpcli_snapshot(result, state.get("dpcli_result"))
+        page = view.get("page") or {}
+        text = _render_dpcli_snapshot_text(view)
+        return Command(
+            update={
+                "_cache_failed_this_round": False,
+                "_observer_source": "dp_cli",
+                "_dom_cache_hit_id": None,
+                "dpcli_session": session,
+                "dpcli_snapshot": result,
+                "dpcli_snapshot_view": view,
+                "dom_skeleton": text,
+                "dom_hash": hashlib.md5(text.encode()).hexdigest(),
+                "current_url": str(page.get("url") or state.get("current_url", "")),
+            },
+            goto="Planner",
+        )
+
+    error = _dpcli_error(result)
+    logger.info(f"   ⚠️ [Observer] dp_cli snapshot failed: {error}")
+    if DPCLI_OBSERVER_FALLBACK_TO_DOM:
+        return None
+
+    return Command(
+        update={
+            "_observer_source": "dp_cli",
+            "dpcli_result": result,
+            "verification_result": _build_verification_result(
+                is_success=False,
+                is_done=False,
+                summary="dp_cli snapshot failed",
+                source="executor",
+                failure_scope="global",
+                evidence=json.dumps(error, ensure_ascii=False),
+                fix_hint="检查 dp_cli 浏览器会话或关闭 DPCLI_OBSERVER_ENABLED 回退旧 Observer",
+            ),
+            "error": str(error.get("message") or error.get("code") or "dp_cli snapshot failed"),
+            "error_type": f"dpcli_{error.get('code') or 'snapshot_failed'}",
+        },
+        goto="ErrorHandler",
+    )
+
+
+def observer_node(state: AgentState, config: RunnableConfig, observer) -> Command[Literal["Planner", "Observer", "ErrorHandler"]]:
     """[Observer] 环境感知节点：捕获 DOM 并生成定位策略"""
     logger.info("\n👁️ [Observer] 正在感知环境...")
 
@@ -1067,6 +1155,10 @@ def observer_node(state: AgentState, config: RunnableConfig, observer) -> Comman
         "_observer_source": None,
         "_dom_cache_hit_id": None,
     }
+
+    dpcli_command = _observer_dpcli_snapshot(state)
+    if dpcli_command is not None:
+        return dpcli_command
 
     # 获取浏览器实例
     browser = config["configurable"].get("browser")
@@ -1740,6 +1832,7 @@ def planner_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lite
                     "execution_mode": None,
                     "dpcli_result": None,
                     "dpcli_snapshot": None,
+                    "dpcli_snapshot_view": None,
                     "execution_log": None,          # 清空执行日志
                     "verification_result": None,    # 清空验收结果
                     "error": None,                  # 清空错误信息
