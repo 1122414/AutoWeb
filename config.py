@@ -130,6 +130,18 @@ BROWSER_ARGS = [
 ]
 
 # ==============================================================================
+# dp_cli adapter config
+# ==============================================================================
+DPCLI_ENABLED = _env_bool("DPCLI_ENABLED", "False")
+DPCLI_CWD = os.getenv("DPCLI_CWD", r"E:\GitHub\Repositories\drissionpage-cli")
+DPCLI_PYTHON = os.getenv("DPCLI_PYTHON", "python")
+DPCLI_SESSION = os.getenv("DPCLI_SESSION", "autoweb")
+DPCLI_HEADLESS = _env_bool("DPCLI_HEADLESS", "False")
+DPCLI_TIMEOUT_SECONDS = float(os.getenv("DPCLI_TIMEOUT_SECONDS", "60"))
+DPCLI_BATCH_TIMEOUT_SECONDS = float(
+    os.getenv("DPCLI_BATCH_TIMEOUT_SECONDS", "900"))
+
+# ==============================================================================
 # 存储与输出路径
 # ==============================================================================
 
