@@ -1,201 +1,276 @@
-# 🌐 AutoWeb - Intelligent Web Automation Agent (V6)
-
-> 🚀 **V6 Update**: Introduced **Multi-Vector Code Cache**, **Dom Cache**, **Enhanced Planner**, and **Dedicated RAG Node** for robust, efficient, and intelligent web automation.
-
-AutoWeb 是一个基于 **LangGraph** 的多节点协作 AI Agent，能够理解自然语言指令，自动规划、执行复杂的网页操作任务。V6 版本显著提升了执行效率和准确性，通过双层缓存机制（DomCache + CodeCache）实现秒级响应和经验复用。
+# AutoWeb
 
 ![Python](https://img.shields.io/badge/Python-3.11+-blue)
 ![LangGraph](https://img.shields.io/badge/LangGraph-0.2+-green)
 ![DrissionPage](https://img.shields.io/badge/DrissionPage-4.0+-orange)
 ![Milvus](https://img.shields.io/badge/Milvus-2.4+-red)
 
-## ✨ 核心特性 (V6)
+AutoWeb 是一个基于 LangGraph 的智能网页自动化 Agent。当前版本在原有 DrissionPage + Python Coder 执行链路之上，新增了 `dp_cli` 结构化动作模式：系统可以继续生成 Python 策略代码，也可以生成可审查、可缓存、可复用的 CLI Action JSON，由 `drissionpage-cli` 执行。
 
-| 特性                    | 描述                                                                                      |
-| ----------------------- | ----------------------------------------------------------------------------------------- |
-| 🧠**多节点协作**        | Observer → DomCache → Planner → CodeCache → Coder → Executor → Verifier 流水线架构        |
-| ⚡**双层缓存体系**      | **DomCache (L1)**: 秒级复用页面定位策略；**CodeCache (L2)**: 复用已验证的 Python 动作代码 |
-| 🔍**多向量检索**        | CodeCache 采用 Hybrid Search (Goal + URL + Locator + Task) + Weighted Ranker，精准召回    |
-| 🛡️**增强型 Planner**    | 具备任务终结感知能力（防止死循环），防御策略误导，支持 RAG 任务路由                       |
-| 📚**RAG 知识库**        | 独立的知识库读写节点，支持将爬取数据存入 Milvus 或进行 QA 问答                            |
-| 🔄**Command Pattern**   | 节点返回`Command(goto="NextNode")` 实现动态路由                                           |
-| 🧑‍💻**Human-in-the-Loop** | 关键操作前暂停，支持人工审批、编辑代码、覆盖验收结果                                      |
-| 💾**状态持久化**        | 基于 MemorySaver 的检查点机制，支持断点续传                                               |
+本次更新的重点不是简单替换执行器，而是把 AutoWeb 升级为双轨执行架构：
 
-## 🏗️ 架构设计 (Architecture)
+- `python_code` 模式：保留原有 Coder 生成 Python 代码、Executor 通过 `BrowserActor` 执行的能力。
+- `dp_cli` 模式：Coder 生成单步 Action JSON，Executor 通过 `DPCLIExecutor` 调用 `python -m dp_cli` 执行。
+- `ActionCache`：在 dp_cli 模式下缓存成功动作，用于替代一部分“重复写代码”的场景。
+- `dp_cli snapshot`：可选用 CLI 快照作为 Observer 的轻量观察输入，失败时可回退到原 DOM Observer。
+- `batch-detail-extract`：针对“列表页抓详情页”任务，Verifier 可在一次成功提取后继续生成批量详情动作。
 
-详细架构说明请参考 [graph_logic_v6.md](./graph_logic_v6.md)。
+## Current Status
+
+当前系统默认保持保守兼容：不开启环境变量时，AutoWeb 仍走原有 Python Coder + CodeCache + BrowserActor 路径。要试用新链路，需要在 `.env` 中显式开启 `DPCLI_ENABLED=True`，并配置本地 `drissionpage-cli` 仓库路径。
+
+## Architecture
 
 ```mermaid
 graph TD
     Start((Start)) --> Observer
+    Observer --> Planner
+    Planner --> Done{Task done?}
+    Done -- Yes --> End((End))
+    Done -- No --> CacheLookup
 
-    subgraph "Perception"
-        Observer --> DomCache
-        DomCache --Hit--> ObserverReturn
-        DomCache --Miss--> VisualAnalysis --> ObserverReturn
-    end
+    Planner -- Need knowledge --> RAGNode
+    RAGNode --> Observer
 
-    ObserverReturn --> Planner
+    CacheLookup --> ActionCache
+    ActionCache -- Hit --> Executor
+    ActionCache -- Miss --> CodeCache
+    CodeCache -- Hit --> Executor
+    CodeCache -- Miss --> Coder
 
-    subgraph "Decision"
-        Planner --> Check{Done?}
-        Check --Yes--> End((End))
-        Check --No--> Route{Type?}
-    end
+    Coder --> Mode{execution_mode}
+    Mode -- dp_cli --> ActionJSON[generated_action JSON]
+    Mode -- python_code --> PythonCode[generated_code Python]
 
-    Route --Action--> CacheLookup
-    Route --RAG--> RAGNode
+    ActionJSON --> Executor
+    PythonCode --> Executor
 
-    subgraph "Knowledge"
-        RAGNode <--> MilvusKB
-        RAGNode --> Observer
-    end
+    Executor -- dp_cli --> DPCLI[DPCLIExecutor]
+    Executor -- python_code --> BrowserActor[BrowserActor]
 
-    subgraph "Action"
-        CacheLookup --Hybrid Search--> CodeCache
-        CodeCache --Hit--> Executor
-        CodeCache --Miss--> Coder --> Executor
-        Executor --> Verifier
-        Verifier --Fail--> Planner
-        Verifier --Success--> Observer
-    end
+    DPCLI --> Verifier
+    BrowserActor --> Verifier
+    Verifier -- Continue --> Observer
+    Verifier -- Detail batch policy --> Executor
+    Verifier -- Complete --> End
 ```
 
-## 📂 目录结构
+## Core Features
 
-```
+| Capability | Current implementation |
+| --- | --- |
+| Multi-node workflow | `Observer -> Planner -> CacheLookup -> Coder -> Executor -> Verifier` |
+| Dual execution mode | `python_code` for legacy Python strategies, `dp_cli` for structured CLI actions |
+| Human-in-the-loop | Executor 前可人工审查 Python 代码或 Action JSON，Verifier 后可确认结果 |
+| DomCache | Observer 阶段缓存页面结构和语义观察 |
+| CodeCache | Python Coder 生成代码的历史复用链路 |
+| ActionCache | dp_cli 成功动作的轻量 JSON 缓存链路，支持失败命中黑名单 |
+| RAG | 通过 Milvus/RAG 为复杂页面任务补充知识 |
+| dp_cli snapshot | 可选使用 `snapshot` 作为轻量观察视图 |
+| Detail batch policy | 从列表抽取结果继续生成详情页批处理动作 |
+
+## Repository Layout
+
+```text
 AutoWeb/
-├── main.py                 # 主入口（交互循环 + HITL 处理）
-├── config.py               # 全局配置（LLM、Milvus、权重等）
+├── main.py                         # CLI 入口、交互循环、HITL 编辑逻辑
+├── config.py                       # 环境变量和全局配置
 ├── core/
-│   ├── graph_v2.py         # LangGraph 图构建
-│   ├── nodes.py            # 节点实现（Observer/Planner/Coder/Executor/Verifier）
-│   └── state_v2.py         # AgentState 类型定义
-├── skills/
-│   ├── observer.py         # 环境感知（Visual Analysis + DomCache）
-│   ├── code_cache.py       # [V6] 多向量代码缓存管理器
-│   ├── dom_cache.py        # [V6] DOM 策略缓存管理器
-│   ├── tool_rag.py         # RAG 工具封装
-│   ├── actor.py            # 代码执行沙箱
-│   └── vector_gateway.py   # 向量数据库网关
+│   ├── graph_v2.py                 # LangGraph 图构建
+│   ├── nodes.py                    # Observer/Planner/Coder/Executor/Verifier 节点
+│   └── state_v2.py                 # AgentState 状态 schema
+├── drivers/
+│   └── drission_driver.py          # DrissionPage 浏览器单例
 ├── prompts/
-│   ├── planner_prompts.py  # [V6] 增强版规划 Prompt
-│   ├── coder_prompts.py   # Coder Prompt
-│   ├── observer_prompts.py      # DOM 分析 Prompt
-│   └── rag_prompts.py      # RAG 相关 Prompt
-├── rag/
-│   ├── milvus_schema.py    # [V6] Milvus Schema 定义
-│   ├── retriever_qa.py     # 检索与问答实现
-│   └── field_registry.py   # 字段注册表
-└── drivers/
-    └── drission_driver.py  # 浏览器驱动封装
+│   ├── coder_prompts.py            # Python Coder prompt
+│   └── dpcli_action_prompts.py     # dp_cli Action JSON prompt
+├── skills/
+│   ├── actor.py                    # Python 策略执行器
+│   ├── observer.py                 # DOM 观察和 DomCache
+│   ├── code_cache.py               # Python CodeCache
+│   ├── action_cache.py             # dp_cli ActionCache
+│   ├── dpcli_executor.py           # dp_cli 子进程适配层
+│   ├── dpcli_crawl_policy.py       # 详情页批处理动作策略
+│   └── vector_gateway.py           # Milvus 封装
+├── rag/                            # RAG schema、retriever、QA
+├── scripts/
+│   └── smoke_dpcli_executor.py     # dp_cli 适配层冒烟脚本
+├── test/                           # unittest 测试
+├── browser_data/                   # 浏览器运行数据，gitignored
+├── logs/                           # 日志，gitignored
+└── output/                         # 生成产物和缓存，gitignored
 ```
 
-## 🚀 快速开始
+## Quick Start
 
-### 1. 环境准备
-
-确保已安装 [Milvus](https://milvus.io/) (Docker 或 Standalone) 以及 Python 3.11+。
-
-### 2. 安装依赖
+### 1. Install dependencies
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 3. 配置环境变量
+如果要试用 `dp_cli` 模式，请先准备本地 `drissionpage-cli` 仓库，并确保该环境能运行：
 
-创建 `.env` 文件：
-
-```env
-# --- LLM 配置 (支持 OpenAI, DashScope/Qwen, VolcEngine 等) ---
-# 示例：使用 DashScope (通义千问)
-BAILIAN_API_KEY=sk-xxxxxxxxxxxxxx
-BAILIAN_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
-BAILIAN_MODEL_NAME=qwen-plus
-
-# --- Milvus 配置 ---
-MILVUS_URI=http://localhost:19530
-MILVUS_TOKEN=root:Milvus
-
-# --- Code Cache 配置 (V6) ---
-CODE_CACHE_ENABLED=True
-CODE_CACHE_WEIGHT_GOAL=0.6
-CODE_CACHE_WEIGHT_LOCATOR=0.3
-CODE_CACHE_WEIGHT_URL=0.1
-CODE_CACHE_STAGE2_TASK_MIN_SIM=0.80
-CODE_CACHE_STAGE3_GOAL_MIN_SIM=0.88
-CODE_CACHE_DRY_RUN_ENABLED=True
-CODE_CACHE_DRY_RUN_TIMEOUT_SECONDS=0.8
-CODE_CACHE_DRY_RUN_POLL_INTERVAL_SECONDS=0.1
-
-# --- Dom Cache 配置 (V6) ---
-DOM_CACHE_ENABLED=True
-DOM_CACHE_STAGE2_TASK_MIN_SIM=0.80
-DOM_CACHE_STAGE3_SCORE_THRESHOLD=0.90
-DOM_CACHE_STEP_WINDOW=5
-
-# --- 缓存软删除黑名单 ---
-CACHE_SOFT_BLACKLIST_ENABLED=True
-CACHE_SOFT_BLACKLIST_BACKEND=redis
-CACHE_SOFT_BLACKLIST_REDIS_URL=redis://localhost:6379/0
-CACHE_SOFT_BLACKLIST_TTL_SECONDS=86400
+```bash
+python -m dp_cli --help
 ```
 
-### 4. 运行
+### 2. Configure `.env`
+
+基础 LLM、Milvus、浏览器配置仍沿用原项目设置。下面是本次更新新增或重点相关的配置：
+
+```env
+# --- dp_cli structured action mode ---
+DPCLI_ENABLED=False
+DPCLI_CWD=E:\GitHub\Repositories\drissionpage-cli
+DPCLI_PYTHON=python
+DPCLI_SESSION=autoweb
+DPCLI_HEADLESS=False
+DPCLI_TIMEOUT_SECONDS=60
+DPCLI_BATCH_TIMEOUT_SECONDS=900
+
+# --- Optional dp_cli observer snapshot ---
+DPCLI_OBSERVER_ENABLED=False
+DPCLI_OBSERVER_FALLBACK_TO_DOM=True
+
+# --- Optional dp_cli action cache ---
+ACTION_CACHE_ENABLED=False
+ACTION_CACHE_THRESHOLD=0.75
+ACTION_CACHE_STORE_PATH=./output/action_cache.json
+```
+
+建议按阶段开启：
+
+1. 先保持 `DPCLI_ENABLED=False`，确认原 Python 链路仍可运行。
+2. 设置 `DPCLI_ENABLED=True`，只验证单步动作生成和执行。
+3. 再开启 `DPCLI_OBSERVER_ENABLED=True`，验证快照观察质量。
+4. 最后开启 `ACTION_CACHE_ENABLED=True`，验证动作缓存复用。
+
+### 3. Run AutoWeb
 
 ```bash
 python main.py
 ```
 
-### 5. 使用示例
+## Execution Modes
 
-**场景：爬取 mard.gov.vn 搜索结果并存入知识库**
+### Python Code Mode
 
-```
-👤 Utils > (启动)
-👤 User > 打开 https://www.mard.gov.vn/en/Pages/default.aspx#，搜索 sea，然后爬取搜索到的全部信息存入知识库
+这是 AutoWeb 原有主链路。Coder 生成 Python 代码写入 `generated_code`，Executor 调用 `BrowserActor.execute_python_strategy()` 执行。
 
-🧠 [Planner] 正在制定计划...
-   Plan: 1. 在搜索框中输入 "sea" 并执行搜索
+适合：
 
-💻 [Coder] (Code Cache Miss) 正在编写代码...
-⚡ [Executor] 执行代码...
-✅ [Verifier] Verification Passed -> 写入 CodeCache
+- 复杂页面逻辑
+- 需要临时计算或多步控制流的任务
+- 还没有 dp_cli action 覆盖的动作类型
 
-(进入下一轮，页面刷新)
+### dp_cli Mode
 
-👁️ [Observer] (DomCache Miss) 分析结果页结构...
-🧠 [Planner] Plan: 2. 爬取当前页数据并保存
+dp_cli 模式下，Coder 不再生成 Python 代码，而是生成结构化 Action JSON 写入 `generated_action`。Executor 使用 `DPCLIExecutor` 在 `DPCLI_CWD` 中调用：
 
-... (中间多轮翻页，CodeCache/DomCache 命中加速) ...
-
-🧠 [Planner] Plan: 5. 将数据存入知识库
-📚 [RAG] 执行数据入库 (Milvus)
-
-🧠 [Planner] (检查 finished_steps) 任务已完成
-🏁 [End]
+```bash
+python -m dp_cli ...
 ```
 
-## 🔧 V6 关键配置说明
+当前支持的典型动作包括：
 
-在 `config.py` 中可调整核心参数：
+- `open`
+- `snapshot`
+- `find`
+- `click`
+- `type`
+- `expand`
+- `list-items`
+- `extract`
+- `resolve-locator`
+- `session.inspect`
+- `batch-detail-extract`
 
-- **`CODE_CACHE_THRESHOLD`**: 代码复用相似度阈值 (默认 0.85)。越高越严谨，越低复用率越高但风险增加。
-- **`DOM_CACHE_TTL_HOURS`**: DOM 缓存有效期 (默认 168 小时)。
-- **`CODE_CACHE_DRY_RUN_TIMEOUT_SECONDS`**: 缓存代码复用前 Locator 微轮询探测超时（默认 0.8s）。
-- **`CACHE_SOFT_BLACKLIST_*`**: 软删除黑名单配置。命中失败只做临时屏蔽，不立即 Delete；可根据失败日志手动 `invalidate`。
-- **`DOM_CACHE_STEP_WINDOW`**: DOM 微观语境滑动窗口大小（仅向量化最近 N 步，避免长历史稀释特征）。
-- **`MILVUS_URI`**: 向量数据库地址。
+HITL 审查时，系统会把动作写入 `temp_action_edit.json`，用户可以在执行前编辑 JSON。
 
-## 📋 待办事项
+## Cache Strategy
 
-- [ ] 支持多浏览器实例并行
-- [ ] 集成视觉模型（截图理解）
-- [ ] 支持更多持久化后端（SQLite/PostgreSQL）
-- [ ] 添加 Web UI 控制面板
+### DomCache
 
-## 📄 License
+Observer 继续维护页面 DOM 和语义观察缓存，用于减少重复页面理解成本。
+
+### CodeCache
+
+Python CodeCache 仍用于旧的 Python Coder 路径。缓存命中时，Executor 可以直接执行历史 Python 策略。
+
+### ActionCache
+
+ActionCache 是本次更新新增的轻量动作缓存。它面向 dp_cli 模式，缓存结构化动作和任务上下文，默认存储在：
+
+```text
+./output/action_cache.json
+```
+
+如果某次缓存命中的动作执行失败，Executor 会把该 action id 放入本轮状态的失败黑名单，避免同一轮重复命中同一个坏动作。
+
+## Detail Extraction Flow
+
+对于“从列表页进入详情页并抓取详情”的任务，Verifier 会检查一次成功 `extract` 的结果。如果任务语义需要详情页，并且当前结果还不够完整，系统会通过 `dpcli_crawl_policy.py` 生成后续 `batch-detail-extract` 动作。
+
+这个策略当前只在 dp_cli 路径生效，目的是把“列表 -> 详情页批量抓取”从自由代码生成逐步收敛为可审查的 CLI 批处理动作。
+
+## Important Config
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DPCLI_ENABLED` | `False` | 是否启用 dp_cli 动作生成和执行主路径 |
+| `DPCLI_CWD` | `E:\GitHub\Repositories\drissionpage-cli` | 本地 `drissionpage-cli` 仓库路径 |
+| `DPCLI_PYTHON` | `python` | 执行 `dp_cli` 的 Python 解释器 |
+| `DPCLI_SESSION` | `autoweb` | dp_cli 浏览器会话名 |
+| `DPCLI_HEADLESS` | `False` | dp_cli 是否使用 headless |
+| `DPCLI_TIMEOUT_SECONDS` | `60` | 单步 dp_cli 动作超时 |
+| `DPCLI_BATCH_TIMEOUT_SECONDS` | `900` | 批量动作超时 |
+| `DPCLI_OBSERVER_ENABLED` | `False` | Observer 是否优先使用 dp_cli snapshot |
+| `DPCLI_OBSERVER_FALLBACK_TO_DOM` | `True` | dp_cli snapshot 失败时是否回退原 DOM Observer |
+| `ACTION_CACHE_ENABLED` | `False` | 是否启用 dp_cli ActionCache |
+| `ACTION_CACHE_THRESHOLD` | `0.75` | ActionCache 相似度阈值 |
+| `ACTION_CACHE_STORE_PATH` | `./output/action_cache.json` | ActionCache JSON 存储路径 |
+
+## Test Commands
+
+```bash
+# dp_cli executor, observer projection, action prompt, crawl policy
+python -m unittest discover -s test -p "test_dpcli*.py" -v
+
+# dp_cli ActionCache
+python -m unittest discover -s test -p "test_action_cache.py" -v
+
+# Optional smoke test for local drissionpage-cli integration
+python scripts/smoke_dpcli_executor.py
+```
+
+原有测试仍可使用：
+
+```bash
+python -m unittest discover -s test -p "test_*.py"
+```
+
+注意：部分历史测试依赖 Milvus、pymilvus 或本地模型服务。没有准备这些外部依赖时，建议先运行上面的定向测试。
+
+## Development Notes
+
+- 图节点仍遵循 `Command(goto="...")` 路由风格，不在 `graph_v2.py` 里新增复杂显式条件边。
+- `DPCLI_ENABLED=False` 时应保持原行为兼容。
+- dp_cli 相关能力优先以小步开关验证，不建议一次性打开 snapshot、ActionCache 和批处理策略。
+- 新增动作类型时，应同时更新 `prompts/dpcli_action_prompts.py`、`skills/dpcli_executor.py` 和对应测试。
+- 涉及浏览器实例时仍通过 `BrowserDriver` 或 dp_cli session 管理，不绕过现有入口。
+
+## Relationship With drissionpage-cli
+
+AutoWeb 不直接复制 `drissionpage-cli` 的实现，而是通过 `DPCLIExecutor` 做受控子进程适配：
+
+1. AutoWeb 负责规划、观察、缓存、HITL、验证。
+2. Coder 在 dp_cli 模式下只输出结构化动作。
+3. `drissionpage-cli` 负责把动作落到真实浏览器。
+4. 执行结果回写到 `dpcli_result`、`dpcli_snapshot` 和 `execution_result`，供 Verifier 和后续节点使用。
+
+这种边界让 AutoWeb 可以逐步从“生成代码执行”迁移到“生成动作执行”，同时保留旧链路作为回退。
+
+## License
 
 MIT License
