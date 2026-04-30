@@ -68,11 +68,20 @@ def setup_agent():
     print(f"    Planner : {PLANNER_MODEL_NAME}")
     print(f"    Verifier: {VERIFIER_MODEL_NAME}")
     print(f"    Observer: {OBSERVER_MODEL_NAME}")
+    print("    LLM Keys:")
+    print(f"      Default : {'SET' if OPENAI_API_KEY else 'EMPTY'}")
+    print(f"      Coder   : {'SET' if CODER_API_KEY else 'EMPTY'}")
+    print(f"      Planner : {'SET' if PLANNER_API_KEY else 'EMPTY'}")
+    print(f"      Verifier: {'SET' if VERIFIER_API_KEY else 'EMPTY'}")
     print(f"    【功能开关】")
     print(
         f"    Code Cache: {'✅ Enabled' if CODE_CACHE_ENABLED else '❌ Disabled'}")
     print(
         f"    DOM Cache : {'✅ Enabled' if DOM_CACHE_ENABLED else '❌ Disabled'}")
+    print(
+        f"    dp_cli    : {'Enabled' if DPCLI_ENABLED else 'Disabled'} "
+        f"(observer={'on' if DPCLI_OBSERVER_ENABLED else 'auto'}, "
+        f"cache={'on' if ACTION_CACHE_ENABLED else 'off'})")
 
     # 返回应用、浏览器和依赖对象
     return app, browser_instance, llm, observer

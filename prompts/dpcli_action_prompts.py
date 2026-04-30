@@ -20,11 +20,15 @@ Rules:
 - Prefer refs from the current snapshot.
 - Use e* refs for click/type.
 - Use r* refs for expand/list-items/extract.
+- If snapshot contains refs, do not use free-form locator for click/type.
+- Do not click a list item when the plan asks to collect list data; use extract on a data region first.
+- For detail tasks, first extract list items with URLs, then later batch-detail-extract can handle details.
 - Do not use eval.
 - Do not invent refs that are not in the provided context.
 - If the plan says to open a URL, use open.
 - If the page changed or refs may be stale, use snapshot.
 - For list/data collection, prefer extract on a data region ref.
+- If no suitable ref exists, return snapshot instead of guessing a locator.
 
 Required output shape:
 {

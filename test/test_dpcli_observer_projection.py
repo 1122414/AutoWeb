@@ -54,6 +54,21 @@ class DPCLIObserverProjectionTests(unittest.TestCase):
         self.assertEqual(command.update["current_url"], "https://example.test")
         self.assertIn("dom_skeleton", command.update)
 
+    def test_observer_uses_dpcli_snapshot_after_dpcli_action(self):
+        with patch("config.DPCLI_OBSERVER_ENABLED", False), \
+                patch("config.DPCLI_OBSERVER_FALLBACK_TO_DOM", True), \
+                patch("skills.dpcli_executor.DPCLIExecutor") as executor_cls:
+            executor_cls.return_value.snapshot.return_value = SNAPSHOT
+            command = _observer_dpcli_snapshot({
+                "execution_mode": "dp_cli",
+                "dpcli_session": "unit",
+                "dpcli_result": {"ok": True, "action": "open"},
+            })
+
+        self.assertEqual(command.goto, "Planner")
+        self.assertEqual(command.update["_observer_source"], "dp_cli")
+        self.assertEqual(command.update["current_url"], "https://example.test")
+
     def test_observer_dpcli_snapshot_failure_falls_back(self):
         failed = {
             "ok": False,

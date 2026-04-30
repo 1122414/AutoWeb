@@ -502,6 +502,50 @@ def _looks_like_global_rewrite_plan(plan_text: str) -> bool:
     return any(kw in text for kw in keywords)
 
 
+def _planner_completion_is_premature(task: str, finished_steps: list) -> bool:
+    """Detect obvious early completion: navigation is done but extraction/details are not."""
+    task_text = str(task or "").lower()
+    steps_text = "\n".join(str(step or "") for step in (finished_steps or [])).lower()
+    task_markers = [
+        "爬取", "抓取", "采集", "提取", "获取", "简介", "详情", "小说信息", "榜单",
+        "scrape", "extract", "detail", "description",
+    ]
+    task_markers += [
+        word.encode("utf-8").decode("latin1", errors="ignore")
+        for word in task_markers
+        if any(ord(ch) > 127 for ch in word)
+    ]
+    requires_data = any(kw in task_text for kw in task_markers)
+    if not requires_data:
+        return False
+
+    done_markers = [
+        "爬取", "抓取", "采集", "提取", "保存", "简介", "详情", "小说信息",
+        "extract", "scrape", "saved", "description",
+    ]
+    done_markers += [
+        word.encode("utf-8").decode("latin1", errors="ignore")
+        for word in done_markers
+        if any(ord(ch) > 127 for ch in word)
+    ]
+    data_done = any(kw in steps_text for kw in done_markers)
+    return not data_done
+
+
+def _planner_forced_extract_plan(task: str) -> str:
+    task_text = str(task or "")
+    if any(kw in task_text for kw in ["简介", "详情", "detail", "description"]):
+        return (
+            "【计划已生成】\n"
+            "1. 提取当前榜单页可见的小说列表信息，包括排名、书名、作者、分类、链接等字段，"
+            "为后续进入详情页获取简介做准备。"
+        )
+    return (
+        "【计划已生成】\n"
+        "1. 提取当前页面可见的榜单列表信息，并保留条目链接用于后续处理。"
+    )
+
+
 # ==============================================================================
 # 上下文裁剪辅助函数 (tiktoken 水位监控 + 分级裁剪)
 # ==============================================================================
@@ -1126,7 +1170,12 @@ def _observer_dpcli_snapshot(state: AgentState) -> Optional[Command]:
         DPCLI_OBSERVER_FALLBACK_TO_DOM,
         DPCLI_SESSION,
     )
-    if not DPCLI_OBSERVER_ENABLED:
+    should_use_dpcli_observer = (
+        DPCLI_OBSERVER_ENABLED
+        or state.get("execution_mode") == "dp_cli"
+        or bool(state.get("dpcli_result"))
+    )
+    if not should_use_dpcli_observer:
         return None
 
     from skills.dpcli_executor import DPCLIExecutor
@@ -1965,6 +2014,11 @@ def planner_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lite
     is_finished = has_finished_tag and not has_plan_tag
     if has_finished_tag and has_plan_tag:
         logger.info("   ⚠️ [Planner] 检测到【任务已完成】和【计划已生成】同时出现，以计划为准")
+    if is_finished and _planner_completion_is_premature(task, finished_steps):
+        logger.info("   ⚠️ [Planner] 拦截过早完成：目标仍包含数据/详情提取，继续生成提取计划")
+        content = _planner_forced_extract_plan(task)
+        response = AIMessage(content=content)
+        is_finished = False
 
     # 消息裁剪：保留最近 M 轮历史对话，避免底层的 State(MessageState) 爆炸
     from config import CONTEXT_MAX_MESSAGE_ROUNDS
@@ -2097,7 +2151,18 @@ def _dpcli_action_context(state: AgentState) -> str:
     return json.dumps(context, ensure_ascii=False, indent=2)
 
 
-def _validate_dpcli_action(action: Dict[str, Any]) -> Optional[str]:
+def _state_has_dpcli_refs(state: Optional[AgentState]) -> bool:
+    if not state:
+        return False
+    snapshot = state.get("dpcli_snapshot") or {}
+    data = snapshot.get("data") if isinstance(snapshot, dict) else {}
+    index = data.get("index") if isinstance(data, dict) else {}
+    if not isinstance(index, dict):
+        return False
+    return bool(index.get("interactable_elements") or index.get("data_regions") or index.get("surface_index"))
+
+
+def _validate_dpcli_action(action: Dict[str, Any], state: Optional[AgentState] = None) -> Optional[str]:
     skill = str(action.get("skill") or "").strip()
     params = action.get("params") or {}
     if not skill:
@@ -2116,6 +2181,8 @@ def _validate_dpcli_action(action: Dict[str, Any]) -> Optional[str]:
         return "type requires params.text"
     if skill in {"click", "type"} and not (params.get("ref") or params.get("locator")):
         return f"{skill} requires ref or locator"
+    if skill in {"click", "type"} and params.get("locator") and not params.get("ref") and _state_has_dpcli_refs(state):
+        return f"{skill} must use a snapshot ref instead of a free-form locator"
     if skill in {"expand", "resolve-locator"} and not params.get("ref"):
         return f"{skill} requires ref"
     if skill == "list-items" and not params.get("group_ref"):
@@ -2134,7 +2201,7 @@ def _dpcli_action_coder_node(state: AgentState, config: RunnableConfig, llm) -> 
     )
     response = llm.invoke([HumanMessage(content=prompt)])
     action = _extract_json_object(getattr(response, "content", response))
-    validation_error = _validate_dpcli_action(action or {})
+    validation_error = _validate_dpcli_action(action or {}, state)
 
     if validation_error:
         retry_count = state.get("coder_retry_count", 0)
@@ -2577,8 +2644,15 @@ def verifier_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lit
     current_suggestions = state.get("locator_suggestions", [])
 
     # 获取最新标签页（处理新标签页打开的情况）
+    dpcli_current_url = ""
+    if state.get("execution_mode") == "dp_cli":
+        dpcli_current_url = _dpcli_result_url(state.get("dpcli_result") or {})
+
     browser = config["configurable"].get("browser")
-    if browser:
+    if dpcli_current_url:
+        tab = None
+        current_url = dpcli_current_url
+    elif browser:
         time.sleep(0.3)  # 短暂等待，让新标签页有时间创建
         tab = browser.latest_tab
         # 等待页面加载

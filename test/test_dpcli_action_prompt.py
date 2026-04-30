@@ -30,6 +30,25 @@ class DPCLIActionPromptTests(unittest.TestCase):
             "click requires ref or locator",
         )
 
+    def test_validate_rejects_locator_when_snapshot_refs_exist(self):
+        state = {
+            "dpcli_snapshot": {
+                "data": {
+                    "index": {
+                        "interactable_elements": [{"ref": "e1"}],
+                    }
+                }
+            }
+        }
+
+        self.assertEqual(
+            _validate_dpcli_action(
+                {"skill": "click", "params": {"locator": "a.book"}},
+                state,
+            ),
+            "click must use a snapshot ref instead of a free-form locator",
+        )
+
     def test_coder_outputs_dpcli_action(self):
         state = {
             "plan": "点击搜索按钮",
