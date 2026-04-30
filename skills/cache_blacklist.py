@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from typing import Iterable, List, Set
+from typing import Iterable, List
 
 from config import (
     CACHE_SOFT_BLACKLIST_BACKEND,

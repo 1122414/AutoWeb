@@ -12,8 +12,7 @@ from rag.milvus_schema import FIXED_FILTERABLE_FIELDS
 import os
 import sys
 import json
-import time
-from typing import Dict, List, Set, Optional
+from typing import Dict
 from threading import Lock
 from datetime import datetime
 

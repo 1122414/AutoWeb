@@ -19,7 +19,6 @@ from pymilvus import (
     CollectionSchema,
     DataType,
     FieldSchema,
-    WeightedRanker,
     utility,
 )
 from urllib.parse import urlparse
@@ -27,10 +26,7 @@ from urllib.parse import urlparse
 from config import MILVUS_URI
 from skills.vector_gateway import (
     connect_milvus,
-    hybrid_search,
-    insert_and_flush,
     normalize_weights,
-    read_hit_field,
 )
 
 
@@ -283,16 +279,6 @@ class VectorCacheBase(ABC):
         logger.info(f"📧 [{self._tag}] Waiting for background tasks...")
         self._executor.shutdown(wait=True)
         logger.info(f"✅ [{self._tag}] Background tasks finished")
-
-    def _cosine_similarity(self, a: list, b: list) -> float:
-        if not a or not b or len(a) != len(b):
-            return 0.0
-        va = np.asarray(a, dtype=np.float32)
-        vb = np.asarray(b, dtype=np.float32)
-        denom = float(np.linalg.norm(va) * np.linalg.norm(vb))
-        if denom <= 0.0:
-            return 0.0
-        return float(np.dot(va, vb) / denom)
 
     def _build_ann_request(
         self,

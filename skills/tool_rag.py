@@ -369,7 +369,7 @@ class KnowledgeBaseManager:
         self.flush_async()
 
         # 等待所有任务完成
-        from concurrent.futures import wait, FIRST_EXCEPTION
+        from concurrent.futures import wait
 
         if self.pending_futures:
             done, not_done = wait(self.pending_futures, timeout=timeout)

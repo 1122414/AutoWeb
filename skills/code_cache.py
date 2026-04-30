@@ -1,12 +1,8 @@
 # ==============================================================================
 # Code Cache Manager - 代码缓存复用系统
 # ==============================================================================
-import hashlib
-import re
 from datetime import datetime
 from typing import Dict, List, NamedTuple, Optional
-from urllib.parse import urlparse
-import numpy as np
 
 from pymilvus import (
     AnnSearchRequest,

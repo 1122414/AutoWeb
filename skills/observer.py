@@ -1,9 +1,8 @@
 import json
 import re
 import time
-from typing import Dict, Any, Union, Optional
+from typing import Dict, Union
 from langchain_openai import ChatOpenAI
-from langchain_core.documents import Document
 
 # 引入 Prompt
 from prompts.observer_prompts import DRISSION_LOCATOR_PROMPT

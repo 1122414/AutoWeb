@@ -5,7 +5,7 @@ import sqlite3
 import httpx
 import re
 from contextvars import ContextVar
-from typing import List, Dict, Union, Optional
+from typing import List, Dict, Union
 from urllib.parse import urlparse
 from skills.logger import logger
 from skills.tool_rag import kb_manager  # RAG Ingestion

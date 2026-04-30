@@ -1,6 +1,5 @@
-import os
 import json
-from typing import Optional, Dict
+from typing import Dict
 from langchain_openai import ChatOpenAI
 
 # 导入配置

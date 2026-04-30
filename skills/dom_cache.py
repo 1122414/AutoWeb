@@ -4,10 +4,9 @@
 import json
 import re
 from datetime import datetime, timedelta
-from typing import Dict, List, NamedTuple, Optional
+from typing import Dict, List, NamedTuple
 from skills.logger import logger
 
-import numpy as np
 from pymilvus import (
     AnnSearchRequest,
     DataType,

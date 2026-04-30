@@ -5,7 +5,7 @@ import re
 import traceback
 from datetime import datetime
 import tiktoken
-from typing import Any, Dict, Literal, Optional, Union
+from typing import Any, Dict, Literal, Optional
 from urllib.parse import urlparse
 from langchain_core.messages import HumanMessage, AIMessage, RemoveMessage
 from langchain_core.runnables import RunnableConfig
@@ -808,34 +808,13 @@ def cache_lookup_node(state: AgentState, config: RunnableConfig) -> Command[Lite
                         )
 
                     try:
-                        from skills.code_cache import code_cache_manager
-                        from skills.dom_cache import dom_cache_manager
-                        from skills.cache_blacklist import cache_soft_blacklist
-
+                        domain_key = _extract_domain_key_from_url(current_url)
                         if best_hit.id:
-                            code_cache_manager.record_failure(
-                                best_hit.id, reason=reason)
-                            cache_soft_blacklist.mark_failed(
-                                cache_type="codecache",
-                                domain_key=_extract_domain_key_from_url(
-                                    current_url),
-                                cache_id=best_hit.id,
-                                reason=reason,
-                            )
+                            _record_cache_failure("codecache", best_hit.id, domain_key, reason)
 
                         if dom_dual_invalidate and dom_cache_hit_id:
                             dom_reason = f"Code Dry-Run联动失效: locator={failed_locator}"
-                            dom_cache_manager.record_failure(
-                                dom_cache_hit_id,
-                                reason=dom_reason,
-                            )
-                            cache_soft_blacklist.mark_failed(
-                                cache_type="domcache",
-                                domain_key=_extract_domain_key_from_url(
-                                    current_url),
-                                cache_id=dom_cache_hit_id,
-                                reason=dom_reason,
-                            )
+                            _record_cache_failure("domcache", dom_cache_hit_id, domain_key, dom_reason)
                             if dom_cache_hit_id not in failed_dom_cache_ids:
                                 failed_dom_cache_ids.append(dom_cache_hit_id)
                     except Exception as mark_exc:
@@ -996,6 +975,28 @@ def _save_dom_to_cache(state: AgentState, current_url: str):
         return {"false": f"存储失败: {e}"}
 
 
+def _record_cache_failure(cache_type: str, cache_id: str, domain_key: str, reason: str) -> None:
+    """统一记录缓存失败：更新 manager 统计 + 标记软黑名单"""
+    try:
+        from skills.cache_blacklist import cache_soft_blacklist
+        if cache_type == "codecache":
+            from skills.code_cache import code_cache_manager
+            code_cache_manager.record_failure(cache_id, reason=reason)
+        elif cache_type == "domcache":
+            from skills.dom_cache import dom_cache_manager
+            dom_cache_manager.record_failure(cache_id, reason=reason)
+        else:
+            return
+        cache_soft_blacklist.mark_failed(
+            cache_type=cache_type,
+            domain_key=domain_key,
+            cache_id=cache_id,
+            reason=reason,
+        )
+    except Exception as e:
+        logger.info(f"   ⚠️ [{cache_type}] 记录失败异常: {e}")
+
+
 def _handle_cache_failure(state: AgentState, updates: dict) -> Command:
     """缓存代码失败统一处理：记录失败 + 标记熔断 + 跳 Planner
 
@@ -1005,19 +1006,11 @@ def _handle_cache_failure(state: AgentState, updates: dict) -> Command:
     cache_hit_id = state.get("_cache_hit_id", "")
     failed_cache_ids = list(state.get("_failed_code_cache_ids", []) or [])
     if cache_hit_id:
-        try:
-            from skills.code_cache import code_cache_manager
-            from skills.cache_blacklist import cache_soft_blacklist
-            code_cache_manager.record_failure(cache_hit_id, reason="执行/验收失败")
-            cache_soft_blacklist.mark_failed(
-                cache_type="codecache",
-                domain_key=_extract_domain_key_from_url(
-                    state.get("current_url", "")),
-                cache_id=cache_hit_id,
-                reason="执行/验收失败",
-            )
-        except Exception as e:
-            logger.info(f"   ⚠️ [CodeCache] 记录失败异常: {e}")
+        _record_cache_failure(
+            "codecache", cache_hit_id,
+            _extract_domain_key_from_url(state.get("current_url", "")),
+            "执行/验收失败"
+        )
         if cache_hit_id not in failed_cache_ids:
             failed_cache_ids.append(cache_hit_id)
 
@@ -1278,15 +1271,10 @@ def observer_node(state: AgentState, config: RunnableConfig, observer) -> Comman
             try:
                 from config import DOM_CACHE_ENABLED
                 if DOM_CACHE_ENABLED:
-                    from skills.dom_cache import dom_cache_manager
-                    from skills.cache_blacklist import cache_soft_blacklist
-                    dom_cache_manager.record_failure(
-                        dom_cache_hit_id, reason="后续执行失败")
-                    cache_soft_blacklist.mark_failed(
-                        cache_type="domcache",
-                        domain_key=_extract_domain_key_from_url(current_url),
-                        cache_id=dom_cache_hit_id,
-                        reason="后续执行失败",
+                    _record_cache_failure(
+                        "domcache", dom_cache_hit_id,
+                        _extract_domain_key_from_url(current_url),
+                        "后续执行失败"
                     )
             except Exception as e:
                 logger.info(f"   ⚠️ [DomCache] 记录失败异常: {e}")
@@ -1365,17 +1353,10 @@ def observer_node(state: AgentState, config: RunnableConfig, observer) -> Comman
                             )
                             logger.info(f"   ❌ [DomCache] {reason}")
                             try:
-                                from skills.cache_blacklist import cache_soft_blacklist
-                                dom_cache_manager.record_failure(
-                                    dom_cache_hit.id,
-                                    reason=reason,
-                                )
-                                cache_soft_blacklist.mark_failed(
-                                    cache_type="domcache",
-                                    domain_key=_extract_domain_key_from_url(
-                                        current_url),
-                                    cache_id=dom_cache_hit.id,
-                                    reason=reason,
+                                _record_cache_failure(
+                                    "domcache", dom_cache_hit.id,
+                                    _extract_domain_key_from_url(current_url),
+                                    reason
                                 )
                             except Exception as dom_mark_exc:
                                 logger.info(

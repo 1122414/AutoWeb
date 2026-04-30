@@ -1,17 +1,13 @@
-import os
 import sys
 import torch
-import httpx
 import traceback
-from typing import List, Tuple, Dict, Any, Optional
-from dotenv import load_dotenv
+from typing import List, Dict
 
 # LangChain 相关
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_community.embeddings import OllamaEmbeddings
 from langchain_milvus import Milvus
 from langchain_core.prompts import PromptTemplate
-from langchain_core.runnables import RunnablePassthrough
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.documents import Document
 from langchain_core.retrievers import BaseRetriever
@@ -27,7 +23,6 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 from config import *
 from rag.query_analyzer import query_analyzer
 from rag.milvus_schema import get_vector_store, FIXED_FILTERABLE_FIELDS
-from rag.field_registry import get_all_filterable_fields
 from prompts.rag_prompts import RAG_PROMPT
 
 # ==============================================================================

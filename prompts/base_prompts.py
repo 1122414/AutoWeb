@@ -1,14 +1,4 @@
-from typing import Dict, Any, Optional
-
-
 class PromptTemplate:
-    @staticmethod
-    def format_json_template(template: str, **kwargs) -> str:
-        escaped = template.replace("{", "{{").replace("}", "}}")
-        for key in kwargs:
-            escaped = escaped.replace(f"{{{{{key}}}}}", f"{{{key}}}")
-        return escaped.format(**kwargs)
-    
     @staticmethod
     def critical_rule(text: str) -> str:
         return f"⚠️ **最高优先级规则 - 违反则失败**:\n{text}"
@@ -16,54 +6,7 @@ class PromptTemplate:
     @staticmethod
     def warning_block(text: str) -> str:
         return f"🚨 {text}"
-    
-    @staticmethod
-    def json_output_format(fields: Dict[str, str]) -> str:
-        field_lines = "\n".join([f'    "{k}": "{v}"' for k, v in fields.items()])
-        return f"""【输出格式 (JSON Only)】
-{{
-{field_lines}
-}}"""
 
-
-class SectionBuilder:
-    @staticmethod
-    def context_section(**context_items: str) -> str:
-        lines = ["【上下文】"]
-        for key, value in context_items.items():
-            lines.append(f"- {key}: {value}")
-        return "\n".join(lines)
-    
-    @staticmethod
-    def task_section(task: str, constraints: Optional[list] = None) -> str:
-        lines = [f"【任务】{task}"]
-        if constraints:
-            lines.append("【约束】")
-            for c in constraints:
-                lines.append(f"- {c}")
-        return "\n".join(lines)
-    
-    @staticmethod
-    def examples_section(*examples: str) -> str:
-        lines = ["【示例】"]
-        for i, ex in enumerate(examples, 1):
-            lines.append(f"{i}. {ex}")
-        return "\n\n".join(lines)
-
-
-STANDARD_OUTPUT_RULES = """
-【输出要求】
-1. **纯文本输出**: 严禁使用 Markdown 代码块包裹
-2. **严格遵守格式**: 必须按照指定格式输出，不要添加额外说明
-3. **JSON 格式**: 如需 JSON 输出，必须是有效 JSON，不含注释
-""".strip()
-
-CRITICAL_JSON_RULE = """
-⚠️ **JSON 格式铁律 - 违反则失败**:
-- 输出必须是**纯 JSON**，禁止任何 Markdown 标记（如 ```json）
-- 所有字符串值必须使用双引号
-- 严禁在 JSON 中插入注释
-""".strip()
 
 LOCATOR_SAFETY_RULES = """
 【定位安全性规则】

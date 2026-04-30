@@ -1,7 +1,7 @@
 import json
 import hashlib
 import re
-from typing import List, Dict, Any, Union, Optional
+from typing import List, Dict, Union
 
 class DOMCompressor:
     """

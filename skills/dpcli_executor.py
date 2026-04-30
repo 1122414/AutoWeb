@@ -268,25 +268,6 @@ class DPCLIExecutor:
 
         return self._invalid_action(f"Unsupported dp_cli skill: {skill}", skill=skill)
 
-    def capabilities(self) -> Dict[str, bool]:
-        result = self._run_raw(["--help"], timeout=10)
-        text = f"{result.get('stdout') or ''}\n{result.get('stderr') or ''}"
-        commands = [
-            "open",
-            "snapshot",
-            "find",
-            "click",
-            "type",
-            "expand",
-            "list-items",
-            "extract",
-            "resolve-locator",
-            "eval",
-            "batch-detail-extract",
-            "session",
-        ]
-        return {command: command in text for command in commands}
-
     def _run(self, *args: str, timeout: Optional[float] = None) -> Dict[str, Any]:
         raw = self._run_raw(list(args), timeout=timeout)
         if raw.get("timed_out"):

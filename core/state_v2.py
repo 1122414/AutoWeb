@@ -1,5 +1,4 @@
-import operator
-from typing import Annotated, List, Optional, TypedDict, Union, Dict, Any
+from typing import Annotated, List, Optional, TypedDict, Dict, Any
 from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
 

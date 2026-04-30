@@ -165,14 +165,6 @@ def insert_and_flush(collection: Any, data: List[Any], tag: str = "VectorGateway
     )
 
 
-def add_documents(vector_store: Any, docs: List[Any], tag: str = "VectorGateway") -> Any:
-    return run_with_retry(
-        operation="vector_store.add_documents",
-        fn=lambda: vector_store.add_documents(docs),
-        tag=tag,
-    )
-
-
 def filter_not_expired(
     hits: Iterable[Any],
     expire_field: str,

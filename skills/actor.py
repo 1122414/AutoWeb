@@ -1,12 +1,9 @@
 import io
-import os
 import time
 import json
 import sys
 import contextlib
-from typing import Dict, Any, List, Optional
-from DrissionPage.common import Settings
-from drivers.drission_driver import BrowserDriver
+from typing import Dict, Any
 import skills.toolbox as toolbox
 from skills.logger import logger, save_code_log
 
@@ -46,12 +43,6 @@ class BrowserActor:
     def __init__(self, tab, browser):
         self.tab = tab
         self.browser = browser
-
-    def navigate(self, url: str) -> None:
-        """打开指定 URL"""
-        logger.info(f"🚶 [Actor] Navigating to: {url}")
-        self.tab.get(url)
-        self.tab.wait.load_start()
 
     def _safe_tab_url(self, tab) -> str:
         try:
@@ -109,48 +100,6 @@ class BrowserActor:
             final_tab is not start_tab,
             bool(start_url) and (final_url != start_url),
         )
-
-    def perform_action(self, action_plan: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        执行单个原子动作
-        :param action_plan: { "action": "click", "locator": "#btn", "value": "..." }
-        """
-        action_type = action_plan.get("action", "").lower()
-        locator = action_plan.get("locator")
-        value = action_plan.get("value")
-
-        try:
-            target_ele = None
-            if locator:
-                target_ele = self.tab.ele(locator)
-
-            if action_type == "click":
-                if target_ele:
-                    target_ele.click(by_js=True)
-                    self.tab.wait.load_start()
-                    return {"status": "success", "msg": f"Clicked {locator}"}
-                else:
-                    return {"status": "failed", "msg": "Element not found"}
-
-            elif action_type == "input":
-                if target_ele:
-                    target_ele.input(value)
-                    return {"status": "success", "msg": f"Input '{value}' to {locator}"}
-
-            elif action_type == "scroll":
-                self.tab.scroll.to_bottom()
-                return {"status": "success", "msg": "Scrolled to bottom"}
-
-            elif action_type == "wait":
-                time.sleep(int(value or 1))
-                return {"status": "success", "msg": f"Waited {value}s"}
-
-            else:
-                return {"status": "error", "msg": f"Unknown action: {action_type}"}
-
-        except Exception as e:
-            logger.warning(f"[Actor] Action failed: {e}")
-            return {"status": "error", "msg": str(e)}
 
     def execute_python_strategy(self, strategy_code: str, context: Dict = None) -> Dict[str, Any]:
         """
