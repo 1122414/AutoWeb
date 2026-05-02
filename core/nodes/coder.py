@@ -1,20 +1,30 @@
+"""Coder 节点：代码生成（Python 代码 或 dp_cli Action JSON）。"""
+
 from __future__ import annotations
 
-from typing import Literal
+import json
+from typing import Any, Dict, Literal
 
 from langchain_core.messages import HumanMessage, AIMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.types import Command
 
 from core.state_v2 import AgentState
+from core.nodes._verification import _build_verification_result
 from core.nodes._dpcli import (
     _should_use_dpcli_action,
     _dpcli_action_context,
     _state_has_dpcli_refs,
     _validate_dpcli_action,
+    _extract_json_object,
+    _dpcli_result_url,
+    _dpcli_error,
+    _dpcli_failure_goto,
 )
 from prompts.coder_prompts import ACTION_CODE_GEN_PROMPT, CODER_TASK_WRAPPER
+from prompts.dpcli_action_prompts import DPCLI_ACTION_GEN_PROMPT
 from skills.logger import logger
+
 
 def coder_node(state: AgentState, config: RunnableConfig, llm) -> Command[Literal["Executor", "Coder"]]:
     """[Coder] 编写代码"""
@@ -26,7 +36,6 @@ def coder_node(state: AgentState, config: RunnableConfig, llm) -> Command[Litera
 
     plan = state.get("plan", "")
 
-    # 获取累积的定位策略列表，序列化为 JSON 字符串
     accumulated_strategies = state.get("locator_suggestions", [])
     if accumulated_strategies:
         xpath_plan = json.dumps(accumulated_strategies,
@@ -35,17 +44,14 @@ def coder_node(state: AgentState, config: RunnableConfig, llm) -> Command[Litera
     else:
         xpath_plan = "无定位策略"
 
-    # 构建 Prompt
     base_prompt = ACTION_CODE_GEN_PROMPT.format(
         xpath_plan=xpath_plan,
     )
 
     prompt = CODER_TASK_WRAPPER.format(plan=plan, base_prompt=base_prompt)
 
-    # 注意：不使用 bind_tools，因为会导致 LLM 返回 tool_calls 而不是生成代码
     response = llm.invoke([HumanMessage(content=prompt)])
 
-    # 代码提取逻辑
     content = response.content
     code = ""
     if "```python" in content:
@@ -68,27 +74,51 @@ def coder_node(state: AgentState, config: RunnableConfig, llm) -> Command[Litera
     )
 
 
-def _dpcli_result_url(result: Dict[str, Any]) -> str:
-    data = result.get("data") if isinstance(result, dict) else {}
-    if not isinstance(data, dict):
-        return ""
-    page = data.get("page")
-    if isinstance(page, dict):
-        return str(page.get("url") or "")
-    return ""
+def _dpcli_action_coder_node(state: AgentState, config: RunnableConfig, llm) -> Command:
+    plan = state.get("plan", "")
+    prompt = CODER_TASK_WRAPPER.format(
+        plan=plan,
+        base_prompt=DPCLI_ACTION_GEN_PROMPT.replace(
+            "{context}", _dpcli_action_context(state)),
+    )
+    response = llm.invoke([HumanMessage(content=prompt)])
+    action = _extract_json_object(getattr(response, "content", response))
+    validation_error = _validate_dpcli_action(action or {}, state)
 
+    if validation_error:
+        retry_count = state.get("coder_retry_count", 0)
+        if retry_count < 2:
+            return Command(
+                update={
+                    "messages": [AIMessage(content=f"【dp_cli action生成失败】{validation_error}")],
+                    "coder_retry_count": retry_count + 1,
+                    "execution_mode": "dp_cli",
+                    "error_type": "dpcli_action_json",
+                    "reflections": [f"dp_cli action JSON invalid: {validation_error}"],
+                },
+                goto="Coder",
+            )
+        logger.info("   ⚠️ dp_cli action 连续生成失败，回退 Python Coder")
+        return Command(update={
+            "execution_mode": "python_code",
+            "generated_action": None,
+            "_action_source": None,
+            "_dpcli_action_disabled": True,
+        }, goto="Coder")
 
-def _dpcli_error(result: Dict[str, Any]) -> Dict[str, Any]:
-    error = result.get("error") if isinstance(result, dict) else {}
-    return error if isinstance(error, dict) else {"code": "unknown", "message": str(error or "")}
-
-
-def _dpcli_failure_goto(error_code: str) -> str:
-    if error_code in {"ref_stale", "ref_not_found", "element_not_found", "element_not_interactable"}:
-        return "Observer"
-    if error_code in {"invalid_ref_type", "invalid_input", "invalid_action"}:
-        return "Coder"
-    return "ErrorHandler"
+    return Command(
+        update={
+            "messages": [AIMessage(content=f"【dp_cli action生成】\n{json.dumps(action, ensure_ascii=False, indent=2)}")],
+            "generated_action": action,
+            "generated_code": None,
+            "execution_mode": "dp_cli",
+            "coder_retry_count": 0,
+            "_action_source": "llm",
+            "_code_source": None,
+            "_dpcli_action_disabled": False,
+        },
+        goto="Executor",
+    )
 
 
 def _executor_dpcli_branch(state: AgentState, config: RunnableConfig) -> Command:

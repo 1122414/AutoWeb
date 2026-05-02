@@ -125,7 +125,7 @@ from core.nodes.error_handler import error_handler_node
 # ============================================================================
 # 第三阶段：测试兼容导出（后续可逐步迁移测试直接导入新模块）
 # ============================================================================
-from core.nodes.executor import _executor_dpcli_branch
+from core.nodes.coder import _executor_dpcli_branch
 
 __all__ = [
     # 公开节点函数

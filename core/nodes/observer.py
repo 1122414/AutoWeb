@@ -15,7 +15,7 @@ from core.nodes._locators import (
     _build_step_context,
     _dry_run_observer_strategies,
 )
-from core.nodes._verification import _is_failed_verification, _verification_focus_text
+from core.nodes._verification import _is_failed_verification, _verification_focus_text, _build_verification_result
 from core.nodes._cache import _record_cache_failure
 from core.nodes._dpcli import _observer_dpcli_snapshot
 from skills.logger import logger
