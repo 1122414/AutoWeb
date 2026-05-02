@@ -8,7 +8,7 @@ from typing import Any, Dict, Optional
 from langgraph.types import Command
 
 from core.state_v2 import AgentState
-from core.nodes._verification import _normalize_failure_scope, _build_verification_result
+from core.nodes._verification import _build_verification_result
 from skills.logger import logger
 
 def _compact_dpcli_snapshot(snapshot: Dict[str, Any], last_result: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:

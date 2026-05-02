@@ -8,10 +8,8 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.types import Command
 
 from core.state_v2 import AgentState
-from core.nodes._utils import _get_tab
 from core.nodes._verification import (
     _build_verification_result,
-    _is_failed_verification,
     _parse_verifier_result_content,
     _normalize_failure_scope,
 )

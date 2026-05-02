@@ -9,7 +9,7 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.types import Command
 
 from core.state_v2 import AgentState
-from core.nodes._utils import _get_tab, _parse_iso_datetime, _is_hit_from_current_task, _detect_task_continuity
+from core.nodes._utils import _parse_iso_datetime, _is_hit_from_current_task
 from core.nodes._locators import (
     _extract_domain_key_from_url,
     _build_step_context,

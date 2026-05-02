@@ -8,7 +8,7 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.types import Command
 
 from core.state_v2 import AgentState
-from core.nodes._utils import _get_tab, _detect_task_continuity, _count_tokens, _get_summarizer_llm
+from core.nodes._utils import _get_tab, _detect_task_continuity
 from core.nodes._context import _prune_locator_suggestions, _prune_finished_steps
 from core.nodes._verification import _is_failed_verification, _verification_focus_text
 from config import RAG_STORE_KEYWORDS, RAG_QA_KEYWORDS, RAG_GOAL_KEYWORDS, RAG_DONE_KEYWORDS

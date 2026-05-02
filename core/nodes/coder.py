@@ -14,7 +14,6 @@ from core.nodes._verification import _build_verification_result
 from core.nodes._dpcli import (
     _should_use_dpcli_action,
     _dpcli_action_context,
-    _state_has_dpcli_refs,
     _validate_dpcli_action,
     _extract_json_object,
     _dpcli_result_url,
