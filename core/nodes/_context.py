@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from langchain_core.messages import HumanMessage
 from core.nodes._utils import _count_tokens, _get_summarizer_llm
 from skills.logger import logger
 

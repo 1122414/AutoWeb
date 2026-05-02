@@ -16,8 +16,10 @@ from core.nodes._locators import (
     _extract_locators_from_strategies,
     _has_locator_overlap,
     _dry_run_cache_hit_locators,
+    _extract_domain_key_from_url,
 )
 from core.nodes._cache import _record_cache_failure
+from core.nodes._verification import _build_verification_result
 from skills.logger import logger
 
 def cache_lookup_node(state: AgentState, config: RunnableConfig) -> Command[Literal["Coder", "Executor", "Observer"]]:
