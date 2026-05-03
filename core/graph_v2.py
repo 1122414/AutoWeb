@@ -4,7 +4,8 @@ from langgraph.graph import StateGraph, START
 from core.state_v2 import AgentState
 from core.nodes import (
     observer_node, planner_node, coder_node, executor_node,
-    verifier_node, error_handler_node, cache_lookup_node, rag_node
+    verifier_node, error_handler_node, cache_lookup_node, rag_node,
+    target_selector_node,
 )
 
 
@@ -47,6 +48,7 @@ def build_graph(checkpointer=None, llm=None, observer=None,
     workflow.add_node("Verifier", partial(
         verifier_node, llm=verifier_llm or llm))
     workflow.add_node("RAGNode", rag_node)  # RAG 向量库操作节点
+    workflow.add_node("TargetSelector", target_selector_node)
     workflow.add_node("ErrorHandler", partial(error_handler_node, llm=llm))
 
     # 2. Set Entry Point (从 Observer 开始)
