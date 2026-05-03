@@ -88,133 +88,58 @@ class TargetSelector:
                 "skill_hint": intent,
                 "selection_mode": "none",
                 "evidence": {},
-            "alternatives": [],
-            "approval_required": False,
+                "alternatives": [],
+                "approval_required": False,
+                "reason": "no snapshot loaded",
+            }
+
+        candidates = self._retrieve_candidates(intent, target_hint, constraints)
+        candidate_pack = self._build_candidate_pack(candidates, intent, target_hint)
+
+        if not candidate_pack:
+            return {
+                "status": "not_found",
+                "target_ref": None,
+                "target_kind": None,
+                "skill_hint": intent,
+                "selection_mode": "none",
+                "evidence": {},
+                "alternatives": [],
+                "approval_required": False,
+                "reason": f"no candidates found for '{target_hint}'",
+            }
+
+        if len(candidate_pack) == 1 and candidate_pack[0].get("confidence", 0) >= 0.8:
+            return self._deterministic_result(candidate_pack[0], intent)
+
+        conflicts = self._detect_conflicts(candidate_pack)
+        if not conflicts:
+            best = max(candidate_pack, key=lambda c: c.get("confidence", 0))
+            if best.get("confidence", 0) >= 0.9:
+                return self._deterministic_result(best, intent)
+
+        return {
+            "status": "need_approval",
+            "target_ref": None,
+            "target_kind": None,
+            "skill_hint": intent,
+            "selection_mode": "conflict_detected",
+            "evidence": {},
+            "alternatives": candidate_pack[:8],
+            "approval_required": True,
+            "approval_reason": f"multiple candidates ({len(candidate_pack)}) or conflicts ({len(conflicts)})",
+            "conflicts": conflicts,
         }
 
-
-# =============================================================================
-# LangGraph Node
-# =============================================================================
-
-
-from typing import Literal  # noqa: E402
-
-from langchain_core.runnables import RunnableConfig  # noqa: E402
-from langgraph.types import Command  # noqa: E402
-
-from core.state_v2 import AgentState  # noqa: E402
-from skills.logger import logger  # noqa: E402
-
-
-def target_selector_node(
-    state: AgentState, config: RunnableConfig
-) -> Command[Literal["Coder", "Planner", "Observer", "ErrorHandler"]]:
-    """[TargetSelector] dp_cli 目标 ref 确认层 — 接收 Planner 结构化意图，确定具体 ref。"""
-    from config import DPCLI_ENABLED
-
-    logger.info("\n🎯 [TargetSelector] 正在匹配页面目标元素...")
-
-    if not DPCLI_ENABLED or state.get("execution_mode") != "dp_cli":
-        return Command(
-            update={"dpcli_target_result": {"status": "not_required"}},
-            goto="Coder",
-        )
-
-    structured_plan = state.get("dpcli_structured_plan") or {}
-    target_request = structured_plan.get("target_request") or {}
-    if not target_request.get("required"):
-        return Command(
-            update={"dpcli_target_result": {"status": "not_required"}},
-            goto="Coder",
-        )
-
-    snapshot_ref = state.get("dpcli_snapshot_ref")
-    if not snapshot_ref:
-        prev_result = state.get("dpcli_target_result") or {}
-        if prev_result.get("status") == "need_more_observation":
-            logger.info("   ⚠️ [TargetSelector] full snapshot 二次不可用，进入 ErrorHandler")
-            return Command(
-                update={
-                    "dpcli_target_result": {
-                        "status": "need_more_observation",
-                        "reason": "full snapshot unavailable after retry",
-                    },
-                    "error": "full snapshot not available",
-                    "error_type": "dpcli_snapshot_missing",
-                },
-                goto="ErrorHandler",
-            )
-        logger.info("   🔄 [TargetSelector] full snapshot 不可用，返回 Observer 重新观察")
-        return Command(
-            update={
-                "dpcli_target_result": {"status": "need_more_observation"},
-            },
-            goto="Observer",
-        )
-
-    selector = TargetSelector()
-    intent = target_request.get("step_intent") or structured_plan.get(
-        "step_intent", "click"
-    )
-
-    result = selector.select(
-        query={
-            "intent": intent,
-            "target_hint": target_request.get("target_hint", ""),
-            "target_constraints": target_request.get("constraints", {}),
-        },
-        snapshot_ref=snapshot_ref,
-    )
-
-    status = result.get("status", "not_found")
-    logger.info(
-        f"   📊 [TargetSelector] 状态: {status}, "
-        f"target_ref: {result.get('target_ref', 'N/A')}"
-    )
-
-    if status == "selected":
-        return Command(
-            update={"dpcli_target_result": result},
-            goto="Coder",
-        )
-
-    if status == "not_required" or status == "not_found":
-        return Command(
-            update={"dpcli_target_result": result},
-            goto="Coder",
-        )
-
-    if status == "need_approval":
-        logger.info("   ⚠️ [TargetSelector] 候选冲突，返回 Planner 写入审批信号")
-        return Command(
-            update={
-                "dpcli_target_result": result,
-                "human_approval_required": True,
-                "execution_result": (
-                    f"TargetSelector 候选冲突 ({result.get('approval_reason', 'unknown')})，"
-                    "请 Planner 决定下一个 action"
-                ),
-            },
-            goto="Planner",
-        )
-
-    logger.info(f"   ⚠️ [TargetSelector] 状态 {status}，返回 Observer")
-    return Command(
-        update={"dpcli_target_result": result},
-        goto="Observer",
-    )
 
     def select_from_structured_plan(
         self, structured_plan: Dict[str, Any], snapshot_ref: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
-        """从 Planner 的 structured_plan 中选择目标"""
         return self.select(structured_plan, snapshot_ref)
 
     def verify_selection(
         self, target_ref: str, intent: str = "click"
     ) -> Dict[str, Any]:
-        """通过 full snapshot 验证选中的 ref"""
         verification = self._engine.verify_ref(target_ref, intent)
         if not verification.get("valid"):
             return {
@@ -247,8 +172,6 @@ def target_selector_node(
             "approval_required": False,
         }
 
-    # ─── 候选检索 ───────────────────────────────────────────
-
     def _retrieve_candidates(
         self, intent: str, target_hint: str, constraints: Dict[str, Any]
     ) -> List[Dict[str, Any]]:
@@ -274,9 +197,8 @@ def target_selector_node(
                 if r.get("ref") not in [c.get("ref") for c in candidates]:
                     candidates.append(r)
 
-        # 如果文本搜索无结果，退化为仅按 role 搜索
         if not candidates and roles:
-            query: Dict[str, Any] = {"role": roles}
+            query = {"role": roles}
             if intent in ("click", "type"):
                 query["ref_type"] = "element"
             results = self._engine.search_snapshot(query, limit=10)
@@ -284,7 +206,6 @@ def target_selector_node(
                 if r.get("ref") not in [c.get("ref") for c in candidates]:
                     candidates.append(r)
 
-        # 如果还没有候选，尝试纯文本搜索
         if not candidates and target_hint:
             by_text = self._engine.find_by_text(target_hint)
             if roles:
@@ -317,8 +238,6 @@ def target_selector_node(
         if roles:
             q["role"] = roles
         return self._engine.search_snapshot(q, limit=8)
-
-    # ─── 候选包 ─────────────────────────────────────────────
 
     @staticmethod
     def _build_candidate_pack(
@@ -388,8 +307,6 @@ def target_selector_node(
             reasons.append("partial_match")
         return reasons
 
-    # ─── 冲突检测 ───────────────────────────────────────────
-
     @staticmethod
     def _detect_conflicts(candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         if len(candidates) < 2:
@@ -414,8 +331,6 @@ def target_selector_node(
                         })
         return conflicts
 
-    # ─── 确定性结果 ─────────────────────────────────────────
-
     def _deterministic_result(
         self, candidate: Dict[str, Any], intent: str
     ) -> Dict[str, Any]:
@@ -438,3 +353,111 @@ def target_selector_node(
             "alternatives": [],
             "approval_required": False,
         }
+
+
+# =============================================================================
+# LangGraph Node
+# =============================================================================
+
+from typing import Literal  # noqa: E402
+
+from langchain_core.runnables import RunnableConfig  # noqa: E402
+from langgraph.types import Command  # noqa: E402
+
+from core.state_v2 import AgentState  # noqa: E402
+
+
+def target_selector_node(
+    state: AgentState, config: RunnableConfig
+) -> Command[Literal["Coder", "Planner", "Observer", "ErrorHandler"]]:
+    from config import DPCLI_ENABLED
+
+    logger.info("\n🎯 [TargetSelector] 正在匹配页面目标元素...")
+
+    if not DPCLI_ENABLED or state.get("execution_mode") != "dp_cli":
+        return Command(
+            update={"dpcli_target_result": {"status": "not_required"}},
+            goto="Coder",
+        )
+
+    structured_plan = state.get("dpcli_structured_plan") or {}
+    target_request = structured_plan.get("target_request") or {}
+    if not target_request.get("required"):
+        return Command(
+            update={"dpcli_target_result": {"status": "not_required"}},
+            goto="Coder",
+        )
+
+    snapshot_ref = state.get("dpcli_snapshot_ref")
+    if not snapshot_ref:
+        prev_result = state.get("dpcli_target_result") or {}
+        if prev_result.get("status") == "need_more_observation":
+            logger.info("   ⚠️ [TargetSelector] full snapshot 二次不可用，进入 ErrorHandler")
+            return Command(
+                update={
+                    "dpcli_target_result": {
+                        "status": "need_more_observation",
+                        "reason": "full snapshot unavailable after retry",
+                    },
+                    "error": "full snapshot not available",
+                    "error_type": "dpcli_snapshot_missing",
+                },
+                goto="ErrorHandler",
+            )
+        logger.info("   🔄 [TargetSelector] full snapshot 不可用，返回 Observer 重新观察")
+        return Command(
+            update={"dpcli_target_result": {"status": "need_more_observation"}},
+            goto="Observer",
+        )
+
+    selector = TargetSelector()
+    intent = target_request.get("step_intent") or structured_plan.get(
+        "step_intent", "click"
+    )
+
+    result = selector.select(
+        query={
+            "intent": intent,
+            "target_hint": target_request.get("target_hint", ""),
+            "target_constraints": target_request.get("constraints", {}),
+        },
+        snapshot_ref=snapshot_ref,
+    )
+
+    status = result.get("status", "not_found")
+    logger.info(
+        f"   📊 [TargetSelector] 状态: {status}, "
+        f"target_ref: {result.get('target_ref', 'N/A')}"
+    )
+
+    if status == "selected":
+        return Command(
+            update={"dpcli_target_result": result},
+            goto="Coder",
+        )
+
+    if status == "not_required" or status == "not_found":
+        return Command(
+            update={"dpcli_target_result": result},
+            goto="Coder",
+        )
+
+    if status == "need_approval":
+        logger.info("   ⚠️ [TargetSelector] 候选冲突，返回 Planner 写入审批信号")
+        return Command(
+            update={
+                "dpcli_target_result": result,
+                "human_approval_required": True,
+                "execution_result": (
+                    f"TargetSelector 候选冲突 ({result.get('approval_reason', 'unknown')})，"
+                    "请 Planner 决定下一个 action"
+                ),
+            },
+            goto="Planner",
+        )
+
+    logger.info(f"   ⚠️ [TargetSelector] 状态 {status}，返回 Observer")
+    return Command(
+        update={"dpcli_target_result": result},
+        goto="Observer",
+    )

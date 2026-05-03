@@ -246,32 +246,47 @@ def _dpcli_action_context(state: AgentState) -> str:
     url = state.get("current_url", "")
     task = state.get("user_task", "")
     plan = state.get("plan", "")
-    suggestions = state.get("locator_suggestions", [])
 
-    locators_text = ""
-    if suggestions:
-        parts = []
-        for entry in suggestions:
-            strategies = entry.get("strategies", [])
-            if isinstance(strategies, list):
-                for s in strategies:
-                    if isinstance(s, dict):
-                        loc = s.get("locator", "")
-                        reason = s.get("reason", "")
-                        if loc:
-                            parts.append(f"- {loc} ({reason})" if reason else f"- {loc}")
-            elif isinstance(strategies, dict):
-                loc = strategies.get("locator", "")
-                if loc:
-                    parts.append(f"- {loc}")
-        locators_text = "\n".join(parts)
+    parts = [
+        f"【当前页面】\nURL: {url}",
+        f"【用户任务】\n{task}",
+        f"【当前计划】\n{plan}",
+    ]
 
-    return (
-        f"【当前页面】\nURL: {url}\n\n"
-        f"【用户任务】\n{task}\n\n"
-        f"【当前计划】\n{plan}\n\n"
-        f"【定位策略】\n{locators_text or '(无)'}"
-    )
+    structured_plan = state.get("dpcli_structured_plan") or {}
+    if structured_plan:
+        action_payload = structured_plan.get("action_payload") or {}
+        target_request = structured_plan.get("target_request") or {}
+        parts.append(
+            "【结构化计划】\n"
+            f"  step_intent: {structured_plan.get('step_intent', '')}\n"
+            f"  reason: {structured_plan.get('reason', '')}\n"
+            f"  target_hint: {target_request.get('target_hint', '')}\n"
+            f"  action_text: {action_payload.get('text', '')}\n"
+            f"  action_url: {action_payload.get('url', '')}"
+        )
+
+    target_result = state.get("dpcli_target_result") or {}
+    if target_result:
+        status = target_result.get("status", "unknown")
+        target_ref = target_result.get("target_ref", "")
+        confidence = target_result.get("confidence", 0)
+        evidence = target_result.get("evidence") or {}
+        parts.append(
+            "【目标匹配结果】\n"
+            f"  status: {status}\n"
+            f"  target_ref: {target_ref}\n"
+            f"  confidence: {confidence}\n"
+            f"  role: {evidence.get('role', '')}\n"
+            f"  name: {evidence.get('name', '')}\n"
+            f"  text: {evidence.get('text', '')}"
+        )
+        if target_result.get("approval_required"):
+            parts.append(
+                f"  ⚠️ 需要人工审批: {target_result.get('approval_reason', '')}"
+            )
+
+    return "\n\n".join(parts)
 
 
 def _state_has_dpcli_refs(state: Optional[AgentState]) -> bool:
