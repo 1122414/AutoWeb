@@ -43,6 +43,7 @@ def _render_dpcli_snapshot_text(view: Dict[str, Any]) -> str:
 
 def _observer_dpcli_snapshot(state: AgentState) -> Optional[Command]:
     from config import (
+        DPCLI_ENABLED,
         DPCLI_HEADLESS,
         DPCLI_OBSERVER_ENABLED,
         DPCLI_OBSERVER_FALLBACK_TO_DOM,
@@ -50,7 +51,8 @@ def _observer_dpcli_snapshot(state: AgentState) -> Optional[Command]:
         DPCLI_FULL_SNAPSHOT_MODE,
     )
     should_use_dpcli_observer = (
-        DPCLI_OBSERVER_ENABLED
+        DPCLI_ENABLED
+        or DPCLI_OBSERVER_ENABLED
         or state.get("execution_mode") == "dp_cli"
         or bool(state.get("dpcli_result"))
     )

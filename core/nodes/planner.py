@@ -260,8 +260,8 @@ def planner_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lite
     from config import DPCLI_ENABLED
     is_dpcli = (
         DPCLI_ENABLED
-        and state.get("execution_mode") == "dp_cli"
         and state.get("dpcli_agent_view")
+        and state.get("execution_mode") != "python_code"
     )
     if is_dpcli and loop_count > 0:
         logger.info("   🧠 [Planner] dp_cli 模式，使用结构化规划 prompt")
