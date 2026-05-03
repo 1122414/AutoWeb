@@ -181,7 +181,7 @@ class TargetSelector:
         candidates: List[Dict[str, Any]] = []
 
         roles = constraints.get("role") or []
-        text_hints = constraints.get("text_or_name") or [target_hint] if target_hint else []
+        text_hints = constraints.get("text_or_name") or ([target_hint] if target_hint else [])
 
         for text in text_hints:
             query: Dict[str, Any] = {}
