@@ -44,7 +44,7 @@ def build_mock_state() -> dict:
         "finished_steps": [],
         "reflections": [],
         "loop_count": 1,
-        "execution_mode": "dp_cli",
+        "execution_mode": None,
         "messages": [],
         "plan": "",
         "is_complete": False,
@@ -171,6 +171,20 @@ def test_full_flow():
         context_no_target = _dpcli_action_context(state_no_target)
         assert "not_required" in context_no_target
         print("  OK Action context (not_required): properly formatted")
+        passed += 1
+
+        # 阶段7: 验证 _should_use_dpcli_action 在 execution_mode=None 时正确引导
+        from core.nodes._dpcli import _should_use_dpcli_action
+        bootstrap_state = build_mock_state()
+        bootstrap_state["execution_mode"] = None
+        assert _should_use_dpcli_action(bootstrap_state), "Should use dp_cli when execution_mode is None (bootstrap)"
+        print("  OK Bootstrap: _should_use_dpcli_action returns True when execution_mode=None")
+        passed += 1
+
+        bootstrap_state_py = build_mock_state()
+        bootstrap_state_py["execution_mode"] = "python_code"
+        assert not _should_use_dpcli_action(bootstrap_state_py), "Should NOT use dp_cli when execution_mode=python_code"
+        print("  OK Bootstrap: _should_use_dpcli_action returns False when execution_mode=python_code")
         passed += 1
 
     finally:

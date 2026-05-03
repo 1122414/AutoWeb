@@ -241,7 +241,7 @@ def _extract_json_object(text: str) -> Optional[Dict[str, Any]]:
 
 def _should_use_dpcli_action(state: AgentState) -> bool:
     from config import DPCLI_ENABLED
-    return bool(DPCLI_ENABLED and state.get("execution_mode") == "dp_cli")
+    return bool(DPCLI_ENABLED and state.get("execution_mode") != "python_code")
 
 
 def _dpcli_action_context(state: AgentState) -> str:

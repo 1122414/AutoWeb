@@ -374,7 +374,7 @@ def target_selector_node(
 
     logger.info("\n🎯 [TargetSelector] 正在匹配页面目标元素...")
 
-    if not DPCLI_ENABLED or state.get("execution_mode") != "dp_cli":
+    if not DPCLI_ENABLED or state.get("execution_mode") == "python_code":
         return Command(
             update={"dpcli_target_result": {"status": "not_required"}},
             goto="Coder",
