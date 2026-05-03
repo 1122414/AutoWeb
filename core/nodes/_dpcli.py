@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 
 from langgraph.types import Command
@@ -46,6 +47,7 @@ def _observer_dpcli_snapshot(state: AgentState) -> Optional[Command]:
         DPCLI_OBSERVER_ENABLED,
         DPCLI_OBSERVER_FALLBACK_TO_DOM,
         DPCLI_SESSION,
+        DPCLI_FULL_SNAPSHOT_MODE,
     )
     should_use_dpcli_observer = (
         DPCLI_OBSERVER_ENABLED
@@ -61,23 +63,9 @@ def _observer_dpcli_snapshot(state: AgentState) -> Optional[Command]:
     result = DPCLIExecutor(session=session, headless=DPCLI_HEADLESS).snapshot(
         mode="agent_summary")
     if result.get("ok"):
-        view = _compact_dpcli_snapshot(result, state.get("dpcli_result"))
-        page = view.get("page") or {}
-        text = _render_dpcli_snapshot_text(view)
-        return Command(
-            update={
-                "_cache_failed_this_round": False,
-                "_observer_source": "dp_cli",
-                "_dom_cache_hit_id": None,
-                "dpcli_session": session,
-                "dpcli_snapshot": result,
-                "dpcli_snapshot_view": view,
-                "dom_skeleton": text,
-                "dom_hash": hashlib.md5(text.encode()).hexdigest(),
-                "current_url": str(page.get("url") or state.get("current_url", "")),
-            },
-            goto="Planner",
-        )
+        if DPCLI_FULL_SNAPSHOT_MODE:
+            return _build_full_snapshot_command(state, result, session)
+        return _build_legacy_snapshot_command(state, result, session)
 
     error = _dpcli_error(result)
     logger.info(f"   ⚠️ [Observer] dp_cli snapshot failed: {error}")
@@ -102,6 +90,109 @@ def _observer_dpcli_snapshot(state: AgentState) -> Optional[Command]:
         },
         goto="ErrorHandler",
     )
+
+
+def _build_legacy_snapshot_command(
+    state: AgentState, result: Dict[str, Any], session: str
+) -> Command:
+    view = _compact_dpcli_snapshot(result, state.get("dpcli_result"))
+    page = view.get("page") or {}
+    text = _render_dpcli_snapshot_text(view)
+    return Command(
+        update={
+            "_cache_failed_this_round": False,
+            "_observer_source": "dp_cli",
+            "_dom_cache_hit_id": None,
+            "dpcli_session": session,
+            "dpcli_snapshot": result,
+            "dpcli_snapshot_view": view,
+            "dom_skeleton": text,
+            "dom_hash": hashlib.md5(text.encode()).hexdigest(),
+            "current_url": str(page.get("url") or state.get("current_url", "")),
+        },
+        goto="Planner",
+    )
+
+
+def _build_full_snapshot_command(
+    state: AgentState, result: Dict[str, Any], session: str
+) -> Command:
+    from skills.dpcli_snapshot_store import SnapshotStore
+    from skills.dpcli_snapshot_indexer import SnapshotIndexer
+    from skills.dpcli_planner_view import PlannerViewGenerator
+
+    store = SnapshotStore(session=session)
+    indexer = SnapshotIndexer()
+    view_gen = PlannerViewGenerator()
+
+    snapshot_ref = store.save_full(result)
+    snapshot_id = snapshot_ref["snapshot_id"]
+
+    all_nodes = _collect_all_nodes(result)
+    index_data = indexer.build_index(result)
+    compressed_groups = indexer.build_compressed_index(all_nodes)
+    agent_view = view_gen.generate(result, index_data, compressed_groups)
+    diagnostics = view_gen.generate_diagnostics(result, compressed_groups)
+
+    store.save_index(snapshot_id, index_data)
+    store.save_compressed_index(snapshot_id, {
+        "groups": compressed_groups,
+        "uncompressed_count": len(all_nodes) - sum(g.get("count", 0) for g in compressed_groups),
+    })
+    store.save_planner_view(snapshot_id, agent_view)
+
+    index_summary = _build_index_summary(index_data, store.session_dir, snapshot_id)
+    text = json.dumps(agent_view, ensure_ascii=False, indent=2)
+    page = result.get("data", {}).get("page", {})
+
+    return Command(
+        update={
+            "_cache_failed_this_round": False,
+            "_observer_source": "dp_cli_full",
+            "_dom_cache_hit_id": None,
+            "dpcli_session": session,
+            "dpcli_snapshot": result,
+            "dpcli_snapshot_ref": snapshot_ref,
+            "dpcli_agent_view": agent_view,
+            "dpcli_snapshot_index": index_summary,
+            "dpcli_observer_diagnostics": diagnostics,
+            "dom_skeleton": text,
+            "dom_hash": hashlib.md5(text.encode()).hexdigest(),
+            "current_url": str(page.get("url") or state.get("current_url", "")),
+        },
+        goto="Planner",
+    )
+
+
+def _collect_all_nodes(result: Dict[str, Any]) -> List[Dict[str, Any]]:
+    data = result.get("data") or {}
+    idx = data.get("index") or {}
+    return (
+        list(idx.get("interactable_elements") or [])
+        + list(idx.get("surface_index") or [])
+        + list(idx.get("deep_index") or [])
+    )
+
+
+def _build_index_summary(
+    index_data: Dict[str, Any], session_dir: Any, snapshot_id: str
+) -> Dict[str, Any]:
+    summary = index_data.get("summary", {})
+    return {
+        "snapshot_id": snapshot_id,
+        "full_snapshot_file": str(session_dir / f"{snapshot_id}.full.json"),
+        "index_file": str(session_dir / f"{snapshot_id}.index.json"),
+        "compressed_index_file": str(session_dir / f"{snapshot_id}.compressed_index.json"),
+        "lookup_manifest": {
+            "by_ref": True,
+            "by_role": bool(index_data.get("by_role")),
+            "by_text": bool(index_data.get("by_text")),
+            "by_region": bool(index_data.get("by_region")),
+            "by_tag": bool(index_data.get("by_tag")),
+        },
+        "summary": summary,
+        "top_level_groups": index_data.get("regions", [])[:10] if index_data.get("regions") else [],
+    }
 
 
 def _extract_json_object(text: str) -> Optional[Dict[str, Any]]:
@@ -177,9 +268,9 @@ def _validate_dpcli_action(action: Dict[str, Any], state: Optional[AgentState] =
     params = action.get("params") or {}
 
     if not skill:
-        return "缺少 skill 字段"
+        return "missing skill"
     if not isinstance(params, dict):
-        return "params 必须是对象"
+        return "params must be an object"
 
     required = {
         "click": ["ref", "locator"],
@@ -192,13 +283,13 @@ def _validate_dpcli_action(action: Dict[str, Any], state: Optional[AgentState] =
     if skill in required:
         has_any = any(bool(params.get(k)) for k in required[skill])
         if not has_any:
-            return f"{skill} 需要 {required[skill]} 中的一个"
+            return f"{skill} requires ref or locator"
 
     if skill == "click" and state:
         snapshot = state.get("dpcli_snapshot") or {}
         index = snapshot.get("data", {}).get("index") if isinstance(snapshot, dict) else None
         if index and params.get("locator"):
-            return "click 在有 snapshot 时必须使用 ref 而非 locator"
+            return "click must use a snapshot ref instead of a free-form locator"
 
     return None
 

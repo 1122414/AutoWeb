@@ -75,6 +75,12 @@ class AgentState(EnvState, TaskState):
     dpcli_result: Optional[Dict[str, Any]]
     dpcli_snapshot: Optional[Dict[str, Any]]
     dpcli_snapshot_view: Optional[Dict[str, Any]]
+    dpcli_snapshot_ref: Optional[Dict[str, Any]]       # Snapshot file references
+    dpcli_agent_view: Optional[Dict[str, Any]]          # Lossy planner view (Layer 1)
+    dpcli_snapshot_index: Optional[Dict[str, Any]]      # Index summary (Layer 2)
+    dpcli_observer_diagnostics: Optional[Dict[str, Any]] # Observer diagnostics
+    dpcli_target_result: Optional[Dict[str, Any]]       # TargetSelector output
+    dpcli_structured_plan: Optional[Dict[str, Any]]     # Planner structured intent
     dpcli_detail_batch_ran: bool
     execution_log: Optional[str]        # Executor 运行代码后的日志/返回值
 
