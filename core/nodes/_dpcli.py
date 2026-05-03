@@ -64,7 +64,25 @@ def _observer_dpcli_snapshot(state: AgentState) -> Optional[Command]:
         mode="agent_summary")
     if result.get("ok"):
         if DPCLI_FULL_SNAPSHOT_MODE:
-            return _build_full_snapshot_command(state, result, session)
+            try:
+                return _build_full_snapshot_command(state, result, session)
+            except Exception as full_err:
+                import traceback
+                logger.info(
+                    f"   ⚠️ [Observer] full snapshot 构建失败，降级到 legacy 视图: {full_err}"
+                )
+                legacy_cmd = _build_legacy_snapshot_command(state, result, session)
+                diagnostics_db = state.get("dpcli_observer_diagnostics") or {}
+                errors = list(diagnostics_db.get("errors", []))
+                errors.append({
+                    "stage": "full_snapshot_build",
+                    "error": str(full_err),
+                    "traceback": traceback.format_exc()[-500:],
+                })
+                diagnostics_db["errors"] = errors
+                legacy_update = legacy_cmd.update or {}
+                legacy_update["dpcli_observer_diagnostics"] = diagnostics_db
+                return Command(update=legacy_update, goto="Planner")
         return _build_legacy_snapshot_command(state, result, session)
 
     error = _dpcli_error(result)

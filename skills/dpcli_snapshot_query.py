@@ -162,10 +162,9 @@ class SnapshotQueryEngine:
     def find_by_text(
         self, text: str, scope: Optional[Dict[str, Any]] = None
     ) -> List[Dict[str, Any]]:
-        """按可见文本查找"""
-        tokens = text.lower().split()
+        text_lower = text.lower()
         candidates: Dict[str, Dict[str, Any]] = {}
-        for token in tokens:
+        for token in text_lower.split():
             if token in self._by_text:
                 for entry in self._by_text[token]:
                     ref = entry.get("ref", "")
@@ -175,6 +174,9 @@ class SnapshotQueryEngine:
                         candidates[ref]["_match_text"] = entry.get("text", "")
 
         results = list(candidates.values())
+        if not results and len(text.strip()) >= 2:
+            results = self._substring_search(text_lower)
+
         if scope:
             results = self._apply_scope(results, scope)
         return results[:20]
@@ -256,6 +258,18 @@ class SnapshotQueryEngine:
         return list(self._compressed)
 
     # ─── 内部工具 ────────────────────────────────────────────
+
+    def _substring_search(self, text_lower: str) -> List[Dict[str, Any]]:
+        results: List[Dict[str, Any]] = []
+        for ref, node in self._by_ref.items():
+            for field in ("name", "text", "placeholder", "label"):
+                val = str(node.get(field, "")).lower()
+                if text_lower in val:
+                    node["_match_field"] = field
+                    node["_match_text"] = str(node.get(field, ""))
+                    results.append(node)
+                    break
+        return results[:20]
 
     @staticmethod
     def _filter_by_text(candidates: List[Dict[str, Any]], text: str) -> List[Dict[str, Any]]:

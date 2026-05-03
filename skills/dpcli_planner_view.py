@@ -174,7 +174,8 @@ class PlannerViewGenerator:
             input_type = str(n.get("input_type", "")).lower()
 
             if role in ("searchbox", "textbox") or (tag == "input" and input_type in ("text", "search")):
-                if any(kw.lower() in text.lower() for kw in self.SEARCH_KEYWORDS):
+                has_keyword = any(kw.lower() in text.lower() for kw in self.SEARCH_KEYWORDS)
+                if has_keyword or role == "searchbox":
                     search_inputs.append(n)
 
             if role == "button" or tag in ("button", "a"):

@@ -44,12 +44,22 @@ class SnapshotIndexer:
         tree = idx.get("tree") or {}
         stats = idx.get("stats") or {}
 
-        all_nodes = list(interactables) + list(surface) + list(deep)
+        all_nodes_raw = list(interactables) + list(surface) + list(deep)
         self._ref_cache = {}
-        for n in all_nodes:
+        all_nodes: List[Dict[str, Any]] = []
+        for n in all_nodes_raw:
             ref = (n or {}).get("ref")
-            if ref:
-                self._ref_cache[str(ref)] = n
+            if not ref:
+                all_nodes.append(n)
+                continue
+            ref_str = str(ref)
+            existing = self._ref_cache.get(ref_str)
+            if existing:
+                merged = self._merge_node_info(existing, n)
+                self._ref_cache[ref_str] = merged
+            else:
+                self._ref_cache[ref_str] = n
+                all_nodes.append(n)
 
         return {
             "snapshot_id": self._extract_snapshot_id(data),
@@ -216,27 +226,25 @@ class SnapshotIndexer:
 
     @staticmethod
     def _compute_structural_hash(node: Dict[str, Any]) -> str:
-        """
-        计算 snapshot record 的结构指纹。
-
-        考虑: tag, role, input_type, stable_id
-        (结构特征——相对于 DOMCompressor 中的 tag+class+kids_tag_sequence)
-
-        不考虑: 具体文本、href、动态序号、短期 ref
-        """
         parts = [
             node.get("tag", ""),
             node.get("role", ""),
             node.get("input_type", ""),
             node.get("ref_type", ""),
+            node.get("parent_ref", ""),
         ]
-        # 如果有 children，用 children 的 role/tag 序列作为结构特征
-        children = node.get("children_map") or []
-        if children:
-            kid_tags = [f"{c.get('tag','')}:{c.get('role','')}" for c in children[:5] if isinstance(c, dict)]
-            parts.append("|".join(kid_tags))
         raw = "_".join(filter(None, parts))
         return hashlib.md5(raw.encode()).hexdigest()[:12]
+
+    @staticmethod
+    def _merge_node_info(
+        existing: Dict[str, Any], incoming: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        def _info_score(n: Dict[str, Any]) -> int:
+            fields = ("name", "text", "placeholder", "role", "tag",
+                      "input_type", "href", "aria_label")
+            return sum(1 for f in fields if n.get(f))
+        return incoming if _info_score(incoming) > _info_score(existing) else existing
 
     def _group_by_structural_hash(
         self, siblings: List[Dict[str, Any]]
