@@ -42,6 +42,44 @@ def _dpcli_planner_step(
         logger.info("   ⚠️ [Planner-dp_cli] JSON 解析失败，回退 legacy planner")
         return None
 
+    step_intent = structured_plan.get("step_intent", "")
+    needs_rag = structured_plan.get("needs_rag", False)
+    target_required = (
+        structured_plan.get("target_request", {}).get("required", False)
+        if isinstance(structured_plan.get("target_request"), dict)
+        else False
+    )
+
+    plan_text = json.dumps(structured_plan, ensure_ascii=False, indent=2)
+    response_msg = AIMessage(content=f"【dp_cli 结构化计划】\n{plan_text}")
+
+    update_dict = {
+        "messages": [response_msg],
+        "plan": plan_text,
+        "dpcli_structured_plan": structured_plan,
+        "execution_mode": "dp_cli",
+        "loop_count": loop_count + 1,
+        "is_complete": step_intent == "finish",
+    }
+
+    if verification:
+        update_dict["verification_result"] = {}
+
+    if step_intent == "finish":
+        logger.info("🏁 [Planner-dp_cli] 判定任务完成")
+        return Command(update=update_dict, goto="Verifier")
+
+    if needs_rag:
+        logger.info("   📚 [Planner-dp_cli] needs_rag → RAGNode")
+        return Command(update=update_dict, goto="RAGNode")
+
+    if target_required:
+        logger.info("   🎯 [Planner-dp_cli] 需要目标元素 → TargetSelector")
+        return Command(update=update_dict, goto="TargetSelector")
+
+    logger.info("   💻 [Planner-dp_cli] 无需目标 → Coder")
+    return Command(update=update_dict, goto="Coder")
+
 
 def _looks_like_global_rewrite_plan(plan_text: str) -> bool:
     text = (plan_text or "").lower()
@@ -92,7 +130,7 @@ def _planner_forced_extract_plan(task: str) -> str:
     )
 
 
-def planner_node(state: AgentState, config: RunnableConfig, llm) -> Command[Literal["CacheLookup", "RAGNode", "__end__"]]:
+def planner_node(state: AgentState, config: RunnableConfig, llm) -> Command[Literal["CacheLookup", "RAGNode", "TargetSelector", "Verifier", "Coder", "__end__"]]:
     """[Planner] 负责制定下一步计划（环境感知已由 Observer 完成）"""
     logger.info("\n🧠 [Planner] 正在制定计划...")
     tab = _get_tab(config)

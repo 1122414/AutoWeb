@@ -119,3 +119,4 @@ class AgentState(EnvState, TaskState):
 
     # Human-in-the-Loop 模式: "off" | "review_all"
     hitl_mode: Optional[str]
+    human_approval_required: Optional[bool]
