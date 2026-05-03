@@ -16,6 +16,33 @@ from prompts.planner_prompts import PLANNER_START_PROMPT, PLANNER_STEP_PROMPT, P
 from skills.logger import logger
 
 
+def _dpcli_planner_step(
+    state: AgentState,
+    config: RunnableConfig,
+    llm,
+    loop_count: int,
+    finished_steps: list,
+    verification: dict,
+) -> Command:
+    """dp_cli 模式 Planner：使用结构化 prompt 产出 dpcli_structured_plan。"""
+    from core.nodes._dpcli import _dpcli_planner_context, _extract_json_object
+    from langchain_core.messages import HumanMessage, AIMessage
+
+    context = _dpcli_planner_context(state)
+    if not context:
+        logger.info("   ⚠️ [Planner] dpcli_agent_view 不可用，回退 legacy planner")
+        return None
+
+    response = llm.invoke([HumanMessage(content=context)])
+    content = response.content
+    logger.info(f"   📋 [Planner-dp_cli] 原始输出: {content[:300]}")
+
+    structured_plan = _extract_json_object(content)
+    if not structured_plan:
+        logger.info("   ⚠️ [Planner-dp_cli] JSON 解析失败，回退 legacy planner")
+        return None
+
+
 def _looks_like_global_rewrite_plan(plan_text: str) -> bool:
     text = (plan_text or "").lower()
     keywords = ["全局", "全部重写", "从头", "重做", "重写", "推翻", "重新执行全部", "重来"]
@@ -190,6 +217,19 @@ def planner_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lite
                 },
                 goto="CacheLookup"
             )
+
+    # 0.3 dp_cli 模式：使用 dp_cli 专用 planner prompt + 结构化输出
+    from config import DPCLI_ENABLED
+    is_dpcli = (
+        DPCLI_ENABLED
+        and state.get("execution_mode") == "dp_cli"
+        and state.get("dpcli_agent_view")
+    )
+    if is_dpcli and loop_count > 0:
+        logger.info("   🧠 [Planner] dp_cli 模式，使用结构化规划 prompt")
+        dpcli_result = _dpcli_planner_step(state, config, llm, loop_count, finished_steps, verification)
+        if dpcli_result is not None:
+            return dpcli_result
 
     # 1. 从 State 读取 Observer 提供的定位策略（不再自己调用 observer）
     accumulated_strategies = state.get("locator_suggestions", [])

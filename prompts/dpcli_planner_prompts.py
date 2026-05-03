@@ -31,60 +31,73 @@ DPCLI_PLANNER_PROMPT = """
 
 ### 当你可以决定下一步时:
 ```json
-{
-    "status": "continue",
-    "intent": "click|type|snapshot|extract|list-items|expand|open|scroll|wait",
-    "target_hint": "自然语言描述目标元素，如：搜索按钮",
-    "target_constraints": {
-        "role": ["button"],
+{{
+    "step_intent": "click|type|extract|scroll|wait|navigate|snapshot|list-items|expand|open",
+    "target_request": {{
+        "required": true,
+        "target_hint": "自然语言描述目标元素",
+        "role": "button",
         "text_or_name": ["搜索", "Search"],
-        "near": "搜索输入框"
-    },
-    "expected_evidence": "执行后的预期结果，如：页面进入搜索结果页",
-    "reasoning": "简短说明为什么选择这个动作"
-}
+        "region_hint": "search_area",
+        "constraints": {{"near": "搜索输入框"}}
+    }},
+    "action_payload": {{
+        "text": "",
+        "url": "",
+        "direction": ""
+    }},
+    "reason": "简短说明为什么选择这个动作",
+    "needs_rag": false,
+    "needs_human_approval": false
+}}
 ```
 
 ### 当完成时:
 ```json
-{
-    "status": "done",
-    "summary": "完成摘要"
-}
+{{
+    "step_intent": "finish",
+    "reason": "任务完成",
+    "needs_rag": false,
+    "needs_human_approval": false
+}}
 ```
 
 ### 当需要更多观察时:
 ```json
-{
-    "status": "need_more_observation",
-    "inspect_request": {
-        "scope_hint": "main content",
-        "question": "需要确认主内容区是否存在可提取列表"
-    }
-}
+{{
+    "step_intent": "snapshot",
+    "reason": "需要重新获取页面快照",
+    "target_request": {{"required": false}},
+    "needs_rag": false,
+    "needs_human_approval": false
+}}
 ```
 
-## Intent 类型说明
+## step_intent 类型说明
 - click: 点击元素（按钮、链接）
 - type: 输入文本
 - snapshot: 重新获取页面快照
 - extract: 提取数据（从 data_region）
 - list-items: 列出数据区域项
 - expand: 展开/深入数据区域
-- open: 打开新 URL
+- open: 打开新 URL (填 action_payload.url)
+- navigate: 页面跳转
 - scroll: 滚动页面
 - wait: 等待页面变化
+- finish: 任务完成
 
 ## 规则
 1. 不要输出具体 ref (如 e12、r5) —— 那是 TargetSelector 的工作
-2. target_hint 用自然语言描述目标，要足够具体
-3. target_constraints 提供可验证的约束条件
-4. 如果不能确定目标，使用 need_more_observation
-5. 在 dpcli_agent_view 中的 capability_map 中查找能力
-6. 如果 loop_count 太大而未见进展，优先考虑 snapshot 重新观察
-7. 对于列表页优先使用 extract 获取数据
-8. 对于搜索页优先使用 type + click 组合
-9. 输出格式必须是合法 JSON，不要额外文字
+2. target_request.target_hint 用自然语言描述目标，要足够具体
+3. target_request.constraints 提供可验证的约束条件
+4. 在 dpcli_agent_view 中的 capability_map 中查找能力
+5. 如果 loop_count 太大而未见进展，优先考虑 snapshot 重新观察
+6. 对于列表页优先使用 extract 获取数据
+7. 对于搜索页优先使用 type + click 组合
+8. step_intent=finish 时只输出 reason 字段
+9. step_intent=open 或 navigate 时在 action_payload.url 中设置 URL
+10. step_intent=type 时在 action_payload.text 中设置输入文本
+11. 输出格式必须是合法 JSON，不要额外文字
 """
 
 DPCLI_PLANNER_START_PROMPT = """
