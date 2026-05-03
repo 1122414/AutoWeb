@@ -273,6 +273,7 @@ class SnapshotIndexer:
         # 提取数据列
         data: Dict[str, List[Any]] = {}
         data["_ref"] = [n.get("ref", "") for n in group]
+        data["_index"] = [self._extract_ref_index(n.get("ref", "")) for n in group]
         for key in ("text", "name", "href", "role", "tag"):
             col = [n.get(key, "") for n in group]
             if any(col):
@@ -314,6 +315,12 @@ class SnapshotIndexer:
         }
 
     # ─── 工具方法 ────────────────────────────────────────────
+
+    @staticmethod
+    def _extract_ref_index(ref: str) -> int:
+        import re
+        m = re.search(r'(\d+)$', str(ref))
+        return int(m.group(1)) if m else -1
 
     @staticmethod
     def _extract_snapshot_id(data: Dict[str, Any]) -> str:

@@ -189,6 +189,7 @@ def _build_index_summary(
             "by_text": bool(index_data.get("by_text")),
             "by_region": bool(index_data.get("by_region")),
             "by_tag": bool(index_data.get("by_tag")),
+            "by_structural_group": bool(index_data.get("by_parent")),
         },
         "summary": summary,
         "top_level_groups": index_data.get("regions", [])[:10] if index_data.get("regions") else [],
@@ -322,3 +323,27 @@ def _dpcli_failure_goto(error_code: str) -> str:
         "snapshot_failed": "Observer",
     }
     return mapping.get(error_code, "Observer")
+
+
+def _dpcli_planner_context(state: AgentState) -> str:
+    from prompts.dpcli_planner_prompts import DPCLI_PLANNER_PROMPT
+
+    agent_view = state.get("dpcli_agent_view")
+    if not agent_view:
+        return ""
+
+    try:
+        import json
+        view_text = json.dumps(agent_view, ensure_ascii=False, indent=2)
+    except Exception:
+        view_text = str(agent_view)
+
+    return DPCLI_PLANNER_PROMPT.format(
+        agent_view=view_text,
+        user_task=state.get("user_task", ""),
+        current_url=state.get("current_url", ""),
+        finished_steps=str(state.get("finished_steps", [])),
+        reflections=str(state.get("reflections", [])),
+        loop_count=str(state.get("loop_count", 0)),
+        execution_mode=state.get("execution_mode", "python_code"),
+    )
