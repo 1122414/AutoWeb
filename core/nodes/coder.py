@@ -97,13 +97,18 @@ def _dpcli_action_coder_node(state: AgentState, config: RunnableConfig, llm) -> 
                 },
                 goto="Coder",
             )
-        logger.info("   ⚠️ dp_cli action 连续生成失败，回退 Python Coder")
+        logger.info("   ⚠️ dp_cli action 连续生成失败，返回 Planner 重新规划")
         return Command(update={
-            "execution_mode": "python_code",
+            "execution_mode": "dp_cli",
             "generated_action": None,
             "_action_source": None,
-            "_dpcli_action_disabled": True,
-        }, goto="Coder")
+            "_dpcli_action_disabled": False,
+            "error_type": "dpcli_action_json",
+            "execution_result": f"dp_cli action generation failed after {retry_count + 1} attempts: {validation_error}",
+            "reflections": state.get("reflections", []) + [
+                f"dp_cli action JSON invalid after retries: {validation_error}"
+            ],
+        }, goto="Planner")
 
     return Command(
         update={
