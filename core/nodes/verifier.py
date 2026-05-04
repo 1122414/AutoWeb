@@ -32,6 +32,41 @@ def _verify_dpcli_action_deterministically(state):
     if not result.get("ok"):
         return None
 
+    if kind == "observation":
+        return _build_verification_result(
+            is_success=True,
+            is_done=False,
+            summary=f"observation succeeded: {skill}",
+            source="verifier",
+            failure_scope="local",
+            evidence=_compact_result_evidence(result),
+            fix_hint="continue planning with updated snapshot context",
+        )
+
+    if kind == "data":
+        data = result.get("data") or {}
+        items = data.get("items") if isinstance(data, dict) else None
+        if items and isinstance(items, list) and len(items) > 0:
+            return _build_verification_result(
+                is_success=True,
+                is_done=False,
+                summary=f"data action succeeded: {skill} ({len(items)} items)",
+                source="verifier",
+                failure_scope="local",
+                evidence=_compact_result_evidence(result),
+            )
+        return _build_verification_result(
+            is_success=False,
+            is_done=False,
+            summary=f"data action returned no usable items: {skill}",
+            source="verifier",
+            failure_scope="local",
+            evidence=_compact_result_evidence(result),
+            fix_hint="select a better data region or list ref",
+        )
+
+    return None
+
 
 def _handle_dpcli_success_after_verification(
     state,
@@ -85,41 +120,6 @@ def _handle_dpcli_success_after_verification(
             return Command(update=updates, goto="Executor")
     except Exception as policy_exc:
         logger.info(f"   [Verifier] detail batch policy skip: {policy_exc}")
-
-    return None
-
-    if kind == "observation":
-        return _build_verification_result(
-            is_success=True,
-            is_done=False,
-            summary=f"observation succeeded: {skill}",
-            source="verifier",
-            failure_scope="local",
-            evidence=_compact_result_evidence(result),
-            fix_hint="continue planning with updated snapshot context",
-        )
-
-    if kind == "data":
-        data = result.get("data") or {}
-        items = data.get("items") if isinstance(data, dict) else None
-        if items and isinstance(items, list) and len(items) > 0:
-            return _build_verification_result(
-                is_success=True,
-                is_done=False,
-                summary=f"data action succeeded: {skill} ({len(items)} items)",
-                source="verifier",
-                failure_scope="local",
-                evidence=_compact_result_evidence(result),
-            )
-        return _build_verification_result(
-            is_success=False,
-            is_done=False,
-            summary=f"data action returned no usable items: {skill}",
-            source="verifier",
-            failure_scope="local",
-            evidence=_compact_result_evidence(result),
-            fix_hint="select a better data region or list ref",
-        )
 
     return None
 
