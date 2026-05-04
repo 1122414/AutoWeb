@@ -309,9 +309,10 @@ def _validate_dpcli_action(action: Dict[str, Any], state: Optional[AgentState] =
         return "params must be an object"
 
     required = {
-        "click": ["ref", "locator"],
-        "type": ["ref", "locator"],
-        "find": ["ref", "locator"],
+        "click": ["ref", "locator", "target_ref"],
+        "type": ["ref", "locator", "target_ref"],
+        "select": ["ref", "locator", "target_ref"],
+        "find": ["text", "ref", "locator"],
         "expand": ["ref", "locator"],
         "list-items": ["ref", "locator"],
     }
@@ -326,6 +327,36 @@ def _validate_dpcli_action(action: Dict[str, Any], state: Optional[AgentState] =
         index = snapshot.get("data", {}).get("index") if isinstance(snapshot, dict) else None
         if index and params.get("locator"):
             return "click must use a snapshot ref instead of a free-form locator"
+
+    if skill in ("click", "type", "select") and state:
+        target_result = state.get("dpcli_target_result") or {}
+        structured_plan = state.get("dpcli_structured_plan") or {}
+        target_required = (
+            structured_plan.get("target_request", {}).get("required", False)
+            if isinstance(structured_plan.get("target_request"), dict)
+            else False
+        )
+
+        if target_required:
+            if target_result.get("status") != "selected":
+                return (
+                    f"{skill} requires a selected target but TargetSelector status is "
+                    f"'{target_result.get('status', 'unknown')}'"
+                )
+
+            expected_ref = target_result.get("target_ref")
+            if expected_ref:
+                action_ref = params.get("ref") or params.get("target_ref")
+                if not action_ref:
+                    return f"{skill} requires ref/target_ref but none provided"
+                if action_ref != expected_ref:
+                    return (
+                        f"target ref mismatch: action uses '{action_ref}' "
+                        f"but TargetSelector selected '{expected_ref}'"
+                    )
+
+            if params.get("locator") and not params.get("ref") and not params.get("target_ref"):
+                return f"{skill} must use target_ref from TargetSelector, not free-form locator"
 
     return None
 

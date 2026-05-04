@@ -205,6 +205,10 @@ class DPCLIExecutor:
         if not isinstance(params, dict):
             return self._invalid_action("Action params must be a JSON object.", skill=skill)
 
+        if "target_ref" in params and "ref" not in params:
+            params = dict(params)
+            params["ref"] = params["target_ref"]
+
         try:
             if skill == "open":
                 return self.open(str(params["url"]), wait_time=params.get("wait_time"))
