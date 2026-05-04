@@ -274,5 +274,25 @@ class TestCoderPromptNoLoopSnapshot(unittest.TestCase):
                       "Coder prompt must mention observation actions")
 
 
+class TestNonDpcliVerifierPrompt(unittest.TestCase):
+    """Non-dp_cli mode should not crash with KeyError on new template fields."""
+
+    def test_non_dpcli_prompt_builds_without_keyerror(self):
+        from prompts.verifier_prompts import VERIFIER_CHECK_PROMPT
+        result = VERIFIER_CHECK_PROMPT.format(
+            user_task="test",
+            current_plan="plan",
+            current_url="http://test.com",
+            log="log",
+            generated_action="",
+            dpcli_action_kind="",
+            dpcli_result_summary="",
+            structured_plan="",
+        )
+        self.assertIn("test", result)
+        self.assertNotIn("{generated_action}", result,
+                         "All format fields should be resolved")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -76,6 +76,10 @@ def _build_dpcli_verifier_prompt(state, task, current_plan, current_url, log):
             current_plan=current_plan,
             current_url=current_url,
             log=log[-2000:],
+            generated_action="",
+            dpcli_action_kind="",
+            dpcli_result_summary="",
+            structured_plan="",
         )
 
     import json
