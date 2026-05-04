@@ -12,6 +12,47 @@ from core.state_v2 import AgentState
 from core.nodes._verification import _build_verification_result
 from skills.logger import logger
 
+
+def _dpcli_action_kind(action: Optional[Dict[str, Any]] = None) -> str:
+    """Classify a dp_cli action as observation, data, or page.
+
+    observation: snapshot, expand, resolve-locator, find, session.inspect
+                 (improve agent's visible context, no page effect expected)
+    data: extract, list-items, batch-detail-extract
+          (produce structured data output)
+    page: open, navigate, click, type, scroll, wait
+          (change browser state or page content)
+    """
+    skill = str((action or {}).get("skill") or "").strip().lower()
+    if skill in {"snapshot", "expand", "resolve-locator", "find",
+                 "session.inspect", "session_inspect"}:
+        return "observation"
+    if skill in {"extract", "list-items", "batch-detail-extract"}:
+        return "data"
+    if skill in {"open", "navigate", "click", "type", "scroll", "wait"}:
+        return "page"
+    return "unknown"
+
+
+def _compact_result_evidence(result: Dict[str, Any]) -> Dict[str, Any]:
+    """Extract compact evidence from a dp_cli result for verifier context."""
+    evidence: Dict[str, Any] = {"ok": result.get("ok")}
+    data = result.get("data") or {}
+    if isinstance(data, dict):
+        page = data.get("page") or {}
+        evidence["url"] = page.get("url", "")
+        stats = (data.get("index") or {}).get("stats") or {}
+        if stats:
+            evidence["node_count"] = stats.get("total_nodes")
+        regions = data.get("index", {}).get("data_regions")
+        if regions:
+            evidence["data_regions"] = len(regions)
+        items = data.get("items")
+        if isinstance(items, list):
+            evidence["item_count"] = len(items)
+    return evidence
+
+
 def _compact_dpcli_snapshot(snapshot: Dict[str, Any], last_result: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     data = snapshot.get("data") if isinstance(snapshot, dict) else {}
     if not isinstance(data, dict):
@@ -314,7 +355,7 @@ def _validate_dpcli_action(action: Dict[str, Any], state: Optional[AgentState] =
         "select": ["ref", "locator", "target_ref"],
         "find": ["text", "ref", "locator"],
         "expand": ["ref", "locator"],
-        "list-items": ["ref", "locator"],
+        "list-items": ["group_ref", "ref", "locator", "target_ref"],
     }
 
     if skill in required:

@@ -109,6 +109,8 @@ from core.nodes._dpcli import (
     _dpcli_error,
     _dpcli_failure_goto,
     _dpcli_planner_context,
+    _dpcli_action_kind,
+    _compact_result_evidence,
 )
 
 # ============================================================================

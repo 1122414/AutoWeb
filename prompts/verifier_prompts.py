@@ -9,6 +9,10 @@ VERIFIER_CHECK_PROMPT = """
 【当前计划】{current_plan}
 【当前 URL】{current_url}
 【执行日志】{log}
+【生成动作】{generated_action}
+【动作类型】{dpcli_action_kind}
+【执行结果摘要】{dpcli_result_summary}
+【结构化计划】{structured_plan}
 
 【验收原则】
 1. **严格对比计划目标**: 你必须将【当前计划】中描述的具体目标动作，与【执行日志】和【当前 URL】的实际结果进行严格对比。
@@ -18,6 +22,21 @@ VERIFIER_CHECK_PROMPT = """
 2. **不要被执行日志误导**: 执行日志可能显示代码运行无错误，但代码执行的操作可能与计划目标不一致。代码"运行成功"≠"完成了计划目标"。
 3. **Warning 不算失败**: "Warning:"、"Failed to wait"、"没有等到新标签页" 等提示只是警告，不影响步骤成功
 4. **禁止越权判断**: 严禁在 Summary 中说"核心任务已完成"、"整体目标已达成"等整体性评价，这不是你的职责！
+
+【dp_cli 动作类型特殊规则】
+If dpcli_action_kind is "observation":
+- Verify only whether the observation command succeeded (ok=true).
+- Do NOT require URL changes.
+- Do NOT require visible DOM changes.
+- Do NOT treat "expanded compressed snapshot groups" as a browser interaction.
+- The step is successful if the command returned ok=true and provided snapshot/index/expanded data.
+
+If dpcli_action_kind is "data":
+- Verify whether usable data/items were returned.
+- Do NOT require URL changes.
+
+If dpcli_action_kind is "page":
+- Verify page/action effects relevant to the plan.
 
 格式:
 Status: [STEP_SUCCESS | STEP_FAIL]

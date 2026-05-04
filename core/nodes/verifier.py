@@ -14,9 +14,88 @@ from core.nodes._verification import (
     _normalize_failure_scope,
 )
 from core.nodes._cache import _handle_cache_failure
-from core.nodes._dpcli import _dpcli_result_url
+from core.nodes._dpcli import _dpcli_result_url, _dpcli_action_kind, _compact_result_evidence
 from prompts.verifier_prompts import VERIFIER_CHECK_PROMPT
 from skills.logger import logger
+
+
+def _verify_dpcli_action_deterministically(state):
+    """Deterministic verification for dp_cli observation/data actions.
+
+    Returns a verification_result dict, or None to fall through to LLM verifier.
+    """
+    action = state.get("generated_action") or {}
+    result = state.get("dpcli_result") or {}
+    kind = _dpcli_action_kind(action)
+    skill = str(action.get("skill") or "").lower()
+
+    if not result.get("ok"):
+        return None
+
+    if kind == "observation":
+        return _build_verification_result(
+            is_success=True,
+            is_done=False,
+            summary=f"observation succeeded: {skill}",
+            source="verifier",
+            failure_scope="local",
+            evidence=_compact_result_evidence(result),
+            fix_hint="continue planning with updated snapshot context",
+        )
+
+    if kind == "data":
+        data = result.get("data") or {}
+        items = data.get("items") if isinstance(data, dict) else None
+        if items and isinstance(items, list) and len(items) > 0:
+            return _build_verification_result(
+                is_success=True,
+                is_done=False,
+                summary=f"data action succeeded: {skill} ({len(items)} items)",
+                source="verifier",
+                failure_scope="local",
+                evidence=_compact_result_evidence(result),
+            )
+        return _build_verification_result(
+            is_success=False,
+            is_done=False,
+            summary=f"data action returned no usable items: {skill}",
+            source="verifier",
+            failure_scope="local",
+            evidence=_compact_result_evidence(result),
+            fix_hint="select a better data region or list ref",
+        )
+
+    return None
+
+
+def _build_dpcli_verifier_prompt(state, task, current_plan, current_url, log):
+    """Build verifier prompt with dp_cli action context when appropriate."""
+    if state.get("execution_mode") != "dp_cli":
+        return VERIFIER_CHECK_PROMPT.format(
+            user_task=task,
+            current_plan=current_plan,
+            current_url=current_url,
+            log=log[-2000:],
+        )
+
+    import json
+    action = state.get("generated_action") or {}
+    kind = _dpcli_action_kind(action)
+    result = state.get("dpcli_result") or {}
+    structured_plan = state.get("dpcli_structured_plan") or {}
+
+    return VERIFIER_CHECK_PROMPT.format(
+        user_task=task,
+        current_plan=current_plan,
+        current_url=current_url,
+        log=log[-2000:],
+        generated_action=json.dumps(action, ensure_ascii=False, indent=2),
+        dpcli_action_kind=kind,
+        dpcli_result_summary=json.dumps(
+            _compact_result_evidence(result), ensure_ascii=False, indent=2),
+        structured_plan=json.dumps(
+            structured_plan, ensure_ascii=False, indent=2),
+    )
 
 def verifier_node(state: AgentState, config: RunnableConfig, llm) -> Command[Literal["Observer", "Planner", "Executor", "RAGNode"]]:
     """[Verifier] 验收并决定下一步"""
@@ -101,13 +180,36 @@ def verifier_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lit
                 goto="Observer"
             )
 
-    # 2. LLM 验收（优化 Prompt）
-    prompt = VERIFIER_CHECK_PROMPT.format(
-        user_task=task,
-        current_plan=current_plan,
-        current_url=current_url,
-        log=log[-2000:],
-    )
+    # 2. dp_cli deterministic verification (before LLM)
+    if state.get("execution_mode") == "dp_cli":
+        deterministic = _verify_dpcli_action_deterministically(state)
+        if deterministic is not None:
+            is_success = deterministic["is_success"]
+            summary = deterministic["summary"]
+            logger.info(f"\n   [Verifier] dp_cli deterministic: {'SUCCESS' if is_success else 'FAIL'} ({summary})")
+
+            updates = {
+                "messages": [AIMessage(content=f"【dp_cli验收】{summary}")],
+                "is_complete": False,
+                "current_url": current_url,
+                "verification_result": deterministic,
+            }
+
+            if is_success:
+                if _dpcli_action_kind(state.get("generated_action") or {}) != "observation":
+                    updates["finished_steps"] = [summary]
+                updates["_failed_code_cache_ids"] = []
+                updates["_failed_dom_cache_ids"] = []
+                updates["_cache_hit_id"] = None
+                logger.info("   [Verifier] dp_cli action succeeded, continuing to Observer")
+                return Command(update=updates, goto="Observer")
+
+            updates["reflections"] = [f"dp_cli step failed: {summary}"]
+            logger.info("   [Verifier] dp_cli action failed, returning to Observer")
+            return Command(update=updates, goto="Observer")
+
+    # 3. LLM 验收（优化 Prompt）
+    prompt = _build_dpcli_verifier_prompt(state, task, current_plan, current_url, log)
     response = llm.invoke([HumanMessage(content=prompt)])
     content = response.content
 
