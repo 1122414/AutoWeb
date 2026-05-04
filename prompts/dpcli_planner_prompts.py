@@ -98,6 +98,10 @@ DPCLI_PLANNER_PROMPT = """
 9. step_intent=open 或 navigate 时在 action_payload.url 中设置 URL
 10. step_intent=type 时在 action_payload.text 中设置输入文本
 11. 输出格式必须是合法 JSON，不要额外文字
+12. 压缩组 (compressed/omitted groups) 是内部快照表达，不是页面折叠UI。绝不要求展开所有压缩组。
+13. 如果需更多上下文，只选一个最相关的 data_region、top_level_group 或 content_region 做 expand。
+14. extract/list-items 是内部观察动作后的合理下一步；observation 成功后继续走向数据提取。
+15. 列表采集场景优先 extract/list-items，只有候选 data region 都不足时才能要求 snapshot。
 """
 
 DPCLI_PLANNER_START_PROMPT = """

@@ -32,6 +32,9 @@ Rules:
 - Do not use eval.
 - If the page changed or refs may be stale, use snapshot.
 - For list/data collection, prefer extract on a data region ref.
+- If an expand target is not found, do NOT loop snapshot. Use extract/list-items when data_regions are available.
+- Snapshot and expand are internal observation actions, not user progress. After them, continue to data extraction.
+- Observation steps (snapshot, find, expand, resolve-locator) do not require page changes to succeed.
 
 Required output shape:
 {
