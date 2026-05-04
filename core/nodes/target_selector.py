@@ -1,27 +1,20 @@
 """
 TargetSelector - dp_cli target ref confirmation layer (LangGraph node wrapper).
 
-The pure TargetSelector class lives in skills/dpcli_target_selector.py
-to allow smoke scripts and tests to import it without LangGraph/tiktoken deps.
+The pure TargetSelector class lives in skills/dpcli_target_selector.py so smoke
+scripts and tests can import it without LangGraph/tiktoken dependencies.
 """
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Literal
 
+from langchain_core.runnables import RunnableConfig
+from langgraph.types import Command
+
+from core.state_v2 import AgentState
+from skills.dpcli_snapshot_store import SnapshotStore
 from skills.dpcli_target_selector import TargetSelector, _normalize_target_constraints
 from skills.logger import logger
-
-
-# =============================================================================
-# LangGraph Node
-# =============================================================================
-
-from typing import Literal  # noqa: E402
-
-from langchain_core.runnables import RunnableConfig  # noqa: E402
-from langgraph.types import Command  # noqa: E402
-
-from core.state_v2 import AgentState  # noqa: E402
 
 
 def target_selector_node(
@@ -29,7 +22,7 @@ def target_selector_node(
 ) -> Command[Literal["Coder", "Planner", "Observer", "ErrorHandler"]]:
     from config import DPCLI_ENABLED
 
-    logger.info("\n🎯 [TargetSelector] 正在匹配页面目标元素...")
+    logger.info("\n[TargetSelector] selecting target element from snapshot...")
 
     if not DPCLI_ENABLED or state.get("execution_mode") == "python_code":
         return Command(
@@ -46,10 +39,10 @@ def target_selector_node(
         )
 
     snapshot_ref = state.get("dpcli_snapshot_ref")
+    prev_result = state.get("dpcli_target_result") or {}
     if not snapshot_ref:
-        prev_result = state.get("dpcli_target_result") or {}
         if prev_result.get("status") == "need_more_observation":
-            logger.info("   ⚠️ [TargetSelector] full snapshot 二次不可用，进入 ErrorHandler")
+            logger.info("   [TargetSelector] full snapshot unavailable after retry")
             return Command(
                 update={
                     "dpcli_target_result": {
@@ -61,13 +54,16 @@ def target_selector_node(
                 },
                 goto="ErrorHandler",
             )
-        logger.info("   🔄 [TargetSelector] full snapshot 不可用，返回 Observer 重新观察")
+        logger.info("   [TargetSelector] full snapshot unavailable, observing again")
         return Command(
             update={"dpcli_target_result": {"status": "need_more_observation"}},
             goto="Observer",
         )
 
-    selector = TargetSelector()
+    snapshot_session = snapshot_ref.get("session") or state.get("dpcli_session")
+    selector = TargetSelector(
+        store=SnapshotStore(session=str(snapshot_session)) if snapshot_session else None
+    )
     intent = target_request.get("step_intent") or structured_plan.get(
         "step_intent", "click"
     )
@@ -83,38 +79,43 @@ def target_selector_node(
 
     status = result.get("status", "not_found")
     logger.info(
-        f"   📊 [TargetSelector] 状态: {status}, "
-        f"target_ref: {result.get('target_ref', 'N/A')}"
+        f"   [TargetSelector] status={status}, "
+        f"target_ref={result.get('target_ref', 'N/A')}"
     )
 
     if status == "selected":
-        return Command(
-            update={"dpcli_target_result": result},
-            goto="Coder",
-        )
+        return Command(update={"dpcli_target_result": result}, goto="Coder")
 
-    if status == "not_required" or status == "not_found":
-        return Command(
-            update={"dpcli_target_result": result},
-            goto="Coder",
-        )
+    if status in ("not_required", "not_found"):
+        return Command(update={"dpcli_target_result": result}, goto="Coder")
 
     if status == "need_approval":
-        logger.info("   ⚠️ [TargetSelector] 候选冲突，返回 Planner 写入审批信号")
+        logger.info("   [TargetSelector] multiple candidates need planner arbitration")
         return Command(
             update={
                 "dpcli_target_result": result,
                 "human_approval_required": True,
                 "execution_result": (
-                    f"TargetSelector 候选冲突 ({result.get('approval_reason', 'unknown')})，"
-                    "请 Planner 决定下一个 action"
+                    "TargetSelector candidates conflict "
+                    f"({result.get('approval_reason', 'unknown')}), "
+                    "Planner should clarify the target and action."
                 ),
             },
             goto="Planner",
         )
 
-    logger.info(f"   ⚠️ [TargetSelector] 状态 {status}，返回 Observer")
-    return Command(
-        update={"dpcli_target_result": result},
-        goto="Observer",
-    )
+    if (
+        status == "need_more_observation"
+        and prev_result.get("status") == "need_more_observation"
+    ):
+        return Command(
+            update={
+                "dpcli_target_result": result,
+                "error": result.get("reason") or "snapshot index not available",
+                "error_type": "dpcli_snapshot_missing",
+            },
+            goto="ErrorHandler",
+        )
+
+    logger.info(f"   [TargetSelector] status={status}, observing again")
+    return Command(update={"dpcli_target_result": result}, goto="Observer")

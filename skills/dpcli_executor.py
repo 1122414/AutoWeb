@@ -246,7 +246,11 @@ class DPCLIExecutor:
                 )
             if skill == "list-items":
                 return self.list_items(
-                    group_ref=str(params["group_ref"]),
+                    group_ref=str(
+                        params.get("group_ref")
+                        or params.get("ref")
+                        or params["target_ref"]
+                    ),
                     sample_size=int(params.get("sample_size", 5)),
                     wait_time=params.get("wait_time"),
                 )

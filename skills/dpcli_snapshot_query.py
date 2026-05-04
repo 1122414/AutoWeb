@@ -66,8 +66,21 @@ class SnapshotQueryEngine:
     def load_from_ref(self, snapshot_ref: Dict[str, Any]) -> bool:
         """从 dpcli_snapshot_ref 加载"""
         sid = snapshot_ref.get("snapshot_id", "")
-        if sid:
+        if not sid:
+            return False
+
+        if self.load(sid):
+            return True
+
+        session = snapshot_ref.get("session")
+        if session and session != getattr(self._store, "session", None):
+            base_dir = getattr(self._store, "_base_dir", None)
+            self._store = SnapshotStore(
+                session=str(session),
+                base_dir=str(base_dir) if base_dir else None,
+            )
             return self.load(sid)
+
         return False
 
     # ─── 查询 API ───────────────────────────────────────────

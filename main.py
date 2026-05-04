@@ -620,7 +620,7 @@ def interactive_loop(app, browser_instance, llm, observer):
                 "_cache_hit_id": None,
                 "_failed_code_cache_ids": [],
                 "generated_action": None,
-                "execution_mode": None,
+                "execution_mode": "dp_cli" if DPCLI_ENABLED else None,
                 "dpcli_result": None,
                 "dpcli_snapshot": None,
                 "dpcli_snapshot_view": None,
