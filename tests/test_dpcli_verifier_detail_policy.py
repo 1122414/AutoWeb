@@ -212,5 +212,67 @@ class TestDetailBatchPolicy(unittest.TestCase):
                         "list-items with detail task + url items should batch")
 
 
+class TestLLMBranchDetailBatch(unittest.TestCase):
+    """Plan scenario 4: LLM success branch still triggers batch-detail-extract."""
+
+    def test_page_action_llm_success_triggers_batch(self):
+        """When a page action passes through deterministic (returns None) and
+        LLM marks success, the LLM branch should still trigger detail policy.
+        This mirrors the helper's behavior on the LLM path."""
+        state = {
+            "execution_mode": "dp_cli",
+            "user_task": "获取榜单小说信息，并点击各个小说获取简介",
+            "generated_action": {"skill": "click", "params": {"ref": "e2"}},
+            "dpcli_result": {
+                "ok": True, "action": "click",
+                "data": {
+                    "page": {"url": "https://qidian.com/rank/"},
+                    "items": [
+                        {"title": "Book A", "url": "https://book-a"},
+                        {"title": "Book B", "detail_url": "https://book-b"},
+                    ],
+                },
+            },
+            "dpcli_detail_batch_ran": False,
+            "plan": '{"step_intent":"click"}',
+            "finished_steps": [],
+            "current_url": "https://qidian.com/rank/",
+        }
+
+        # page action → deterministic returns None (fall through to LLM)
+        det = _verify_deterministic(state["generated_action"], state["dpcli_result"])
+        self.assertIsNone(det,
+                          "page action should return None from deterministic verifier")
+
+        # LLM marks success → verifier_node calls _handle_dpcli_success
+        # which runs should_run_detail_batch → True for detail task + url items
+        should_batch = _should_run_detail_batch(state)
+        self.assertTrue(should_batch,
+                        "LLM success branch should still trigger batch-detail-extract")
+
+    def test_llm_path_non_detail_task_skips_batch(self):
+        """LLM success for non-detail task → no batch."""
+        state = {
+            "execution_mode": "dp_cli",
+            "user_task": "只获取榜单小说标题",
+            "generated_action": {"skill": "click", "params": {"ref": "e2"}},
+            "dpcli_result": {
+                "ok": True, "action": "click",
+                "data": {"items": [{"title": "Book A", "url": "https://book-a"}]},
+            },
+            "dpcli_detail_batch_ran": False,
+            "plan": "",
+            "finished_steps": [],
+            "current_url": "https://qidian.com/",
+        }
+
+        det = _verify_deterministic(state["generated_action"], state["dpcli_result"])
+        self.assertIsNone(det)
+
+        should_batch = _should_run_detail_batch(state)
+        self.assertFalse(should_batch,
+                         "non-detail task should skip batch in LLM path too")
+
+
 if __name__ == "__main__":
     unittest.main()
