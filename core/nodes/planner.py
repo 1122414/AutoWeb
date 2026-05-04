@@ -175,7 +175,20 @@ def planner_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lite
             goto="CacheLookup"
         )
 
-    # 0.2 新任务但在已有页面上（任务连续性检测）
+    # 0.2 dp_cli 模式：Observer 已生成 dpcli_agent_view 时优先使用结构化 Planner
+    from config import DPCLI_ENABLED
+    is_dpcli = (
+        DPCLI_ENABLED
+        and state.get("dpcli_agent_view")
+        and state.get("execution_mode") != "python_code"
+    )
+    if is_dpcli:
+        logger.info("   🧠 [Planner] dp_cli 模式，使用结构化规划 prompt")
+        dpcli_result = _dpcli_planner_step(state, config, llm, loop_count, finished_steps, verification)
+        if dpcli_result is not None:
+            return dpcli_result
+
+    # 0.3 新任务但在已有页面上（任务连续性检测）
     if loop_count == 0 and not is_initial_page:
         logger.info(f"   🔄 [Planner] 检测到已有页面: {current_url[:50]}...")
 
@@ -255,19 +268,6 @@ def planner_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lite
                 },
                 goto="CacheLookup"
             )
-
-    # 0.3 dp_cli 模式：使用 dp_cli 专用 planner prompt + 结构化输出
-    from config import DPCLI_ENABLED
-    is_dpcli = (
-        DPCLI_ENABLED
-        and state.get("dpcli_agent_view")
-        and state.get("execution_mode") != "python_code"
-    )
-    if is_dpcli and loop_count > 0:
-        logger.info("   🧠 [Planner] dp_cli 模式，使用结构化规划 prompt")
-        dpcli_result = _dpcli_planner_step(state, config, llm, loop_count, finished_steps, verification)
-        if dpcli_result is not None:
-            return dpcli_result
 
     # 1. 从 State 读取 Observer 提供的定位策略（不再自己调用 observer）
     accumulated_strategies = state.get("locator_suggestions", [])
