@@ -18,6 +18,36 @@ from skills.dpcli_snapshot_store import SnapshotStore
 from skills.logger import logger
 
 
+def _normalize_target_constraints(target_request: Dict[str, Any]) -> Dict[str, Any]:
+    """将 target_request 的一级字段 (role, text_or_name, region_hint, near)
+    合并到 constraints 字典中，确保 TargetSelector 收到完整约束。
+
+    dp_cli Planner prompt 中 role/text_or_name/region_hint 是 target_request
+    的一级字段，而 TargetSelector.select() 只从 target_constraints 读取。
+    """
+    constraints = dict(target_request.get("constraints") or {})
+
+    role = target_request.get("role")
+    if role and "role" not in constraints:
+        constraints["role"] = role if isinstance(role, list) else [role]
+
+    text_or_name = target_request.get("text_or_name")
+    if text_or_name and "text_or_name" not in constraints:
+        constraints["text_or_name"] = (
+            text_or_name if isinstance(text_or_name, list) else [text_or_name]
+        )
+
+    region_hint = target_request.get("region_hint")
+    if region_hint and "region_hint" not in constraints:
+        constraints["region_hint"] = region_hint
+
+    near = target_request.get("near")
+    if near and "near" not in constraints:
+        constraints["near"] = near
+
+    return constraints
+
+
 class TargetSelector:
     """
     目标选择器
@@ -419,7 +449,7 @@ def target_selector_node(
         query={
             "intent": intent,
             "target_hint": target_request.get("target_hint", ""),
-            "target_constraints": target_request.get("constraints", {}),
+            "target_constraints": _normalize_target_constraints(target_request),
         },
         snapshot_ref=snapshot_ref,
     )
