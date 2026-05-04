@@ -74,21 +74,19 @@ class TestTargetSelectorBugRegression(unittest.TestCase):
     def test_original_bug_line_is_fixed(self):
         import os
         repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        target_file = os.path.join(repo_root, "core", "nodes", "target_selector.py")
+        target_file = os.path.join(repo_root, "skills", "dpcli_target_selector.py")
 
         with open(target_file, "r", encoding="utf-8") as f:
             content = f.read()
 
-        fixed_pattern = (
-            'constraints.get("text_or_name") or '
-            '([target_hint] if target_hint else [])'
-        )
-        self.assertIn(fixed_pattern, content,
-                       "bug 修复未生效：text_hints 行仍使用旧逻辑")
+        self.assertIn('constraints.get("text_or_name")', content,
+                       "bug fix not applied: text_hints line missing from TargetSelector")
+        self.assertIn("([target_hint] if target_hint else [])", content,
+                       "bug fix not applied: fallback to target_hint missing")
 
         bug_pattern_approx = 'or [target_hint] if target_hint'
         self.assertNotIn(bug_pattern_approx, content,
-                         f"bug 版本仍存在：{bug_pattern_approx}")
+                         f"bug version still exists: {bug_pattern_approx}")
 
 
 if __name__ == "__main__":

@@ -100,7 +100,7 @@ def test_searchbox_without_placeholder():
 def test_selector_empty_target_hint_with_constraints():
     from skills.dpcli_snapshot_store import SnapshotStore
     from skills.dpcli_snapshot_indexer import SnapshotIndexer
-    from core.nodes.target_selector import TargetSelector
+    from skills.dpcli_target_selector import TargetSelector
     temp_dir = tempfile.mkdtemp()
     try:
         store = SnapshotStore(session="smoke", base_dir=temp_dir)
@@ -122,7 +122,7 @@ def test_selector_empty_target_hint_with_constraints():
 def test_legacy_text_hints_fallback():
     from skills.dpcli_snapshot_store import SnapshotStore
     from skills.dpcli_snapshot_indexer import SnapshotIndexer
-    from core.nodes.target_selector import TargetSelector
+    from skills.dpcli_target_selector import TargetSelector
     temp_dir = tempfile.mkdtemp()
     try:
         store = SnapshotStore(session="smoke", base_dir=temp_dir)

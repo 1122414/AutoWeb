@@ -12,12 +12,11 @@ import unittest
 
 
 def _load_normalizer():
-    """Load _normalize_target_constraints from target_selector.py directly,
-    bypassing core.nodes.__init__ to avoid heavy dependency chain."""
+    """Load _normalize_target_constraints from skills/dpcli_target_selector.py directly."""
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     spec = importlib.util.spec_from_file_location(
         "target_selector_module",
-        os.path.join(repo_root, "core", "nodes", "target_selector.py"),
+        os.path.join(repo_root, "skills", "dpcli_target_selector.py"),
     )
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
