@@ -138,6 +138,7 @@ def planner_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lite
     task = state["user_task"]
     loop_count = state.get("loop_count", 0)
     finished_steps = state.get("finished_steps", [])
+    verification = state.get("verification_result", {}) or {}
 
     # 循环限制：防止死循环
     MAX_LOOP_COUNT = 20
@@ -291,7 +292,6 @@ def planner_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lite
         reflection_str = "\n⚠️ **之前的失败教训 (请在规划时重点规避)**:\n" + \
             "\n".join([f"- {r}" for r in reflections])
 
-    verification = state.get("verification_result", {}) or {}
     last_verification = verification.get(
         "summary", "(无)") if verification else "(无)"
     verification_focus = _verification_focus_text(verification)
