@@ -32,6 +32,62 @@ def _verify_dpcli_action_deterministically(state):
     if not result.get("ok"):
         return None
 
+
+def _handle_dpcli_success_after_verification(
+    state,
+    updates,
+    task,
+    current_plan,
+    current_url,
+    summary,
+):
+    """Shared post-verification logic for dp_cli success paths.
+
+    Runs ActionCache save and detail batch policy.
+    Returns Command(goto="Executor") if batch is triggered, else None.
+    """
+    # ActionCache save (failure must not block detail policy)
+    try:
+        from config import ACTION_CACHE_ENABLED
+        if ACTION_CACHE_ENABLED and state.get("_action_source") != "action_cache":
+            from skills.action_cache import action_cache_manager
+            action_cache_manager.save(
+                user_task=task,
+                goal=current_plan,
+                url=current_url,
+                action=state.get("generated_action") or {},
+                snapshot_view=state.get("dpcli_snapshot_view"),
+                result_summary=summary,
+            )
+    except Exception as action_store_exc:
+        logger.info(f"   [ActionCache] save exception: {action_store_exc}")
+
+    # Detail batch policy
+    try:
+        from skills.dpcli_crawl_policy import (
+            build_detail_batch_action,
+            should_run_detail_batch,
+        )
+        policy_state = dict(state)
+        policy_state.update(updates)
+        if should_run_detail_batch(policy_state):
+            detail_action = build_detail_batch_action(policy_state)
+            item_count = len(detail_action.get("params", {}).get("items", []))
+            logger.info(
+                f"   [Verifier] extract OK + detail task({item_count}) -> batch-detail-extract")
+            updates.update({
+                "generated_action": detail_action,
+                "generated_code": None,
+                "execution_mode": "dp_cli",
+                "dpcli_detail_batch_ran": True,
+                "_action_source": "policy",
+            })
+            return Command(update=updates, goto="Executor")
+    except Exception as policy_exc:
+        logger.info(f"   [Verifier] detail batch policy skip: {policy_exc}")
+
+    return None
+
     if kind == "observation":
         return _build_verification_result(
             is_success=True,
@@ -200,11 +256,25 @@ def verifier_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lit
             }
 
             if is_success:
-                if _dpcli_action_kind(state.get("generated_action") or {}) != "observation":
+                action_kind = _dpcli_action_kind(state.get("generated_action") or {})
+                if action_kind != "observation":
                     updates["finished_steps"] = [summary]
                 updates["_failed_code_cache_ids"] = []
                 updates["_failed_dom_cache_ids"] = []
                 updates["_cache_hit_id"] = None
+
+                if action_kind == "data":
+                    detail_cmd = _handle_dpcli_success_after_verification(
+                        state=state,
+                        updates=updates,
+                        task=task,
+                        current_plan=current_plan,
+                        current_url=current_url,
+                        summary=summary,
+                    )
+                    if detail_cmd is not None:
+                        return detail_cmd
+
                 logger.info("   [Verifier] dp_cli action succeeded, continuing to Observer")
                 return Command(update=updates, goto="Observer")
 
@@ -252,44 +322,18 @@ def verifier_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lit
         updates["_cache_hit_id"] = None
 
         if state.get("execution_mode") == "dp_cli":
-            try:
-                from config import ACTION_CACHE_ENABLED
-                if ACTION_CACHE_ENABLED and state.get("_action_source") != "action_cache":
-                    from skills.action_cache import action_cache_manager
-                    cache_id = action_cache_manager.save(
-                        user_task=task,
-                        goal=current_plan,
-                        url=current_url,
-                        action=state.get("generated_action") or {},
-                        snapshot_view=state.get("dpcli_snapshot_view"),
-                        result_summary=summary,
-                    )
-                    logger.info(f"   💾 [ActionCache] 已写入: {cache_id}")
-            except Exception as action_store_exc:
-                logger.info(f"   ⚠️ [ActionCache] 写入异常: {action_store_exc}")
+            detail_cmd = _handle_dpcli_success_after_verification(
+                state=state,
+                updates=updates,
+                task=task,
+                current_plan=current_plan,
+                current_url=current_url,
+                summary=summary,
+            )
+            if detail_cmd is not None:
+                return detail_cmd
 
-            try:
-                from skills.dpcli_crawl_policy import (
-                    build_detail_batch_action,
-                    should_run_detail_batch,
-                )
-                policy_state = dict(state)
-                policy_state.update(updates)
-                if should_run_detail_batch(policy_state):
-                    detail_action = build_detail_batch_action(policy_state)
-                    item_count = len(detail_action.get("params", {}).get("items", []))
-                    logger.info(
-                        f"   📦 dp_cli extract OK + 详情任务({item_count}) → batch-detail-extract")
-                    updates.update({
-                        "generated_action": detail_action,
-                        "generated_code": None,
-                        "execution_mode": "dp_cli",
-                        "dpcli_detail_batch_ran": True,
-                        "_action_source": "policy",
-                    })
-                    return Command(update=updates, goto="Executor")
-            except Exception as policy_exc:
-                logger.info(f"   ⚠️ dp_cli 详情批处理策略跳过: {policy_exc}")
+        # 检查是否需要存代码或策略到缓存 → RAGNode
 
         # 检查是否需要存代码或策略到缓存 → RAGNode
         code = state.get("generated_code", "")
