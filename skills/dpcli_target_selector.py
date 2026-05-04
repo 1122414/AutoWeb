@@ -192,6 +192,8 @@ class TargetSelector:
 
             if intent in ("click", "type"):
                 query["ref_type"] = "element"
+            elif intent in ("expand", "list-items", "extract"):
+                query["ref_type"] = ["element", "container"]
 
             results = self._engine.search_snapshot(query, limit=10)
             for r in results:
@@ -202,6 +204,8 @@ class TargetSelector:
             query = {"role": roles}
             if intent in ("click", "type"):
                 query["ref_type"] = "element"
+            elif intent in ("expand", "list-items", "extract"):
+                query["ref_type"] = ["element", "container"]
             results = self._engine.search_snapshot(query, limit=10)
             for r in results:
                 if r.get("ref") not in [c.get("ref") for c in candidates]:

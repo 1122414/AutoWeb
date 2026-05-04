@@ -19,6 +19,7 @@ from core.nodes._dpcli import (
     _dpcli_result_url,
     _dpcli_error,
     _dpcli_failure_goto,
+    _dpcli_action_kind,
 )
 from prompts.coder_prompts import ACTION_CODE_GEN_PROMPT, CODER_TASK_WRAPPER
 from prompts.dpcli_action_prompts import DPCLI_ACTION_GEN_PROMPT
@@ -167,9 +168,18 @@ def _executor_dpcli_branch(state: AgentState, config: RunnableConfig) -> Command
         update["dpcli_snapshot"] = result
 
     if result.get("ok"):
+        action_kind = _dpcli_action_kind(action)
+        is_observation = action_kind == "observation"
         update.update({
             "coder_retry_count": 0,
             "error_type": None,
+            "dpcli_action_kind": action_kind,
+            "dpcli_verification_contract": {
+                "action_kind": action_kind,
+                "page_effect_expected": not is_observation,
+                "url_change_expected": not is_observation,
+                "dom_change_expected": not is_observation,
+            },
         })
         return Command(update=update, goto="Verifier")
 
