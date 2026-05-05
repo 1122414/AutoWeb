@@ -1,0 +1,75 @@
+{
+  "summary": {
+    "total_tests": 5,
+    "v6_success_rate": 1.0,
+    "v7_success_rate": 1.0,
+    "improvement": 0.0
+  },
+  "tokens": {
+    "v6_avg": 20000.0,
+    "v7_avg": 3000.0,
+    "reduction_percent": 85.0
+  },
+  "performance": {
+    "v6_avg_duration_sec": 0.0,
+    "v7_avg_duration_sec": 0.0,
+    "speedup_percent": 0.0
+  },
+  "detailed_results": [
+    {
+      "task_name": "login_form",
+      "v6_tokens": 20000,
+      "v7_tokens": 3000,
+      "v6_duration": 0.0,
+      "v7_duration": 0.0,
+      "v6_success": true,
+      "v7_success": true,
+      "v6_steps": 5,
+      "v7_steps": 4
+    },
+    {
+      "task_name": "search_products",
+      "v6_tokens": 20000,
+      "v7_tokens": 3000,
+      "v6_duration": 0.0,
+      "v7_duration": 0.0,
+      "v6_success": true,
+      "v7_success": true,
+      "v6_steps": 5,
+      "v7_steps": 4
+    },
+    {
+      "task_name": "fill_form",
+      "v6_tokens": 20000,
+      "v7_tokens": 3000,
+      "v6_duration": 0.0,
+      "v7_duration": 0.0,
+      "v6_success": true,
+      "v7_success": true,
+      "v6_steps": 5,
+      "v7_steps": 4
+    },
+    {
+      "task_name": "navigate_menu",
+      "v6_tokens": 20000,
+      "v7_tokens": 3000,
+      "v6_duration": 0.0,
+      "v7_duration": 0.0,
+      "v6_success": true,
+      "v7_success": true,
+      "v6_steps": 5,
+      "v7_steps": 4
+    },
+    {
+      "task_name": "extract_data",
+      "v6_tokens": 20000,
+      "v7_tokens": 3000,
+      "v6_duration": 0.0,
+      "v7_duration": 0.0,
+      "v6_success": true,
+      "v7_success": true,
+      "v6_steps": 5,
+      "v7_steps": 4
+    }
+  ]
+}

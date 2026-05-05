@@ -228,7 +228,7 @@ class TestVerifierPromptContent(unittest.TestCase):
     """P2: verifier prompt contains action kind rules."""
 
     def test_prompt_has_observation_rules(self):
-        repo_root = Path(__file__).parent.parent
+        repo_root = Path(__file__).parent.parent.parent
         prompt_file = repo_root / "prompts" / "verifier_prompts.py"
         content = prompt_file.read_text(encoding="utf-8")
         self.assertIn("observation", content,
@@ -239,7 +239,7 @@ class TestVerifierPromptContent(unittest.TestCase):
                       "Prompt should prohibit DOM change requirement for observation")
 
     def test_prompt_has_new_format_fields(self):
-        repo_root = Path(__file__).parent.parent
+        repo_root = Path(__file__).parent.parent.parent
         prompt_file = repo_root / "prompts" / "verifier_prompts.py"
         content = prompt_file.read_text(encoding="utf-8")
         self.assertIn("{generated_action}", content)
@@ -252,7 +252,7 @@ class TestPlannerPromptNoExpandAll(unittest.TestCase):
     """P3: planner prompt forbids 'expand all compressed groups'."""
 
     def test_prompt_forbids_expand_all(self):
-        repo_root = Path(__file__).parent.parent
+        repo_root = Path(__file__).parent.parent.parent
         prompt_file = repo_root / "prompts" / "dpcli_planner_prompts.py"
         content = prompt_file.read_text(encoding="utf-8")
         self.assertIn("绝不要求展开所有压缩组", content,
@@ -265,7 +265,7 @@ class TestCoderPromptNoLoopSnapshot(unittest.TestCase):
     """P5: coder prompt prohibits looping snapshot on expand not_found."""
 
     def test_prompt_forbids_snapshot_loop(self):
-        repo_root = Path(__file__).parent.parent
+        repo_root = Path(__file__).parent.parent.parent
         prompt_file = repo_root / "prompts" / "dpcli_action_prompts.py"
         content = prompt_file.read_text(encoding="utf-8")
         self.assertIn("do NOT loop snapshot", content,

@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import patch
 
-import test_dpcli_executor_node  # noqa: F401 - installs lightweight dependency stubs
+import tests.unit.stubs  # noqa: F401 - installs lightweight dependency stubs
 from core.nodes import (
     _compact_dpcli_snapshot,
     _observer_dpcli_snapshot,

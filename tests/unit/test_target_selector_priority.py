@@ -73,7 +73,7 @@ class TestTargetSelectorBugRegression(unittest.TestCase):
 
     def test_original_bug_line_is_fixed(self):
         import os
-        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         target_file = os.path.join(repo_root, "skills", "dpcli_target_selector.py")
 
         with open(target_file, "r", encoding="utf-8") as f:

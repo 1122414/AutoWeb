@@ -1,7 +1,12 @@
 import unittest
 
-import test_dpcli_executor_node  # noqa: F401 - installs lightweight dependency stubs
-from core.nodes import _extract_json_object, _validate_dpcli_action, coder_node
+import tests.unit.stubs  # noqa: F401 - installs lightweight dependency stubs
+from core.nodes import (
+    _dpcli_snapshot_loop_fallback_plan,
+    _extract_json_object,
+    _validate_dpcli_action,
+    coder_node,
+)
 
 
 class _Response:
@@ -15,6 +20,11 @@ class _LLM:
 
     def invoke(self, _messages):
         return _Response(self.content)
+
+
+class _ExplodingLLM:
+    def invoke(self, _messages):
+        raise AssertionError("policy action should not call LLM")
 
 
 class DPCLIActionPromptTests(unittest.TestCase):
@@ -79,6 +89,51 @@ class DPCLIActionPromptTests(unittest.TestCase):
         self.assertEqual(command.goto, "Coder")
         self.assertEqual(command.update["coder_retry_count"], 1)
         self.assertEqual(command.update["error_type"], "dpcli_action_json")
+
+    def test_snapshot_plan_rewrites_to_recoverable_group(self):
+        state = {
+            "dpcli_snapshot_ref": {"snapshot_id": "ss_1"},
+            "dpcli_agent_view": {
+                "coverage": {
+                    "recoverable_groups": [
+                        {"group_ref": "g_rank_links", "count": 30}
+                    ]
+                }
+            },
+        }
+        plan = {
+            "step_intent": "snapshot",
+            "target_request": {"required": False},
+            "reason": "need more context",
+        }
+
+        rewritten = _dpcli_snapshot_loop_fallback_plan(state, plan)
+
+        self.assertEqual(rewritten["step_intent"], "list-items")
+        self.assertEqual(rewritten["action_payload"]["group_ref"], "g_rank_links")
+        self.assertEqual(rewritten["_planner_rewrite"], "snapshot_loop_guard")
+
+    def test_coder_uses_policy_action_for_rewritten_snapshot_loop(self):
+        state = {
+            "plan": "collect ranking items",
+            "execution_mode": "dp_cli",
+            "current_url": "https://example.test/rank",
+            "dpcli_structured_plan": {
+                "step_intent": "list-items",
+                "_planner_rewrite": "snapshot_loop_guard",
+                "action_payload": {"group_ref": "g_rank_links", "sample_size": 10},
+            },
+        }
+
+        command = coder_node(state, {"configurable": {}}, _ExplodingLLM())
+
+        self.assertEqual(command.goto, "Executor")
+        self.assertEqual(command.update["_action_source"], "policy")
+        self.assertEqual(command.update["generated_action"]["skill"], "list-items")
+        self.assertEqual(
+            command.update["generated_action"]["params"]["group_ref"],
+            "g_rank_links",
+        )
 
 
 if __name__ == "__main__":

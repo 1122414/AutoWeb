@@ -12,12 +12,12 @@ import sys
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 
 def _load_normalizer():
     """Load _normalize_target_constraints from skills/dpcli_target_selector.py directly."""
-    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     spec = importlib.util.spec_from_file_location(
         "target_selector_module",
         os.path.join(repo_root, "skills", "dpcli_target_selector.py"),
