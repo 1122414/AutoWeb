@@ -77,28 +77,31 @@ AutoWeb/
 ├── config.py                       # 环境变量和全局配置
 ├── core/
 │   ├── graph_v2.py                 # LangGraph 图构建
-│   ├── nodes.py                    # Observer/Planner/Coder/Executor/Verifier 节点
-│   └── state_v2.py                 # AgentState 状态 schema
+│   ├── state_v2.py                 # AgentState 状态 schema
+│   ├── llm_factory.py              # LLM 实例工厂
+│   └── nodes/                      # Observer/Planner/Coder/Executor/Verifier 等节点
 ├── drivers/
 │   └── drission_driver.py          # DrissionPage 浏览器单例
-├── prompts/
-│   ├── coder_prompts.py            # Python Coder prompt
-│   └── dpcli_action_prompts.py     # dp_cli Action JSON prompt
-├── skills/
-│   ├── actor.py                    # Python 策略执行器
-│   ├── observer.py                 # DOM 观察和 DomCache
-│   ├── code_cache.py               # Python CodeCache
-│   ├── action_cache.py             # dp_cli ActionCache
-│   ├── dpcli_executor.py           # dp_cli 子进程适配层
-│   ├── dpcli_crawl_policy.py       # 详情页批处理动作策略
-│   └── vector_gateway.py           # Milvus 封装
+├── prompts/                        # LLM prompt 模板
+├── skills/                         # 运行时模块 (actor, observer, cache, dpcli, logger, toolbox)
 ├── rag/                            # RAG schema、retriever、QA
 ├── scripts/
-│   └── smoke_dpcli_executor.py     # dp_cli 适配层冒烟脚本
-├── test/                           # unittest 测试
-├── browser_data/                   # 浏览器运行数据，gitignored
-├── logs/                           # 日志，gitignored
-└── output/                         # 生成产物和缓存，gitignored
+│   ├── smoke/                      # 手动冒烟脚本
+│   └── maintenance/                # 维护工具脚本
+├── tests/
+│   ├── unit/                       # 单元测试 (无需外部服务)
+│   ├── integration/                # 集成测试 (需要浏览器/Milvus/API)
+│   ├── fixtures/                   # 测试夹具
+│   └── legacy/                     # 历史实验/一次性脚本
+├── docs/
+│   ├── architecture/               # 架构文档
+│   ├── debugging/                  # 调试文档
+│   └── migration/                  # 迁移文档
+├── plan_/                          # 历史实施计划
+│   └── README.md                   # 计划归档说明
+├── logs/                           # 运行时日志 (gitignored)
+├── output/                         # 生成产物和缓存 (gitignored)
+└── browser_data/                   # 浏览器运行数据 (gitignored)
 ```
 
 ## Quick Start
@@ -234,23 +237,17 @@ ActionCache 是本次更新新增的轻量动作缓存。它面向 dp_cli 模式
 ## Test Commands
 
 ```bash
-# dp_cli executor, observer projection, action prompt, crawl policy
-python -m unittest discover -s test -p "test_dpcli*.py" -v
+# 单元测试 (无需外部服务)
+python -m unittest discover -s tests\unit -p "test_*.py"
 
-# dp_cli ActionCache
-python -m unittest discover -s test -p "test_action_cache.py" -v
+# 集成测试 (需要浏览器/Milvus/API/Qwen/CUDA)
+python -m unittest discover -s tests\integration -p "test_*.py"
 
-# Optional smoke test for local drissionpage-cli integration
-python scripts/smoke_dpcli_executor.py
+# 冒烟脚本 (需要本地 drissionpage-cli 环境)
+python scripts\smoke\smoke_dpcli_executor.py
 ```
 
-原有测试仍可使用：
-
-```bash
-python -m unittest discover -s test -p "test_*.py"
-```
-
-注意：部分历史测试依赖 Milvus、pymilvus 或本地模型服务。没有准备这些外部依赖时，建议先运行上面的定向测试。
+注意：部分历史测试依赖 Milvus、pymilvus 或本地模型服务。没有准备这些外部依赖时，建议先运行 unit 测试。
 
 ## Development Notes
 
