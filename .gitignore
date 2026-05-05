@@ -1,14 +1,25 @@
+# Environment & secrets
+.env
 *.env
+
+# Python artifacts
+__pycache__/
 *.pyc
-*.log
-*.csv
-*.json
-*.html
-data
-logs
-test
-output
-chroma_data
-browser_data
-AGENTS.md
+*.pyo
+.pytest_cache/
+
+# Runtime output
+logs/
+output/
+browser_data/
+data/
+
+# Generated / temporary runtime files
 temp_code_edit.py
+temp_action_edit.json
+raw_dom.json
+chroma_data/
+
+# OS files
+.DS_Store
+Thumbs.db
