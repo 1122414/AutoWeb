@@ -20,6 +20,7 @@ from core.nodes._dpcli import (
     _dpcli_error,
     _dpcli_failure_goto,
     _dpcli_action_kind,
+    _dpcli_policy_action_from_structured_plan,
 )
 from prompts.coder_prompts import ACTION_CODE_GEN_PROMPT, CODER_TASK_WRAPPER
 from prompts.dpcli_action_prompts import DPCLI_ACTION_GEN_PROMPT
@@ -75,6 +76,26 @@ def coder_node(state: AgentState, config: RunnableConfig, llm) -> Command[Litera
 
 
 def _dpcli_action_coder_node(state: AgentState, config: RunnableConfig, llm) -> Command:
+    policy_action = _dpcli_policy_action_from_structured_plan(state)
+    if policy_action:
+        validation_error = _validate_dpcli_action(policy_action, state)
+        if not validation_error:
+            policy_log = json.dumps(policy_action, ensure_ascii=False, indent=2)
+            return Command(
+                update={
+                    "messages": [AIMessage(content=f"éŠ†æ‰p_cli actioné¢ç†¸åžšéŠ†æ…­n{json.dumps(policy_action, ensure_ascii=False, indent=2)}")],
+                    "generated_action": policy_action,
+                    "generated_code": None,
+                    "messages": [AIMessage(content=f"[dp_cli policy action]\n{policy_log}")],
+                    "execution_mode": "dp_cli",
+                    "coder_retry_count": 0,
+                    "_action_source": "policy",
+                    "_code_source": None,
+                    "_dpcli_action_disabled": False,
+                },
+                goto="Executor",
+            )
+
     plan = state.get("plan", "")
     prompt = CODER_TASK_WRAPPER.format(
         plan=plan,

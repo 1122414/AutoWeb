@@ -13,7 +13,7 @@ from config import (
     DPCLI_SESSION,
     DPCLI_TIMEOUT_SECONDS,
 )
-from skills.logger import logger, trace_log
+from skills.logger import logger, trace_log, save_dpcli_code_log
 
 
 class DPCLIExecutor:
@@ -208,7 +208,6 @@ class DPCLIExecutor:
             return self._invalid_action("Action params must be a JSON object.", skill=skill)
 
         trace_log(f"execute_action: skill={skill}")
-        logger.info(f"   🛠️  [DPCLIExecutor] 执行动作: {skill}")
 
         if "target_ref" in params and "ref" not in params:
             params = dict(params)
@@ -314,16 +313,17 @@ class DPCLIExecutor:
         )
 
     def _run_raw(self, args: List[str], timeout: Optional[float] = None) -> Dict[str, Any]:
+        import time as _time
         cmd = [self.python_executable, "-m", "dp_cli", *args]
         if self.headless and "--headless" not in cmd:
             cmd.append("--headless")
         if "--session" not in cmd:
             cmd.extend(["--session", self.session])
 
-        trace_log(f"dp_cli _run_raw: {' '.join(cmd)}")
-        logger.debug(f"   📤 [DPCLIExecutor] 子进程调用: {' '.join(cmd)}")
+        trace_log(f"dp_cli run: {' '.join(cmd)}")
 
         run_timeout = self.timeout_seconds if timeout is None else timeout
+        t0 = _time.time()
         try:
             completed = subprocess.run(
                 cmd,
@@ -334,17 +334,22 @@ class DPCLIExecutor:
                 errors="replace",
                 timeout=run_timeout,
             )
-            trace_log(f"dp_cli _run_raw 完成: returncode={completed.returncode}, stdout_len={len(completed.stdout)}")
-            logger.debug(f"   📥 [DPCLIExecutor] 返回码: {completed.returncode}")
-            return {
+            elapsed = _time.time() - t0
+            trace_log(f"dp_cli done: rc={completed.returncode}, stdout={len(completed.stdout)}B, {elapsed:.2f}s")
+
+            result = {
                 "cmd": cmd,
                 "returncode": completed.returncode,
                 "stdout": completed.stdout,
                 "stderr": completed.stderr,
             }
+            self._save_dpcli_log(cmd, completed.stdout, completed.stderr,
+                                 completed.returncode, elapsed)
+            return result
         except subprocess.TimeoutExpired as exc:
+            elapsed = _time.time() - t0
             logger.warning(f"   ⏱️  [DPCLIExecutor] 超时: {run_timeout}s")
-            return {
+            result = {
                 "cmd": cmd,
                 "returncode": None,
                 "stdout": exc.stdout or "",
@@ -352,14 +357,38 @@ class DPCLIExecutor:
                 "timeout": run_timeout,
                 "timed_out": True,
             }
+            self._save_dpcli_log(cmd, exc.stdout or "", exc.stderr or "",
+                                 None, elapsed, timed_out=True)
+            return result
         except OSError as exc:
+            elapsed = _time.time() - t0
             logger.error(f"   ❌ [DPCLIExecutor] OS错误: {exc}")
-            return {
+            result = {
                 "cmd": cmd,
                 "returncode": None,
                 "stdout": "",
                 "stderr": str(exc),
             }
+            self._save_dpcli_log(cmd, "", str(exc), None, elapsed)
+            return result
+        except Exception as exc:
+            elapsed = _time.time() - t0
+            self._save_dpcli_log(cmd, "", f"{type(exc).__name__}: {exc}", None, elapsed)
+            raise
+
+    def _save_dpcli_log(self, cmd, stdout, stderr, returncode, elapsed,
+                        timed_out=False):
+        log_path = save_dpcli_code_log(
+            cmd=cmd,
+            stdout=stdout,
+            stderr=stderr,
+            returncode=returncode,
+            timed_out=timed_out,
+            elapsed=elapsed,
+            extra_info=f"session={self.session}",
+        )
+        if log_path:
+            logger.info(f"   📄 [DPCLIExecutor] dp_cli log saved to: {log_path}")
 
     @staticmethod
     def _wait_args(wait_time: Optional[float]) -> List[str]:

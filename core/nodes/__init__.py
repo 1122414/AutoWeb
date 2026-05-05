@@ -111,6 +111,8 @@ from core.nodes._dpcli import (
     _dpcli_planner_context,
     _dpcli_action_kind,
     _compact_result_evidence,
+    _dpcli_snapshot_loop_fallback_plan,
+    _dpcli_policy_action_from_structured_plan,
 )
 
 # ============================================================================
@@ -150,4 +152,6 @@ __all__ = [
     "_render_dpcli_snapshot_text",
     "_observer_dpcli_snapshot",
     "_build_verification_result",
+    "_dpcli_snapshot_loop_fallback_plan",
+    "_dpcli_policy_action_from_structured_plan",
 ]

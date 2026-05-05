@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 
@@ -306,7 +307,8 @@ def _dpcli_action_context(state: AgentState) -> str:
             f"  reason: {structured_plan.get('reason', '')}\n"
             f"  target_hint: {target_request.get('target_hint', '')}\n"
             f"  action_text: {action_payload.get('text', '')}\n"
-            f"  action_url: {action_payload.get('url', '')}"
+            f"  action_url: {action_payload.get('url', '')}\n"
+            f"  action_payload: {json.dumps(action_payload, ensure_ascii=False)}"
         )
 
     target_result = state.get("dpcli_target_result") or {}
@@ -430,6 +432,170 @@ def _dpcli_failure_goto(error_code: str) -> str:
         "snapshot_failed": "Observer",
     }
     return mapping.get(error_code, "Observer")
+
+
+def _dpcli_snapshot_loop_fallback_plan(
+    state: AgentState, structured_plan: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Rewrite redundant snapshot plans to the next recoverable data action.
+
+    Observer already refreshes dp_cli snapshots before Planner. If Planner asks
+    for another snapshot while a snapshot ref/view is available, executing that
+    action only repeats the Observer work and can trap the graph in an
+    Observer->Planner->Coder->Executor(snapshot) loop.
+    """
+    if not isinstance(structured_plan, dict):
+        return structured_plan
+    if str(structured_plan.get("step_intent") or "").strip().lower() != "snapshot":
+        return structured_plan
+    if not (state.get("dpcli_snapshot_ref") or state.get("dpcli_agent_view")):
+        return structured_plan
+
+    candidate = _dpcli_recoverable_data_candidate(state)
+    if not candidate:
+        return structured_plan
+
+    rewritten = dict(structured_plan)
+    rewritten["step_intent"] = candidate["intent"]
+    rewritten["target_request"] = {"required": False}
+    rewritten["action_payload"] = candidate["params"]
+    rewritten["reason"] = (
+        f"{structured_plan.get('reason', '')} "
+        "Snapshot was already refreshed by Observer; continue with recoverable "
+        f"{candidate['intent']} on {candidate['ref']}."
+    ).strip()
+    rewritten["_planner_rewrite"] = "snapshot_loop_guard"
+    return rewritten
+
+
+def _dpcli_recoverable_data_candidate(state: AgentState) -> Optional[Dict[str, Any]]:
+    agent_view = state.get("dpcli_agent_view") or {}
+    capability_map = agent_view.get("capability_map") or {}
+
+    for region in capability_map.get("data_regions") or []:
+        ref = str(region.get("ref") or "")
+        if not ref:
+            continue
+        actions = set(region.get("available_actions") or [])
+        if "extract" in actions:
+            return {
+                "intent": "extract",
+                "ref": ref,
+                "params": {"target_ref": ref, "schema": ["title", "url"], "limit": 20},
+            }
+        if "list-items" in actions:
+            return {
+                "intent": "list-items",
+                "ref": ref,
+                "params": {"group_ref": ref, "sample_size": 10},
+            }
+        if "expand" in actions:
+            return {
+                "intent": "expand",
+                "ref": ref,
+                "params": {"ref": ref, "depth": 2},
+            }
+
+    for group in agent_view.get("top_level_groups") or []:
+        ref = str(group.get("region_ref") or group.get("group_id") or "")
+        if not ref:
+            continue
+        return {
+            "intent": "list-items",
+            "ref": ref,
+            "params": {"group_ref": ref, "sample_size": 10},
+        }
+
+    coverage = agent_view.get("coverage") or {}
+    for group in coverage.get("recoverable_groups") or []:
+        ref = str(group.get("group_ref") or group.get("group_id") or "")
+        if ref:
+            return {
+                "intent": "list-items",
+                "ref": ref,
+                "params": {"group_ref": ref, "sample_size": 10},
+            }
+
+    return _dpcli_recoverable_group_from_snapshot_ref(state)
+
+
+def _dpcli_recoverable_group_from_snapshot_ref(
+    state: AgentState,
+) -> Optional[Dict[str, Any]]:
+    snapshot_ref = state.get("dpcli_snapshot_ref") or {}
+    compressed_file = snapshot_ref.get("compressed_index_file")
+    if not compressed_file:
+        return None
+    try:
+        path = Path(str(compressed_file))
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logger.info(f"   [Planner-dp_cli] compressed group fallback unavailable: {exc}")
+        return None
+
+    groups = payload.get("groups") if isinstance(payload, dict) else None
+    if not isinstance(groups, list):
+        return None
+    for group in sorted(groups, key=lambda g: int((g or {}).get("count") or 0), reverse=True):
+        if not isinstance(group, dict):
+            continue
+        ref = str(group.get("group_id") or "")
+        if ref:
+            return {
+                "intent": "list-items",
+                "ref": ref,
+                "params": {"group_ref": ref, "sample_size": 10},
+            }
+    return None
+
+
+def _dpcli_policy_action_from_structured_plan(
+    state: AgentState,
+) -> Optional[Dict[str, Any]]:
+    structured_plan = state.get("dpcli_structured_plan") or {}
+    if structured_plan.get("_planner_rewrite") != "snapshot_loop_guard":
+        return None
+
+    intent = str(structured_plan.get("step_intent") or "").strip().lower()
+    payload = structured_plan.get("action_payload") or {}
+    if not isinstance(payload, dict):
+        return None
+
+    reason = str(structured_plan.get("reason") or "snapshot loop guard")
+    if intent == "list-items":
+        group_ref = payload.get("group_ref") or payload.get("ref") or payload.get("target_ref")
+        if group_ref:
+            return {
+                "skill": "list-items",
+                "params": {
+                    "group_ref": str(group_ref),
+                    "sample_size": int(payload.get("sample_size") or 10),
+                },
+                "reason": reason,
+            }
+    if intent == "extract":
+        target_ref = payload.get("target_ref") or payload.get("ref") or payload.get("group_ref")
+        if target_ref:
+            action: Dict[str, Any] = {
+                "skill": "extract",
+                "params": {
+                    "target_ref": str(target_ref),
+                    "schema": payload.get("schema") or ["title", "url"],
+                },
+                "reason": reason,
+            }
+            if payload.get("limit") is not None:
+                action["params"]["limit"] = payload.get("limit")
+            return action
+    if intent == "expand":
+        ref = payload.get("ref") or payload.get("target_ref") or payload.get("group_ref")
+        if ref:
+            return {
+                "skill": "expand",
+                "params": {"ref": str(ref), "depth": int(payload.get("depth") or 2)},
+                "reason": reason,
+            }
+    return None
 
 
 def _dpcli_planner_context(state: AgentState) -> str:

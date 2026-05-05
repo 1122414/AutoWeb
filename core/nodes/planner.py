@@ -25,7 +25,11 @@ def _dpcli_planner_step(
     verification: dict,
 ) -> Command:
     """dp_cli 模式 Planner：使用结构化 prompt 产出 dpcli_structured_plan。"""
-    from core.nodes._dpcli import _dpcli_planner_context, _extract_json_object
+    from core.nodes._dpcli import (
+        _dpcli_planner_context,
+        _dpcli_snapshot_loop_fallback_plan,
+        _extract_json_object,
+    )
     from langchain_core.messages import HumanMessage, AIMessage
 
     context = _dpcli_planner_context(state)
@@ -42,6 +46,7 @@ def _dpcli_planner_step(
         logger.info("   ⚠️ [Planner-dp_cli] JSON 解析失败，回退 legacy planner")
         return None
 
+    structured_plan = _dpcli_snapshot_loop_fallback_plan(state, structured_plan)
     step_intent = structured_plan.get("step_intent", "")
     needs_rag = structured_plan.get("needs_rag", False)
     target_required = (

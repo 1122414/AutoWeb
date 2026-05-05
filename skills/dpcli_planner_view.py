@@ -468,9 +468,19 @@ class PlannerViewGenerator:
 
         return {
             "total_interactables": len(self._interactables),
-            "shown_representatives": total - in_groups,
+            "shown_representatives": max(0, total - in_groups),
             "total_data_regions": region_count,
             "omitted_groups": omitted,
+            "recoverable_groups": [
+                {
+                    "group_ref": g.get("group_id", ""),
+                    "kind": g.get("kind", ""),
+                    "count": g.get("count", 0),
+                    "samples": (g.get("samples") or [])[:3],
+                    "available_actions": g.get("available_actions") or [],
+                }
+                for g in compressed_groups[:8]
+            ],
         }
 
     # ─── 工具方法 ────────────────────────────────────────────
