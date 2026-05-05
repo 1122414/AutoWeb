@@ -34,34 +34,64 @@ from langgraph.checkpoint.memory import MemorySaver
 from config import *
 from core.llm_factory import create_llm
 from skills.observer import BrowserObserver
+from skills.logger import logger, trace_log
 
 
 def setup_agent():
     """初始化全栈 Agent (V2 Architecture)"""
+    logger.info("\n" + "=" * 60)
+    logger.info("🚀 [AutoWeb] 正在启动系统...")
+    logger.info("=" * 60)
+
+    from config import log_config_summary
+    log_config_summary()
+
     print("\n>>> 正在初始化浏览器驱动...")
+    logger.info("[setup_agent:45] 初始化浏览器驱动...")
     browser_instance = BrowserDriver.get_browser()
+    logger.info(f"[setup_agent:47] 浏览器驱动就绪")
 
     print(">>> 正在初始化 LLM 和 Observer...")
+    logger.info("[setup_agent:50] 初始化 LLM 实例...")
     # 依赖注入：为各节点创建独立 LLM（相同配置会自动复用同一实例）
     llm = create_llm(MODEL_NAME, OPENAI_API_KEY, OPENAI_BASE_URL)
+    logger.info(f"[setup_agent:53] Default LLM: {MODEL_NAME}")
     coder_llm = create_llm(CODER_MODEL_NAME, CODER_API_KEY, CODER_BASE_URL)
+    logger.info(f"[setup_agent:55] Coder LLM: {CODER_MODEL_NAME}")
     planner_llm = create_llm(
         PLANNER_MODEL_NAME, PLANNER_API_KEY, PLANNER_BASE_URL)
+    logger.info(f"[setup_agent:58] Planner LLM: {PLANNER_MODEL_NAME}")
     verifier_llm = create_llm(
         VERIFIER_MODEL_NAME, VERIFIER_API_KEY, VERIFIER_BASE_URL)
+    logger.info(f"[setup_agent:61] Verifier LLM: {VERIFIER_MODEL_NAME}")
 
     observer = BrowserObserver()
+    logger.info("[setup_agent:64] BrowserObserver 就绪")
 
     print(">>> 正在构建 AutoWeb V2 大脑 (LangGraph)...")
+    logger.info("[setup_agent:67] 构建 LangGraph 工作流...")
     memory = MemorySaver()
     # 依赖注入：在构建图时通过 partial 绑定各节点独立 LLM
     app = build_graph(
         checkpointer=memory, llm=llm, observer=observer,
         coder_llm=coder_llm, planner_llm=planner_llm, verifier_llm=verifier_llm
     )
+    logger.info("[setup_agent:73] LangGraph 工作流就绪")
 
     # 打印系统配置信息
     print(f">>> 系统就绪")
+    logger.info(f"[setup_agent:77] 系统就绪 — 模型配置:")
+    logger.info(f"    Default : {MODEL_NAME}")
+    logger.info(f"    Coder   : {CODER_MODEL_NAME}")
+    logger.info(f"    Planner : {PLANNER_MODEL_NAME}")
+    logger.info(f"    Verifier: {VERIFIER_MODEL_NAME}")
+    logger.info(f"    Observer: {OBSERVER_MODEL_NAME}")
+    logger.info(f"    Code Cache: {'enabled' if CODE_CACHE_ENABLED else 'disabled'}")
+    logger.info(f"    DOM Cache : {'enabled' if DOM_CACHE_ENABLED else 'disabled'}")
+    logger.info(f"    dp_cli    : {'enabled' if DPCLI_ENABLED else 'disabled'} "
+                 f"(observer={'on' if DPCLI_OBSERVER_ENABLED else 'auto'}, "
+                 f"cache={'on' if ACTION_CACHE_ENABLED else 'off'})")
+    # ... (keep print for console UI)
     print(f"    【模型配置】")
     print(f"    Default : {MODEL_NAME}")
     print(f"    Coder   : {CODER_MODEL_NAME}")
@@ -94,18 +124,22 @@ def print_step_output(event):
     for node_name, updates in event.items():
         if not isinstance(updates, dict):
             continue
+        logger.info(f"🔄 [Stream] Node '{node_name}' 完成")
         print(f"\n🔄 [Node: {node_name}] 执行完成")
 
         if "plan" in updates and updates['plan']:
+            logger.info(f"   🧠 Plan: {updates['plan'][:200]}")
             print(f"   🧠 Plan: {updates['plan']}")
 
         if "generated_code" in updates and updates['generated_code']:
             code_preview = updates['generated_code'][:100].replace('\n', ' ')
+            logger.info(f"   💻 Generated Code: {code_preview}")
             print(f"   💻 Generated Code: {code_preview}...")
 
         if "generated_action" in updates and updates["generated_action"]:
             action_preview = json.dumps(
                 updates["generated_action"], ensure_ascii=False)
+            logger.info(f"   🧭 Generated Action: {action_preview[:160]}")
             print(f"   🧭 Generated Action: {action_preview[:160]}...")
 
         verification = updates.get("verification_result") or {}
@@ -115,26 +149,35 @@ def print_step_output(event):
             source = str(verification.get("source", "") or "")
             scope = str(verification.get("failure_scope", "") or "")
             status_txt = "SUCCESS" if is_success else "FAIL"
+            logger.info(
+                f"   [{'OK' if is_success else 'FAIL'}] Verification[{status_txt}]"
+                f"{' [' + source + ']' if source else ''}: {summary[:200]}"
+            )
             print(
                 f"   [{'OK' if is_success else 'FAIL'}] Verification[{status_txt}]"
                 f"{' [' + source + ']' if source else ''}: {summary[:200]}"
             )
             if not is_success and scope:
+                logger.info(f"   -> failure_scope: {scope}")
                 print(f"   -> failure_scope: {scope}")
 
         if "execution_log" in updates and updates['execution_log']:
             log = updates['execution_log']
             if "Error" in log or "Exception" in log:
+                logger.error(f"   ❌ 执行失败: {log[:200]}")
                 print(
                     f"   ❌ \033[1;31m执行失败\033[0m: {log[:200]}...")
             else:
+                logger.info(f"   ✅ 执行成功: {log[:200]}")
                 print(f"   ✅ 执行成功: {log[:200]}...")
 
         if "finished_steps" in updates and updates['finished_steps']:
             last_step = updates['finished_steps'][-1] if updates['finished_steps'] else "Unknown"
+            logger.info(f"   ✅ 验证通过: {last_step}")
             print(f"   ✅ \033[1;32m验证通过\033[0m: {last_step}")
 
         if "error" in updates and updates["error"]:
+            logger.error(f"   ⚠️ 错误标识: {updates['error']}")
             print(f"   ⚠️ 错误标识: {updates['error']}")
 
 
@@ -269,7 +312,11 @@ def interactive_loop(app, browser_instance, llm, observer):
     print("\n🤖 AutoWeb Agent (LangGraph V2) 已启动 — 输入自然语言任务（输入 exit 退出）")
 
     # 为当前会话生成唯一 Thread ID
-    print(f"THREAD ID: {str(uuid.uuid4())}")
+    thread_id = str(uuid.uuid4())
+    logger.info(f"\n{'=' * 60}")
+    logger.info(f"[interactive_loop:278] 新会话开始 — THREAD ID: {thread_id}")
+    logger.info(f"{'=' * 60}")
+    print(f"THREAD ID: {thread_id}")
 
     # LLM 和 Observer 实例已通过 partial 绑定到节点
     config = {
@@ -281,6 +328,7 @@ def interactive_loop(app, browser_instance, llm, observer):
     }
 
     session_hitl_mode = _normalize_hitl_mode(HITL_MODE_DEFAULT)
+    logger.info(f"[interactive_loop:294] HITL 模式: {session_hitl_mode}")
     print(
         f"HITL 模式: {session_hitl_mode} "
         "(off=仅强制触发点中断; review_all=每一步都需要人工审核)"
@@ -295,6 +343,7 @@ def interactive_loop(app, browser_instance, llm, observer):
                 next_node = snapshot.next[0] if isinstance(
                     snapshot.next, tuple) else snapshot.next
                 active_mode = _normalize_hitl_mode(session_hitl_mode)
+                logger.info(f"⏸️ [HITL] 任务暂停于节点: {next_node}")
                 print(f"\n⏸️ 任务暂停于节点: {next_node}")
 
                 # === 处理 Executor 中断（代码执行前审批）===
@@ -304,6 +353,7 @@ def interactive_loop(app, browser_instance, llm, observer):
                     needs_review = (active_mode == "review_all") or bool(
                         forced_reasons)
                     if not needs_review:
+                        logger.info("   🔔 [HITL] Executor — HITL 已关闭且未触发强制审核点，自动继续")
                         print("   🔔 HITL 已关闭且未触发强制审核点，自动继续...")
                         for event in app.stream(None, config=config, stream_mode="updates"):
                             print_step_output(event)
@@ -350,12 +400,14 @@ def interactive_loop(app, browser_instance, llm, observer):
                         continue
 
                     if user_input.lower() in ("c", "continue", "yes", "y"):
+                        logger.info("   ✅ [HITL] Executor — 用户批准执行")
                         print("   ✅ 批准执行，继续...")
                         for event in app.stream(None, config=config, stream_mode="updates"):
                             print_step_output(event)
                         continue
 
                     elif user_input.lower() in ("e", "edit"):
+                        logger.info("   📝 [HITL] Executor — 用户请求编辑代码/action")
                         is_dpcli_action = execution_mode == "dp_cli"
                         edit_file = "temp_action_edit.json" if is_dpcli_action else "temp_code_edit.py"
                         with open(edit_file, "w", encoding="utf-8") as f:
@@ -432,18 +484,22 @@ def interactive_loop(app, browser_instance, llm, observer):
                             forced_reasons)
 
                         if is_success:
+                            logger.info(f"   ✅ [Verifier] 验证通过: {summary[:100]}")
                             print(
                                 f"   ✅ 验证通过: {summary[:100]}...")
                         else:
+                            logger.info(f"   ❌ [Verifier] 验证失败: {summary[:100]}")
                             print(
                                 f"   ❌ 验证失败: {summary[:100]}...")
                         if active_mode == "review_all":
                             print("   [HITL] 当前为 review_all 模式，需要手动批准")
                         if forced_reasons:
+                            logger.info(f"   [HITL] 触发强制审核原因: {forced_reasons}")
                             print("   [HITL] 触发强制审核原因:")
                             for idx, reason in enumerate(forced_reasons, 1):
                                 print(f"      {idx}. {reason}")
                         if not needs_review:
+                            logger.info("   🔔 [HITL] Verifier — 自动接受验证结果")
                             print("   🔔 HITL 已关闭且未触发强制审核点，自动接受验证结果")
                             if is_done:
                                 goto_node = "__end__"
@@ -467,6 +523,7 @@ def interactive_loop(app, browser_instance, llm, observer):
 
                         # 根据用户选择更新状态和跳转目标
                         if user_override.lower() == "s":
+                            logger.info("   ✅ [HITL] Verifier — 人工覆盖: 强制成功")
                             print("   ✅ 人工覆盖: 强制成功")
                             app.update_state(config, {
                                 "verification_result": _build_manual_verification_result(
@@ -482,6 +539,7 @@ def interactive_loop(app, browser_instance, llm, observer):
                                 "finished_steps": [summary]
                             }, as_node="Verifier")
                         elif user_override.lower() == "f":
+                            logger.info("   ❌ [HITL] Verifier — 人工覆盖: 强制失败")
                             print("   ❌ 人工覆盖: 强制失败")
                             app.update_state(config, {
                                 "verification_result": _build_manual_verification_result(
@@ -497,6 +555,7 @@ def interactive_loop(app, browser_instance, llm, observer):
                                 "reflections": [f"Step Failed (Manual): {summary}"]
                             }, as_node="Verifier")
                         elif user_override.lower() == "d":
+                            logger.info("   🎉 [HITL] Verifier — 人工覆盖: 强制完成任务")
                             print("   🎉 人工覆盖: 强制完成任务")
                             app.update_state(config, {
                                 "verification_result": _build_manual_verification_result(
@@ -515,6 +574,7 @@ def interactive_loop(app, browser_instance, llm, observer):
                             goto_node = "__end__"  # 任务完成，跳转到结束
                         elif user_override:
                             # 人工反馈：将用户输入注入 reflections，让 Planner 据此重新规划
+                            logger.info(f"   📜 [HITL] Verifier — 人工反馈: {user_override[:80]}")
                             print(f"   📜 人工反馈已注入，Planner 将据此重新规划")
                             app.update_state(config, {
                                 "verification_result": _build_manual_verification_result(
@@ -557,14 +617,17 @@ def interactive_loop(app, browser_instance, llm, observer):
             user_input = input("\n👤 User > ").strip()
             lower_input = user_input.lower()
             if lower_input in ("exit", "quit"):
+                logger.info("👋 [main] 用户请求退出，关闭系统...")
                 print("👋 正在关闭浏览器资源...")
                 # 刷新知识库缓冲区
                 try:
                     from skills.tool_rag import kb_manager
                     kb_manager.flush_and_wait(timeout=10.0)
                 except Exception as e:
+                    logger.warning(f"⚠️ [main] 知识库刷新失败: {e}")
                     print(f"⚠️ 知识库刷新失败: {e}")
                 BrowserDriver.quit()
+                logger.info("👋 [main] 系统已退出")
                 break
 
             if lower_input in ("hitl", "hitl status"):
@@ -575,6 +638,7 @@ def interactive_loop(app, browser_instance, llm, observer):
                 session_hitl_mode = _set_hitl_mode(
                     app, config, "review_all" if lower_input == "hitl on" else "off"
                 )
+                logger.info(f"⚙️ [HITL] 模式切换: {session_hitl_mode}")
                 print(f"HITL MODE -> {session_hitl_mode}")
                 continue
 
@@ -585,6 +649,7 @@ def interactive_loop(app, browser_instance, llm, observer):
                 if not question:
                     print("⚠️ 请输入问题，例如: qa 知识库里有什么数据？")
                     continue
+                logger.info(f"🔍 [RAG] 用户QA查询: {question[:80]}")
                 print(f"\n🔍 [RAG] 正在查询知识库...")
                 try:
                     from rag.retriever_qa import qa_interaction
@@ -598,6 +663,7 @@ def interactive_loop(app, browser_instance, llm, observer):
             if lower_input in ("new", "reset"):
                 thread_id = str(uuid.uuid4())
                 config["configurable"]["thread_id"] = thread_id
+                logger.info(f"🆕 [main] 会话重置 — 新 Thread ID: {thread_id[:8]}...")
                 print(f"🆕 新会话已创建: {thread_id[:8]}...")
                 print("   历史已清空，可以开始新任务。")
                 print(f"   HITL MODE 继承为: {session_hitl_mode}")
@@ -606,6 +672,9 @@ def interactive_loop(app, browser_instance, llm, observer):
             if not user_input:
                 continue
 
+            logger.info(f"\n{'=' * 60}")
+            logger.info(f"🚀 [main] 新任务开始: {user_input}")
+            logger.info(f"{'=' * 60}")
             print(f"🚀 开始执行任务: {user_input}")
 
             # V2 State 结构
@@ -641,17 +710,19 @@ def interactive_loop(app, browser_instance, llm, observer):
                 next_nodes = getattr(snapshot_after, "next", None)
                 values = getattr(snapshot_after, "values", {}) or {}
                 if (not next_nodes) and bool(values.get("is_complete", False)):
+                    logger.info("✅ [main] 流程结束 (图执行完毕)")
                     print("\n✅ 流程结束 (图执行完毕)")
 
             except Exception as e:
-                print(f"\n❌ 流程中断: {e}")
+                logger.error(f"❌ [main] 流程中断: {e}")
                 traceback.print_exc()
 
         except KeyboardInterrupt:
+            logger.info("⚠️ [main] 用户中断 (KeyboardInterrupt)")
             print("\n操作已取消")
             continue
         except Exception as e:
-            print(f"\n❌ 未捕获异常: {e}")
+            logger.error(f"❌ [main] 未捕获异常: {e}")
             traceback.print_exc()
 
 
@@ -660,7 +731,7 @@ if __name__ == "__main__":
         app, browser, llm, observer = setup_agent()
         interactive_loop(app, browser, llm, observer)
     except Exception as e:
-        print(f"❌ 启动失败: {e}")
+        logger.critical(f"❌ [main] 启动失败: {e}")
         traceback.print_exc()
     finally:
         # 确保知识库缓冲区刷新

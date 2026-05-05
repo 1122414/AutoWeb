@@ -369,3 +369,21 @@ CONTEXT_MAX_MESSAGE_ROUNDS = int(os.getenv('CONTEXT_MAX_MESSAGE_ROUNDS', '5'))
 SUMMARIZER_MODEL_NAME = os.getenv('SUMMARIZER_MODEL_NAME') or MODEL_NAME
 SUMMARIZER_API_KEY = os.getenv('SUMMARIZER_API_KEY') or OPENAI_API_KEY
 SUMMARIZER_BASE_URL = os.getenv('SUMMARIZER_BASE_URL') or OPENAI_BASE_URL
+
+
+def log_config_summary():
+    """输出配置摘要到 sys_log（延迟导入避免循环依赖）"""
+    from skills.logger import logger
+    logger.info("\n" + "=" * 50)
+    logger.info("[config] 配置加载完成")
+    logger.info("=" * 50)
+    logger.info(f"   MODEL: {MODEL_NAME}")
+    logger.info(f"   BASE_URL: {OPENAI_BASE_URL}")
+    logger.info(f"   EMBEDDING: {EMBEDDING_MODEL} (type={EMBEDDING_TYPE})")
+    logger.info(f"   DPCLI_ENABLED: {DPCLI_ENABLED}")
+    logger.info(f"   CODE_CACHE_ENABLED: {CODE_CACHE_ENABLED}")
+    logger.info(f"   DOM_CACHE_ENABLED: {DOM_CACHE_ENABLED}")
+    logger.info(f"   ACTION_CACHE_ENABLED: {ACTION_CACHE_ENABLED}")
+    logger.info(f"   HITL_MODE_DEFAULT: {HITL_MODE_DEFAULT}")
+    logger.info(f"   HEADLESS_MODE: {HEADLESS_MODE}")
+    logger.info("=" * 50)

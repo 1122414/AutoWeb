@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
 from config import ACTION_CACHE_STORE_PATH
+from skills.logger import logger, trace_log
 
 
 @dataclass
@@ -47,9 +48,12 @@ class ActionCacheManager:
         snapshot_view: Optional[Dict[str, Any]] = None,
         top_k: int = 5,
     ) -> List[ActionCacheHit]:
+        trace_log(f"ActionCache search: url={url[:60]}, top_k={top_k}")
         query_tokens = _tokens(f"{user_task} {goal} {json.dumps(snapshot_view or {}, ensure_ascii=False)}")
         query_domain = _domain(url)
         hits: List[ActionCacheHit] = []
+        records = self._load()
+        logger.debug(f"   🔍 [ActionCache] 检索中: domain={query_domain}, records={len(records)}")
         for record in self._load():
             if query_domain and record.get("domain_key") and record.get("domain_key") != query_domain:
                 continue
@@ -84,6 +88,7 @@ class ActionCacheManager:
         snapshot_view: Optional[Dict[str, Any]] = None,
         result_summary: str = "",
     ) -> str:
+        trace_log(f"ActionCache save: url={url[:60]}, task_type={(action or {}).get('skill', '')}")
         records = self._load()
         cache_id = f"action_{uuid.uuid4().hex[:12]}"
         records.append({
@@ -101,9 +106,11 @@ class ActionCacheManager:
             "failure_count": 0,
         })
         self._write(records)
+        logger.info(f"   ✅ [ActionCache] 已保存: id={cache_id}, task_type={(action or {}).get('skill', '')}")
         return cache_id
 
     def record_failure(self, cache_id: str, reason: str = "") -> None:
+        trace_log(f"ActionCache record_failure: id={cache_id}, reason={reason}")
         records = self._load()
         changed = False
         for record in records:
@@ -130,6 +137,7 @@ class ActionCacheManager:
             json.dumps(records, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+        logger.debug(f"   💾 [ActionCache] 写入 {len(records)} 条记录到 {self.store_path}")
 
     def _snapshot_signature(self, snapshot_view: Optional[Dict[str, Any]]) -> str:
         if not snapshot_view:

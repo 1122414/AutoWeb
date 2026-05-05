@@ -5,13 +5,16 @@
 # - 系统运行日志: logs/sys_log/autoweb_YYYYMMDD.log (按天轮转)
 # - 代码执行日志: logs/code_log/YYYYMMDD/exec_HHMMSS.log (按天分目录)
 # - 同时输出到控制台和文件
+# - 文件日志自动包含函数名和行号，便于追踪定位
 # ==============================================================================
 
 import os
 import logging
 import time
+import functools
+import inspect
 from logging.handlers import TimedRotatingFileHandler
-from typing import Optional
+from typing import Optional, Callable
 
 # 日志根目录
 LOG_ROOT = os.path.join(os.path.dirname(os.path.dirname(__file__)), "logs")
@@ -55,7 +58,7 @@ class AutoWebLogger:
             fmt="%(message)s"  # 控制台保持简洁，与原 print 风格一致
         )
         file_formatter = logging.Formatter(
-            fmt="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
+            fmt="%(asctime)s | %(levelname)-8s | %(name)s | %(funcName)s:%(lineno)d | %(message)s",
             datefmt="%Y-%m-%d %H:%M:%S"
         )
 
@@ -100,6 +103,68 @@ class AutoWebLogger:
 
     def critical(self, msg: str, *args, **kwargs):
         self._logger.critical(msg, *args, **kwargs)
+
+
+# ==================== 调用追踪工具 ====================
+
+
+def trace_log(msg: str = "", level: str = "info", *, stacklevel: int = 2):
+    """
+    使用调用者的函数名和行号记录日志。
+
+    Usage:
+        from skills.logger import trace_log
+        trace_log("LLM invoke starting...")
+        trace_log("Tool execute failed", level="error")
+
+    输出到文件:
+        2026-05-05 10:00:00 | INFO     | AutoWeb | create_llm:38 | LLM invoke starting...
+    """
+    caller_frame = inspect.currentframe()
+    # stacklevel=1 是 trace_log 本身, 2 是调用者
+    for _ in range(stacklevel - 1):
+        if caller_frame is not None:
+            caller_frame = caller_frame.f_back
+    if caller_frame is not None:
+        func_name = caller_frame.f_code.co_name
+        line_no = caller_frame.f_lineno
+        prefixed_msg = f"[{func_name}:{line_no}] {msg}" if msg else f"[{func_name}:{line_no}]"
+    else:
+        prefixed_msg = msg
+
+    log_func = getattr(logger, level, logger.info)
+    log_func(prefixed_msg)
+
+
+def log_call(level: str = "debug"):
+    """
+    装饰器：自动记录函数入口和出口。
+    文件日志格式: [function_name:line] -> ENTER / <- EXIT (elapsed)
+
+    Usage:
+        @log_call(level="info")
+        def my_function():
+            ...
+    """
+
+    def decorator(func: Callable):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            trace_log(f"-> ENTER {func.__name__}()", level=level)
+            start = time.time()
+            try:
+                result = func(*args, **kwargs)
+                elapsed = time.time() - start
+                trace_log(f"<- EXIT  {func.__name__}() [{elapsed:.3f}s]", level=level)
+                return result
+            except Exception as e:
+                elapsed = time.time() - start
+                trace_log(f"<- ERROR {func.__name__}() [{elapsed:.3f}s] {type(e).__name__}: {e}", level="error")
+                raise
+
+        return wrapper
+
+    return decorator
 
 
 # ==================== 代码执行日志工具 ====================

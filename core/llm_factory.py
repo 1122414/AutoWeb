@@ -5,6 +5,7 @@
 from langchain_openai import ChatOpenAI
 
 import httpx
+from skills.logger import logger, trace_log
 
 # 缓存：相同配置复用同一实例，避免重复创建
 _llm_cache: dict = {}
@@ -33,6 +34,7 @@ def create_llm(
     cache_key = (model_name, api_key, base_url, temperature, streaming)
 
     if cache_key not in _llm_cache:
+        trace_log(f"创建新 LLM 实例: model={model_name}, base_url={base_url}, streaming={streaming}")
         # 配置 httpx Client 来增加超时防流式断流
         http_client = httpx.Client(timeout=180.0)
         _llm_cache[cache_key] = ChatOpenAI(
@@ -44,5 +46,8 @@ def create_llm(
             max_retries=3,
             http_client=http_client
         )
+        logger.info(f"   ✅ [create_llm] LLM 实例已创建: {model_name} (缓存 {len(_llm_cache)} 个)")
+    else:
+        trace_log(f"复用已缓存 LLM 实例: model={model_name} (缓存 {len(_llm_cache)} 个)")
 
     return _llm_cache[cache_key]

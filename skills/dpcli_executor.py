@@ -13,6 +13,7 @@ from config import (
     DPCLI_SESSION,
     DPCLI_TIMEOUT_SECONDS,
 )
+from skills.logger import logger, trace_log
 
 
 class DPCLIExecutor:
@@ -33,6 +34,7 @@ class DPCLIExecutor:
         self.cwd = cwd
         self.timeout_seconds = timeout_seconds
         self.batch_timeout_seconds = batch_timeout_seconds
+        trace_log(f"DPCLIExecutor 初始化: session={session}, headless={headless}")
 
     def open(self, url: str, wait_time: Optional[float] = None) -> Dict[str, Any]:
         return self._run("open", url, *self._wait_args(wait_time))
@@ -205,6 +207,9 @@ class DPCLIExecutor:
         if not isinstance(params, dict):
             return self._invalid_action("Action params must be a JSON object.", skill=skill)
 
+        trace_log(f"execute_action: skill={skill}")
+        logger.info(f"   🛠️  [DPCLIExecutor] 执行动作: {skill}")
+
         if "target_ref" in params and "ref" not in params:
             params = dict(params)
             params["ref"] = params["target_ref"]
@@ -315,6 +320,9 @@ class DPCLIExecutor:
         if "--session" not in cmd:
             cmd.extend(["--session", self.session])
 
+        trace_log(f"dp_cli _run_raw: {' '.join(cmd)}")
+        logger.debug(f"   📤 [DPCLIExecutor] 子进程调用: {' '.join(cmd)}")
+
         run_timeout = self.timeout_seconds if timeout is None else timeout
         try:
             completed = subprocess.run(
@@ -326,6 +334,8 @@ class DPCLIExecutor:
                 errors="replace",
                 timeout=run_timeout,
             )
+            trace_log(f"dp_cli _run_raw 完成: returncode={completed.returncode}, stdout_len={len(completed.stdout)}")
+            logger.debug(f"   📥 [DPCLIExecutor] 返回码: {completed.returncode}")
             return {
                 "cmd": cmd,
                 "returncode": completed.returncode,
@@ -333,6 +343,7 @@ class DPCLIExecutor:
                 "stderr": completed.stderr,
             }
         except subprocess.TimeoutExpired as exc:
+            logger.warning(f"   ⏱️  [DPCLIExecutor] 超时: {run_timeout}s")
             return {
                 "cmd": cmd,
                 "returncode": None,
@@ -342,6 +353,7 @@ class DPCLIExecutor:
                 "timed_out": True,
             }
         except OSError as exc:
+            logger.error(f"   ❌ [DPCLIExecutor] OS错误: {exc}")
             return {
                 "cmd": cmd,
                 "returncode": None,
