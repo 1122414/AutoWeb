@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import time
 from typing import Literal
 
@@ -157,6 +158,181 @@ def _build_dpcli_verifier_prompt(state, task, current_plan, current_url, log):
             structured_plan, ensure_ascii=False, indent=2),
     )
 
+
+def _route_by_error_type(state, current_plan, code_source):
+    """P0-4: Structured error_type fast path before generic keyword scanning.
+
+    Returns Command or None (to fall through to keyword regex scan).
+    """
+    error_type = state.get("error_type")
+    if not error_type:
+        return None
+
+    error_type = str(error_type).strip().lower()
+
+    # --- Coder fix category: syntax/code generation errors → Coder ---
+    if error_type in ("syntax", "dpcli_action_json", "dpcli_invalid_action", "syntax_max_retry"):
+        summary = f"structured error_type fast-path: {error_type}"
+        if code_source == "cache":
+            return _handle_cache_failure(state, {
+                "messages": [AIMessage(content=f"【结构化错误验收失败】{summary}")],
+                "reflections": [summary],
+                "verification_result": _build_verification_result(
+                    is_success=False,
+                    is_done=False,
+                    summary=summary,
+                    source="verifier",
+                    failure_scope="local",
+                    failed_action=current_plan,
+                    evidence=f"error_type={error_type}",
+                    fix_hint="code generation error — regenerate action/code",
+                    decision_source="error_type",
+                ),
+                "is_complete": False,
+            })
+        return Command(
+            update={
+                "messages": [AIMessage(content=f"Status: STEP_FAIL ({error_type})")],
+                "reflections": [summary],
+                "verification_result": _build_verification_result(
+                    is_success=False,
+                    is_done=False,
+                    summary=summary,
+                    source="verifier",
+                    failure_scope="local",
+                    failed_action=current_plan,
+                    evidence=f"error_type={error_type}",
+                    fix_hint="code generation error — regenerate action/code",
+                    decision_source="error_type",
+                ),
+                "is_complete": False,
+            },
+            goto="Coder",
+        )
+
+    # --- Locator category: stale refs, missing snapshots → Observer (local fix) ---
+    if error_type in ("locator", "dpcli_ref_stale", "dpcli_snapshot_missing"):
+        summary = f"structured error_type fast-path: {error_type}"
+        if code_source == "cache":
+            return _handle_cache_failure(state, {
+                "messages": [AIMessage(content=f"【结构化错误验收失败】{summary}")],
+                "reflections": [summary],
+                "verification_result": _build_verification_result(
+                    is_success=False,
+                    is_done=False,
+                    summary=summary,
+                    source="verifier",
+                    failure_scope="local",
+                    failed_action=current_plan,
+                    evidence=f"error_type={error_type}",
+                    fix_hint="locator/snapshot issue — re-observe page and retry",
+                    decision_source="error_type",
+                ),
+                "is_complete": False,
+            })
+        return Command(
+            update={
+                "messages": [AIMessage(content=f"Status: STEP_FAIL ({error_type})")],
+                "reflections": [summary],
+                "verification_result": _build_verification_result(
+                    is_success=False,
+                    is_done=False,
+                    summary=summary,
+                    source="verifier",
+                    failure_scope="local",
+                    failed_action=current_plan,
+                    evidence=f"error_type={error_type}",
+                    fix_hint="locator/snapshot issue — re-observe page and retry",
+                    decision_source="error_type",
+                ),
+                "is_complete": False,
+            },
+            goto="Observer",
+        )
+
+    # --- Security/retry category → Planner (re-plan) ---
+    if error_type in ("security", "security_max_retry"):
+        summary = f"structured error_type fast-path: {error_type}"
+        if code_source == "cache":
+            return _handle_cache_failure(state, {
+                "messages": [AIMessage(content=f"【结构化错误验收失败】{summary}")],
+                "reflections": [summary],
+                "verification_result": _build_verification_result(
+                    is_success=False,
+                    is_done=False,
+                    summary=summary,
+                    source="verifier",
+                    failure_scope="local",
+                    failed_action=current_plan,
+                    evidence=f"error_type={error_type}",
+                    fix_hint="security issue or max retries exceeded — re-plan approach",
+                    decision_source="error_type",
+                ),
+                "is_complete": False,
+            })
+        return Command(
+            update={
+                "messages": [AIMessage(content=f"Status: STEP_FAIL ({error_type})")],
+                "reflections": [summary],
+                "verification_result": _build_verification_result(
+                    is_success=False,
+                    is_done=False,
+                    summary=summary,
+                    source="verifier",
+                    failure_scope="local",
+                    failed_action=current_plan,
+                    evidence=f"error_type={error_type}",
+                    fix_hint="security issue or max retries exceeded — re-plan approach",
+                    decision_source="error_type",
+                ),
+                "is_complete": False,
+            },
+            goto="Planner",
+        )
+
+    # --- Critical → global failure, re-plan ---
+    if error_type == "critical":
+        summary = f"structured error_type fast-path: {error_type}"
+        if code_source == "cache":
+            return _handle_cache_failure(state, {
+                "messages": [AIMessage(content=f"【结构化错误验收失败】{summary}")],
+                "reflections": [summary],
+                "verification_result": _build_verification_result(
+                    is_success=False,
+                    is_done=False,
+                    summary=summary,
+                    source="verifier",
+                    failure_scope="global",
+                    failed_action=current_plan,
+                    evidence=f"error_type={error_type}",
+                    fix_hint="critical error — full re-plan needed",
+                    decision_source="error_type",
+                ),
+                "is_complete": False,
+            })
+        return Command(
+            update={
+                "messages": [AIMessage(content=f"Status: STEP_FAIL ({error_type})")],
+                "reflections": [summary],
+                "verification_result": _build_verification_result(
+                    is_success=False,
+                    is_done=False,
+                    summary=summary,
+                    source="verifier",
+                    failure_scope="global",
+                    failed_action=current_plan,
+                    evidence=f"error_type={error_type}",
+                    fix_hint="critical error — full re-plan needed",
+                    decision_source="error_type",
+                ),
+                "is_complete": False,
+            },
+            goto="Planner",
+        )
+
+    return None  # unknown error_type — fall through to keyword scan
+
+
 def verifier_node(state: AgentState, config: RunnableConfig, llm) -> Command[Literal["Observer", "Planner", "Executor", "RAGNode"]]:
     """[Verifier] 验收并决定下一步"""
     logger.info("\n🔍 [Verifier] 正在验收...")
@@ -195,52 +371,64 @@ def verifier_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lit
     logger.info(f"   -> 当前验收 URL: {current_url[:60]}...")
     logger.info(f"   📦 代码来源: {code_source}")
 
-    # 1. 快速失败检查（仅致命错误）
-    fatal_keywords = ["Runtime Error:", "Traceback", "ElementNotFound",
-                      "TimeoutException", "Execution Failed", "Critical"]
-    for kw in fatal_keywords:
-        if kw in log:
-            logger.info(f"⚡ [Verifier] Deterministic Fail: {kw}")
+    # 1. P0-4: Structured error_type fast path (before generic keyword scan)
+    error_type_route = _route_by_error_type(state, current_plan, code_source)
+    if error_type_route is not None:
+        return error_type_route
+
+    # 2. Regex-based fatal keyword pattern matching (fallback when no structured error_type)
+    fatal_patterns = [
+        (re.search(r'^\s*(?:Runtime Error|Traceback)', log, re.MULTILINE), "Runtime Error/Traceback"),
+        (re.search(r'\bElementNotFound\b', log), "ElementNotFound"),
+        (re.search(r'\bTimeoutException\b', log), "TimeoutException"),
+        (re.search(r'^\s*Execution Failed', log, re.MULTILINE), "Execution Failed"),
+        (re.search(r'\bCritical\b.*\bError\b', log), "Critical Error"),
+    ]
+    for match, label in fatal_patterns:
+        if match:
+            logger.info(f"⚡ [Verifier] Deterministic Fail (keyword_fallback): {label}")
 
             # 缓存代码失败：跳 Planner，标记失败
             if code_source == "cache":
                 return _handle_cache_failure(state, {
-                    "messages": [AIMessage(content=f"【缓存验收失败】{kw}")],
-                    "reflections": [f"缓存代码验收失败: {kw}"],
+                    "messages": [AIMessage(content=f"【缓存验收失败】{label}")],
+                    "reflections": [f"缓存代码验收失败: {label}"],
                     "verification_result": _build_verification_result(
                         is_success=False,
                         is_done=False,
-                        summary=f"缓存代码验收失败: {kw}",
+                        summary=f"缓存代码验收失败: {label}",
                         source="verifier",
                         failure_scope="local",
                         failed_action=current_plan,
-                        evidence=kw,
+                        evidence=label,
                         fix_hint="更换执行方式或修复当前失败定位，不要复用该缓存代码",
+                        decision_source="keyword_fallback",
                     ),
-                    "is_complete": False
+                    "is_complete": False,
                 })
 
             # LLM 代码失败：回 Observer
             return Command(
                 update={
-                    "messages": [AIMessage(content=f"Status: STEP_FAIL ({kw})")],
-                    "reflections": [f"Step Failed: {current_plan}. Error: {kw}"],
+                    "messages": [AIMessage(content=f"Status: STEP_FAIL ({label})")],
+                    "reflections": [f"Step Failed: {current_plan}. Error: {label}"],
                     "verification_result": _build_verification_result(
                         is_success=False,
                         is_done=False,
-                        summary=f"步骤失败: {kw}",
+                        summary=f"步骤失败: {label}",
                         source="verifier",
                         failure_scope="local",
                         failed_action=current_plan,
-                        evidence=kw,
+                        evidence=label,
                         fix_hint="仅修复当前失败步骤，不要全局重写",
+                        decision_source="keyword_fallback",
                     ),
-                    "is_complete": False
+                    "is_complete": False,
                 },
-                goto="Observer"
+                goto="Observer",
             )
 
-    # 2. dp_cli deterministic verification (before LLM)
+    # 3. dp_cli deterministic verification (before LLM)
     if state.get("execution_mode") == "dp_cli":
         deterministic = _verify_dpcli_action_deterministically(state)
         if deterministic is not None:
@@ -282,7 +470,7 @@ def verifier_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lit
             logger.info("   [Verifier] dp_cli action failed, returning to Observer")
             return Command(update=updates, goto="Observer")
 
-    # 3. LLM 验收（优化 Prompt）
+    # 4. LLM 验收（优化 Prompt）
     prompt = _build_dpcli_verifier_prompt(state, task, current_plan, current_url, log)
     response = llm.invoke([HumanMessage(content=prompt)])
     content = response.content
@@ -291,7 +479,7 @@ def verifier_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lit
     is_success = parsed["is_success"]
     summary = parsed["summary"]
 
-    # 3. 返回验收结果
+    # 返回验收结果
     logger.info(f"\n📋 [Verifier] LLM 判定:")
     logger.info(f"   Status: {'SUCCESS' if is_success else 'FAIL'}")
     logger.info(f"   Summary: {summary[:100]}")
