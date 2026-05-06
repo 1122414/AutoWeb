@@ -83,10 +83,9 @@ def _dpcli_action_coder_node(state: AgentState, config: RunnableConfig, llm) -> 
             policy_log = json.dumps(policy_action, ensure_ascii=False, indent=2)
             return Command(
                 update={
-                    "messages": [AIMessage(content=f"éŠ†æ‰p_cli actioné¢ç†¸åžšéŠ†æ…­n{json.dumps(policy_action, ensure_ascii=False, indent=2)}")],
+                    "messages": [AIMessage(content=f"[dp_cli policy action]\n{policy_log}")],
                     "generated_action": policy_action,
                     "generated_code": None,
-                    "messages": [AIMessage(content=f"[dp_cli policy action]\n{policy_log}")],
                     "execution_mode": "dp_cli",
                     "coder_retry_count": 0,
                     "_action_source": "policy",
@@ -174,16 +173,25 @@ def _executor_dpcli_branch(state: AgentState, config: RunnableConfig) -> Command
     from skills.dpcli_executor import DPCLIExecutor
 
     session = state.get("dpcli_session") or DPCLI_SESSION
+    before_url = state.get("current_url", "")
     executor = DPCLIExecutor(session=session, headless=DPCLI_HEADLESS)
     result = executor.execute_action(action)
     result_log = json.dumps(result, ensure_ascii=False, indent=2)
     current_url = _dpcli_result_url(result) or state.get("current_url", "")
+    url_changed = bool(before_url and current_url and before_url != current_url)
     update: Dict[str, Any] = {
         "messages": [AIMessage(content=f"【dp_cli执行报告】\n{result_log}")],
         "execution_log": result_log,
         "dpcli_result": result,
         "dpcli_session": session,
         "current_url": current_url,
+        "dpcli_execution_evidence": {
+            "before_url": before_url,
+            "after_url": current_url,
+            "url_changed": url_changed,
+            "action_skill": action.get("skill", ""),
+            "result_ok": bool(result.get("ok")),
+        },
     }
     if result.get("action") == "snapshot" and result.get("ok"):
         update["dpcli_snapshot"] = result

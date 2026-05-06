@@ -88,6 +88,16 @@ class AgentState(EnvState, TaskState):
     # {is_success, is_done, summary}
     verification_result: Optional[Dict[str, Any]]
 
+    # dp_cli 执行证据（P0-3: Executor 前后状态对比）
+    # {before_url, after_url, url_changed, before_dom_hash, after_dom_hash,
+    #  dom_changed, page_title, page_identity, viewport_scroll, action_skill, result_ok}
+    dpcli_execution_evidence: Optional[Dict[str, Any]]
+
+    # Verifier 确定性判定策略配置（P3: 后续接口预留）
+    # {min_target_confidence, schema_coverage_threshold,
+    #  allow_low_confidence_success, llm_required_for_ambiguous_page_action}
+    verification_policy: Optional[Dict[str, Any]]
+
     # 错误处理
     error: Optional[str]
 

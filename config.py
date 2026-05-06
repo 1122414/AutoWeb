@@ -19,6 +19,10 @@ def _env_csv(name: str, default):
     return [x.strip() for x in raw.split(",") if x.strip()]
 
 
+def _env_float(name: str, default: str) -> float:
+    return float(os.getenv(name, default))
+
+
 def _env_rule_list(name: str, default):
     """
     Env JSON format:
@@ -184,6 +188,34 @@ PLANNER_BASE_URL = os.getenv('PLANNER_BASE_URL') or OPENAI_BASE_URL
 VERIFIER_MODEL_NAME = os.getenv('VERIFIER_MODEL_NAME') or MODEL_NAME
 VERIFIER_API_KEY = os.getenv('VERIFIER_API_KEY') or OPENAI_API_KEY
 VERIFIER_BASE_URL = os.getenv('VERIFIER_BASE_URL') or OPENAI_BASE_URL
+
+# ==============================================================================
+# Verifier 确定性信号增强策略配置 (P0-P2)
+# ==============================================================================
+
+# TargetSelector 最低置信度阈值 (0-1)，低于此值不能确定成功
+VERIFIER_MIN_TARGET_CONFIDENCE = _env_float("VERIFIER_MIN_TARGET_CONFIDENCE", "0.8")
+
+# Data schema 字段覆盖率阈值 (0-1)，items 中的 schema 字段覆盖比例需达此值
+VERIFIER_SCHEMA_COVERAGE_THRESHOLD = _env_float("VERIFIER_SCHEMA_COVERAGE_THRESHOLD", "0.6")
+
+# 是否允许低置信度场景下的确定性成功（建议默认 False，交给 LLM）
+VERIFIER_ALLOW_LOW_CONFIDENCE_SUCCESS = _env_bool("VERIFIER_ALLOW_LOW_CONFIDENCE_SUCCESS", "False")
+
+# 模糊 page 动作是否强制要求 LLM 仲裁
+VERIFIER_LLM_REQUIRED_FOR_AMBIGUOUS_PAGE = _env_bool("VERIFIER_LLM_REQUIRED_FOR_AMBIGUOUS_PAGE", "True")
+
+# 重复动作检测相似度阈值 (0-1, difflib.SequenceMatcher)
+VERIFIER_DUPLICATE_ACTION_THRESHOLD = _env_float("VERIFIER_DUPLICATE_ACTION_THRESHOLD", "0.92")
+
+# 重复动作检测最小触发次数
+VERIFIER_DUPLICATE_ACTION_MIN_COUNT = int(os.getenv("VERIFIER_DUPLICATE_ACTION_MIN_COUNT", "2"))
+
+# 连续失败次数达到此值时升级 failure_scope 为 global
+VERIFIER_FAIL_COUNT_GLOBAL_ESCALATE = int(os.getenv("VERIFIER_FAIL_COUNT_GLOBAL_ESCALATE", "2"))
+
+# 连续失败次数达到此值时建议终止任务
+VERIFIER_FAIL_COUNT_TERMINATE = int(os.getenv("VERIFIER_FAIL_COUNT_TERMINATE", "5"))
 
 # ==============================================================================
 # 代码缓存配置 (Code Cache System)
