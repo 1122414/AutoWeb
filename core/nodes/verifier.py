@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import difflib
 import re
 import time
 import urllib.parse
@@ -311,6 +312,13 @@ def _handle_dpcli_success_after_verification(
             )
     except Exception as action_store_exc:
         logger.info(f"   [ActionCache] save exception: {action_store_exc}")
+        warnings = list(updates.get("verification_result", {}).get("warnings") or [])
+        warnings.append(f"ActionCache save skipped: {action_store_exc}")
+        if "verification_result" not in updates:
+            updates["verification_result"] = {}
+        updates["verification_result"]["warnings"] = warnings
+        curr_hint = str(updates.get("verification_result", {}).get("fix_hint", ""))
+        updates["verification_result"]["fix_hint"] = curr_hint + " | ActionCache unavailable"
 
     # Detail batch policy
     try:
@@ -335,6 +343,11 @@ def _handle_dpcli_success_after_verification(
             return Command(update=updates, goto="Executor")
     except Exception as policy_exc:
         logger.info(f"   [Verifier] detail batch policy skip: {policy_exc}")
+        warnings = list(updates.get("verification_result", {}).get("warnings") or [])
+        warnings.append(f"Detail batch policy skipped: {policy_exc}")
+        if "verification_result" not in updates:
+            updates["verification_result"] = {}
+        updates["verification_result"]["warnings"] = warnings
 
     return None
 
@@ -547,6 +560,39 @@ def _route_by_error_type(state, current_plan, code_source):
     return None  # unknown error_type — fall through to keyword scan
 
 
+def _detect_duplicate_action(state):
+    """P2-1: Detect when the same or highly similar action is being repeated.
+
+    Uses difflib.SequenceMatcher to compare current action against recent
+    finished_steps summaries. Returns a failure verification_result dict if a
+    duplicate loop is detected, or None.
+    """
+    from config import VERIFIER_DUPLICATE_ACTION_THRESHOLD, VERIFIER_DUPLICATE_ACTION_MIN_COUNT
+    import json
+    finished = state.get("finished_steps") or []
+    if len(finished) < VERIFIER_DUPLICATE_ACTION_MIN_COUNT:
+        return None
+    action = state.get("generated_action")
+    current_action_str = json.dumps(action, sort_keys=True, ensure_ascii=False) if action else ""
+    if not current_action_str:
+        return None
+    recent_summaries = finished[-VERIFIER_DUPLICATE_ACTION_MIN_COUNT:]
+    matches = 0
+    for summary in recent_summaries:
+        ratio = difflib.SequenceMatcher(None, current_action_str, str(summary)).ratio()
+        if ratio >= VERIFIER_DUPLICATE_ACTION_THRESHOLD:
+            matches += 1
+    if matches >= VERIFIER_DUPLICATE_ACTION_MIN_COUNT:
+        return _build_verification_result(
+            is_success=False, is_done=False,
+            summary="Duplicate action detected — same or highly similar action repeated",
+            source="verifier", failure_scope="global",
+            decision_source="duplicate_action",
+            fix_hint="Change strategy; current approach is looping on same action",
+        )
+    return None
+
+
 def verifier_node(state: AgentState, config: RunnableConfig, llm) -> Command[Literal["Observer", "Planner", "Executor", "RAGNode"]]:
     """[Verifier] 验收并决定下一步"""
     logger.info("\n🔍 [Verifier] 正在验收...")
@@ -589,6 +635,20 @@ def verifier_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lit
     error_type_route = _route_by_error_type(state, current_plan, code_source)
     if error_type_route is not None:
         return error_type_route
+
+    # P2-1: Duplicate action detection (before keyword scan)
+    duplicate_result = _detect_duplicate_action(state)
+    if duplicate_result is not None:
+        logger.info(f"   [Verifier] Duplicate action detected, returning to Planner")
+        return Command(
+            update={
+                "messages": [AIMessage(content=f"Status: STEP_FAIL (duplicate_action)")],
+                "reflections": [duplicate_result["summary"]],
+                "verification_result": duplicate_result,
+                "is_complete": False,
+            },
+            goto="Planner",
+        )
 
     # 2. Regex-based fatal keyword pattern matching (fallback when no structured error_type)
     fatal_patterns = [
@@ -759,10 +819,28 @@ def verifier_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lit
         updates["reflections"] = [f"Step Failed: {summary}"]
         failure_scope = _normalize_failure_scope(
             updates["verification_result"].get("failure_scope", "local"))
-        # 仅在 global 失败时回滚整条最新策略；local 失败保留上下文做定向修复
+
+        # P2-2: _step_fail_count escalation
+        from config import VERIFIER_FAIL_COUNT_GLOBAL_ESCALATE, VERIFIER_FAIL_COUNT_TERMINATE
+        step_fail_count = state.get("_step_fail_count", 0)
+        if step_fail_count >= VERIFIER_FAIL_COUNT_GLOBAL_ESCALATE:
+            updates["verification_result"]["failure_scope"] = "global"
+            warnings = list(updates.get("verification_result", {}).get("warnings") or [])
+            warnings.append(f"Escalated to global after {step_fail_count} consecutive failures")
+            updates["verification_result"]["warnings"] = warnings
+        if step_fail_count >= VERIFIER_FAIL_COUNT_TERMINATE:
+            curr_hint = str(updates.get("verification_result", {}).get("fix_hint", ""))
+            updates["verification_result"]["fix_hint"] = curr_hint + " | Consider terminating task or requesting human intervention after {} failures".format(step_fail_count)
+
+        # P2-3: 仅在 global 失败时回滚整条最新策略；local 失败保留上下文做定向修复
         if failure_scope == "global":
-            updates["locator_suggestions"] = {
-                "__replace__": current_suggestions[:-1]} if current_suggestions else None
+            if len(current_suggestions) > 1:
+                updates["locator_suggestions"] = {"__replace__": current_suggestions[:-1]}
+            elif len(current_suggestions) == 1:
+                updates["reflections"] = (state.get("reflections") or []) + [
+                    "Last locator suggestion exhausted; Observer must re-observe or Planner must change strategy"
+                ]
+            # empty list: do not write locator_suggestions at all
 
         # 缓存代码验收失败：失效缓存 + 跳 Planner
         if code_source == "cache":

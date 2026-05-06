@@ -276,3 +276,60 @@ class TestLLMBranchDetailBatch(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---- P1-5: Policy warning tests ----
+
+import tests.unit.stubs  # noqa: F401, E402
+
+from core.nodes.verifier import _handle_dpcli_success_after_verification  # noqa: E402
+
+
+class TestPolicyWarnings(unittest.TestCase):
+    """P1-5: detail batch policy exceptions should leave warnings."""
+
+    def _base_state(self):
+        return {
+            "execution_mode": "dp_cli",
+            "user_task": "extract data",
+            "generated_action": {"skill": "extract", "params": {"target_ref": "r1"}},
+            "dpcli_result": {"ok": True, "data": {"items": [{"title": "X"}]}},
+            "dpcli_detail_batch_ran": False,
+            "plan": "extract detail",
+            "finished_steps": ["step 1"],
+            "reflections": [],
+            "current_url": "https://example.com",
+            "dpcli_snapshot_view": {},
+            "_action_source": None,
+        }
+
+    def test_success_preserved_on_policy_exception(self):
+        state = self._base_state()
+        updates = {
+            "verification_result": {
+                "is_success": True, "is_done": False,
+                "summary": "extract ok", "source": "verifier",
+                "warnings": [],
+            }
+        }
+        cmd = _handle_dpcli_success_after_verification(
+            state, updates, "extract data", "extract detail",
+            "https://example.com", "extract ok")
+        self.assertIsNone(cmd)
+        self.assertTrue(updates["verification_result"]["is_success"])
+
+    def test_warnings_field_exists_after_policy_run(self):
+        state = self._base_state()
+        state["dpcli_result"]["data"]["items"] = [{"title": "Book A", "url": "https://book-a"}]
+        state["user_task"] = "get book details"
+        updates = {
+            "verification_result": {
+                "is_success": True, "summary": "extract ok",
+                "source": "verifier", "warnings": [],
+            }
+        }
+        cmd = _handle_dpcli_success_after_verification(
+            state, updates, "get book details", "extract detail",
+            "https://qidian.com/rank/", "extract ok")
+        self.assertIsNone(cmd, "should not trigger batch if policy decides no")
+        self.assertIn("warnings", updates["verification_result"])
