@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import time
+import urllib.parse
 from typing import Literal
 
 from langchain_core.messages import HumanMessage, AIMessage
@@ -20,11 +21,38 @@ from prompts.verifier_prompts import VERIFIER_CHECK_PROMPT
 from skills.logger import logger
 
 
-def _verify_dpcli_action_deterministically(state):
-    """Deterministic verification for dp_cli observation/data actions.
+def _check_target_confidence(state):
+    """Check TargetSelector confidence for click/type/select actions.
+
+    Returns:
+        (confidence: float, ref_match: bool, status: str)
+    """
+    target_result = state.get("dpcli_target_result") or {}
+    status = str(target_result.get("status") or "")
+    confidence = float(target_result.get("confidence", 0))
+
+    action = state.get("generated_action") or {}
+    params = action.get("params") or {}
+    target_ref = str(target_result.get("target_ref") or "")
+    action_ref = str(params.get("ref") or params.get("target_ref") or "")
+    ref_match = bool(target_ref and action_ref and target_ref == action_ref)
+
+    return (confidence, ref_match, status)
+
+
+def _verify_dpcli_action_with_signals(state, current_url):
+    """Enhanced dp_cli action verification with URL matching, schema validation,
+    and target confidence signals.
 
     Returns a verification_result dict, or None to fall through to LLM verifier.
     """
+    from config import (
+        VERIFIER_MIN_TARGET_CONFIDENCE,
+        VERIFIER_SCHEMA_COVERAGE_THRESHOLD,
+        VERIFIER_ALLOW_LOW_CONFIDENCE_SUCCESS,
+        VERIFIER_LLM_REQUIRED_FOR_AMBIGUOUS_PAGE,
+    )
+
     action = state.get("generated_action") or {}
     result = state.get("dpcli_result") or {}
     kind = _dpcli_action_kind(action)
@@ -33,6 +61,7 @@ def _verify_dpcli_action_deterministically(state):
     if not result.get("ok"):
         return None
 
+    # --- Observation actions (unchanged behavior + decision_source) ---
     if kind == "observation":
         return _build_verification_result(
             is_success=True,
@@ -42,12 +71,37 @@ def _verify_dpcli_action_deterministically(state):
             failure_scope="local",
             evidence=_compact_result_evidence(result),
             fix_hint="continue planning with updated snapshot context",
+            decision_source="dpcli_observation",
         )
 
+    # --- Data actions with schema validation ---
     if kind == "data":
         data = result.get("data") or {}
         items = data.get("items") if isinstance(data, dict) else None
-        if items and isinstance(items, list) and len(items) > 0:
+        has_items = items and isinstance(items, list) and len(items) > 0
+
+        # No items → deterministic fail
+        if not has_items:
+            return _build_verification_result(
+                is_success=False,
+                is_done=False,
+                summary=f"data action returned no usable items: {skill}",
+                source="verifier",
+                failure_scope="local",
+                evidence=_compact_result_evidence(result),
+                fix_hint="select a better data region or list ref",
+                decision_source="dpcli_data",
+            )
+
+        # Get schema from action params or structured_plan
+        structured_plan = state.get("dpcli_structured_plan") or {}
+        schema = (
+            action.get("params", {}).get("schema")
+            or structured_plan.get("action_payload", {}).get("schema")
+        )
+
+        # No schema defined → old behavior (items exist = success)
+        if not schema or not isinstance(schema, list) or len(schema) == 0:
             return _build_verification_result(
                 is_success=True,
                 is_done=False,
@@ -55,18 +109,178 @@ def _verify_dpcli_action_deterministically(state):
                 source="verifier",
                 failure_scope="local",
                 evidence=_compact_result_evidence(result),
+                decision_source="dpcli_data",
             )
-        return _build_verification_result(
-            is_success=False,
-            is_done=False,
-            summary=f"data action returned no usable items: {skill}",
-            source="verifier",
-            failure_scope="local",
-            evidence=_compact_result_evidence(result),
-            fix_hint="select a better data region or list ref",
+
+        # Schema is defined → validate field coverage across items
+        schema_fields = [str(f).strip().lower() for f in schema if f]
+        if not schema_fields:
+            return _build_verification_result(
+                is_success=True,
+                is_done=False,
+                summary=f"data action succeeded: {skill} ({len(items)} items)",
+                source="verifier",
+                failure_scope="local",
+                evidence=_compact_result_evidence(result),
+                decision_source="dpcli_data",
+            )
+
+        fields_present = 0
+        for field in schema_fields:
+            for item in items:
+                if isinstance(item, dict) and field in {str(k).strip().lower() for k in item}:
+                    fields_present += 1
+                    break
+
+        coverage = fields_present / len(schema_fields)
+
+        if coverage >= VERIFIER_SCHEMA_COVERAGE_THRESHOLD:
+            return _build_verification_result(
+                is_success=True,
+                is_done=False,
+                summary=f"data action succeeded: {skill} ({len(items)} items, schema coverage {coverage:.0%})",
+                source="verifier",
+                failure_scope="local",
+                evidence=_compact_result_evidence(result),
+                decision_source="schema_match",
+            )
+
+        # Below threshold but has items → defer to LLM for judgment
+        return None
+
+    # --- Page actions with URL/signal rules ---
+    if kind == "page":
+        structured_plan = state.get("dpcli_structured_plan") or {}
+        execution_evidence = state.get("dpcli_execution_evidence") or {}
+        after_url = execution_evidence.get("after_url") or current_url or ""
+
+        # Get expected URL from structured_plan or action params
+        expected_url = (
+            structured_plan.get("action_payload", {}).get("url")
+            or action.get("params", {}).get("url")
+            or ""
         )
 
+        step_intent = str(structured_plan.get("step_intent") or "").lower()
+
+        def _url_matches(expected, after):
+            """3-tier URL matching for navigation verification.
+
+            Tier 1: exact match
+            Tier 2: same netloc + path prefix match
+            Tier 3: expected netloc contained in after netloc
+            """
+            if not expected or not after:
+                return False
+            if expected == after:
+                return True
+            expected_parsed = urllib.parse.urlparse(expected)
+            after_parsed = urllib.parse.urlparse(after)
+            if (expected_parsed.netloc
+                    and after_parsed.netloc
+                    and expected_parsed.netloc == after_parsed.netloc
+                    and expected_parsed.path
+                    and after_parsed.path.startswith(expected_parsed.path)):
+                return True
+            if expected_parsed.netloc and expected_parsed.netloc in after_parsed.netloc:
+                return True
+            return False
+
+        # --- Navigate/Open with expected URL ---
+        if skill in ("open", "navigate") and expected_url:
+            if _url_matches(expected_url, after_url):
+                return _build_verification_result(
+                    is_success=True,
+                    is_done=False,
+                    summary=f"page action succeeded: {skill} -> {after_url[:80]}",
+                    source="verifier",
+                    failure_scope="local",
+                    evidence=_compact_result_evidence(result),
+                    decision_source="url_match",
+                )
+            return None
+
+        # --- Click with expected URL ---
+        if skill == "click" and expected_url:
+            if _url_matches(expected_url, after_url):
+                return _build_verification_result(
+                    is_success=True,
+                    is_done=False,
+                    summary=f"click action succeeded: navigated to {after_url[:80]}",
+                    source="verifier",
+                    failure_scope="local",
+                    evidence=_compact_result_evidence(result),
+                    decision_source="url_match",
+                )
+            return None
+
+        # --- Click without expected URL: check URL change signal ---
+        if skill == "click" and not expected_url:
+            page_transition_keywords = [
+                "navigate", "open", "go to", "visit", "redirect",
+                "\u8fdb\u5165", "\u8df3\u8f6c", "\u6253\u5f00", "\u8bbf\u95ee",
+            ]
+            has_transition_intent = any(kw in step_intent for kw in page_transition_keywords)
+            url_changed = bool(execution_evidence.get("url_changed"))
+            if url_changed and has_transition_intent:
+                return _build_verification_result(
+                    is_success=True,
+                    is_done=False,
+                    summary=f"click action (url changed): {skill}",
+                    source="verifier",
+                    failure_scope="local",
+                    evidence=_compact_result_evidence(result),
+                    confidence=0.75,
+                    needs_llm=True,
+                    decision_source="dpcli_page_url_change",
+                )
+            return None
+
+        # --- Scroll/Wait: passive actions, tentative success ---
+        if skill in ("scroll", "wait"):
+            return _build_verification_result(
+                is_success=True,
+                is_done=False,
+                summary=f"page action (tentative): {skill}",
+                source="verifier",
+                failure_scope="local",
+                evidence=_compact_result_evidence(result),
+                confidence=0.8,
+                needs_llm=True,
+                decision_source="dpcli_page_passive",
+                warnings=["scroll/wait cannot be deterministically verified"],
+            )
+
+        # --- Type/Select: check target confidence ---
+        if skill in ("type", "select"):
+            target_confidence, ref_match, target_status = _check_target_confidence(state)
+            if (target_confidence >= VERIFIER_MIN_TARGET_CONFIDENCE
+                    and target_status == "selected"):
+                return _build_verification_result(
+                    is_success=True,
+                    is_done=False,
+                    summary=f"page action (target confidence {target_confidence:.0%}): {skill}",
+                    source="verifier",
+                    failure_scope="local",
+                    evidence=_compact_result_evidence(result),
+                    confidence=0.7,
+                    needs_llm=True,
+                    decision_source="target_confidence",
+                )
+            return None
+
+        # Unknown page action → fall through to LLM
+        return None
+
     return None
+
+
+def _verify_dpcli_action_deterministically(state):
+    """Backward-compatible wrapper: delegates to signal-enhanced verification.
+
+    Returns a verification_result dict, or None to fall through to LLM verifier.
+    """
+    return _verify_dpcli_action_with_signals(state, state.get("current_url", ""))
 
 
 def _handle_dpcli_success_after_verification(
@@ -430,7 +644,7 @@ def verifier_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lit
 
     # 3. dp_cli deterministic verification (before LLM)
     if state.get("execution_mode") == "dp_cli":
-        deterministic = _verify_dpcli_action_deterministically(state)
+        deterministic = _verify_dpcli_action_with_signals(state, current_url)
         if deterministic is not None:
             is_success = deterministic["is_success"]
             summary = deterministic["summary"]

@@ -296,3 +296,106 @@ class TestNonDpcliVerifierPrompt(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---- P1: New _verify_dpcli_action_with_signals tests (use actual import) ----
+
+import tests.unit.stubs  # noqa: F401, E402
+
+from core.nodes.verifier import _verify_dpcli_action_with_signals  # noqa: E402
+
+
+class TestDeterministicWithSignals(unittest.TestCase):
+    """P1: _verify_dpcli_action_with_signals — URL, schema, target confidence."""
+
+    def test_navigate_url_match_exact(self):
+        state = {
+            "generated_action": {"skill": "open", "params": {"url": "https://example.com/page"}},
+            "dpcli_result": {"ok": True, "data": {"page": {"url": "https://example.com/page"}}},
+            "dpcli_execution_evidence": {"before_url": "", "after_url": "https://example.com/page", "url_changed": True},
+            "dpcli_structured_plan": {"step_intent": "navigate", "action_payload": {"url": "https://example.com/page"}},
+        }
+        result = _verify_dpcli_action_with_signals(state, "https://example.com/page")
+        self.assertIsNotNone(result)
+        self.assertTrue(result["is_success"])
+        self.assertEqual(result["decision_source"], "url_match")
+
+    def test_navigate_url_mismatch_defers_to_llm(self):
+        state = {
+            "generated_action": {"skill": "open", "params": {"url": "https://example.com/page"}},
+            "dpcli_result": {"ok": True, "data": {"page": {"url": "https://other.com"}}},
+            "dpcli_execution_evidence": {"before_url": "", "after_url": "https://other.com", "url_changed": True},
+            "dpcli_structured_plan": {"step_intent": "navigate", "action_payload": {"url": "https://example.com/page"}},
+        }
+        result = _verify_dpcli_action_with_signals(state, "https://other.com")
+        self.assertIsNone(result)
+
+    def test_click_with_url_match_success(self):
+        state = {
+            "generated_action": {"skill": "click", "params": {"ref": "e1", "url": "https://example.com/detail"}},
+            "dpcli_result": {"ok": True, "data": {"page": {"url": "https://example.com/detail"}}},
+            "dpcli_execution_evidence": {"before_url": "https://example.com/list", "after_url": "https://example.com/detail", "url_changed": True},
+            "dpcli_structured_plan": {"step_intent": "click", "action_payload": {"url": "https://example.com/detail"}},
+        }
+        result = _verify_dpcli_action_with_signals(state, "https://example.com/detail")
+        self.assertIsNotNone(result)
+        self.assertTrue(result["is_success"])
+        self.assertEqual(result["decision_source"], "url_match")
+
+    def test_click_no_url_no_change_defers_to_llm(self):
+        state = {
+            "generated_action": {"skill": "click", "params": {"ref": "e1"}},
+            "dpcli_result": {"ok": True, "data": {"page": {"url": "https://example.com/same"}}},
+            "dpcli_execution_evidence": {"before_url": "https://example.com/same", "after_url": "https://example.com/same", "url_changed": False},
+            "dpcli_structured_plan": {"step_intent": "click", "action_payload": {}},
+        }
+        result = _verify_dpcli_action_with_signals(state, "https://example.com/same")
+        self.assertIsNone(result)
+
+    def test_schema_coverage_sufficient_success(self):
+        state = {
+            "generated_action": {"skill": "extract", "params": {"schema": ["title", "url", "price"]}},
+            "dpcli_result": {"ok": True, "data": {"items": [
+                {"title": "Item 1", "url": "https://x.com/1", "price": 10},
+                {"title": "Item 2", "url": "https://x.com/2"},
+            ]}},
+            "dpcli_structured_plan": {"step_intent": "extract", "action_payload": {"schema": ["title", "url", "price"]}},
+        }
+        result = _verify_dpcli_action_with_signals(state, "")
+        self.assertIsNotNone(result)
+        self.assertTrue(result["is_success"])
+        self.assertEqual(result["decision_source"], "schema_match")
+
+    def test_schema_coverage_insufficient_defers_to_llm(self):
+        state = {
+            "generated_action": {"skill": "extract", "params": {"schema": ["title", "url", "price", "rating", "author"]}},
+            "dpcli_result": {"ok": True, "data": {"items": [
+                {"title": "Item 1", "url": "https://x.com/1"},
+            ]}},
+            "dpcli_structured_plan": {"step_intent": "extract", "action_payload": {"schema": ["title", "url", "price", "rating", "author"]}},
+        }
+        result = _verify_dpcli_action_with_signals(state, "")
+        self.assertIsNone(result)
+
+    def test_scroll_gives_tentative_success(self):
+        state = {
+            "generated_action": {"skill": "scroll", "params": {"direction": "down"}},
+            "dpcli_result": {"ok": True, "data": {"page": {"url": "https://example.com"}}},
+            "dpcli_execution_evidence": {"before_url": "https://example.com", "after_url": "https://example.com", "url_changed": False},
+            "dpcli_structured_plan": {"step_intent": "scroll", "action_payload": {}},
+        }
+        result = _verify_dpcli_action_with_signals(state, "https://example.com")
+        self.assertIsNotNone(result)
+        self.assertTrue(result["is_success"])
+        self.assertTrue(result["needs_llm"])
+        self.assertAlmostEqual(result["confidence"], 0.8, delta=0.05)
+
+    def test_observation_always_succeeds(self):
+        state = {
+            "generated_action": {"skill": "snapshot"},
+            "dpcli_result": {"ok": True, "data": {"page": {"url": "https://example.com"}}},
+        }
+        result = _verify_dpcli_action_with_signals(state, "https://example.com")
+        self.assertIsNotNone(result)
+        self.assertTrue(result["is_success"])
+        self.assertEqual(result["decision_source"], "dpcli_observation")
