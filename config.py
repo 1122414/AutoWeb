@@ -168,6 +168,18 @@ TASK_RUN_DB_PATH = os.getenv(
     os.path.join(OUTPUT_DIR, "state", "autoweb_task_runs.sqlite3"),
 )
 
+RUN_TRACE_ENABLED = _env_bool("RUN_TRACE_ENABLED", "True")
+RUN_TRACE_DB_PATH = os.getenv(
+    "RUN_TRACE_DB_PATH",
+    os.path.join(OUTPUT_DIR, "traces", "autoweb_run_trace.sqlite3"),
+)
+try:
+    LLM_PRICING = json.loads(os.getenv("LLM_PRICING_JSON", "{}"))
+    if not isinstance(LLM_PRICING, dict):
+        LLM_PRICING = {}
+except json.JSONDecodeError:
+    LLM_PRICING = {}
+
 # 关系型数据库连接串 (PostgreSQL)
 # 格式示例: postgresql://user:password@localhost:5432/dbname
 # POSTGRES_CONNECTION_STRING = os.getenv("POSTGRES_CONNECTION_STRING")

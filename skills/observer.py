@@ -259,7 +259,13 @@ class BrowserObserver:
             dom_json=dom_skeleton[:50000]  # 防止 Token 溢出
         )
 
-        response = self.llm.invoke(prompt)
+        from skills.run_trace import traced_llm_invoke
+
+        response = traced_llm_invoke(
+            self.llm,
+            prompt,
+            node="Observer",
+        )
         strategy = self._parse_json_safely(response.content)
 
         # Update Cache

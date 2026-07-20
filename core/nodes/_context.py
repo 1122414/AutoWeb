@@ -3,6 +3,7 @@ from __future__ import annotations
 from langchain_core.messages import HumanMessage
 from core.nodes._utils import _count_tokens, _get_summarizer_llm
 from skills.logger import logger
+from skills.run_trace import traced_llm_invoke
 
 def _prune_locator_suggestions(accumulated_strategies: list) -> list:
     """
@@ -71,7 +72,11 @@ def _prune_finished_steps(finished_steps: list, prompt_text: str) -> str:
             "保留关键信息（如爬取了哪些数据、到了第几页等）：\n"
             + "\n".join([f"- {s}" for s in early])
         )
-        resp = summarizer.invoke([HumanMessage(content=summary_prompt)])
+        resp = traced_llm_invoke(
+            summarizer,
+            [HumanMessage(content=summary_prompt)],
+            node="ContextSummarizer",
+        )
         early_summary = resp.content.strip()
     except Exception as e:
         logger.warning(f"   ⚠️ [Context] 摘要压缩失败: {e}，使用截断兜底")

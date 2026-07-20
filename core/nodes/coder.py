@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 from typing import Any, Dict, Literal
 
 from langchain_core.messages import HumanMessage, AIMessage
@@ -28,6 +29,7 @@ from core.nodes._dpcli import (
 from prompts.coder_prompts import ACTION_CODE_GEN_PROMPT, CODER_TASK_WRAPPER
 from prompts.dpcli_action_prompts import DPCLI_ACTION_GEN_PROMPT
 from skills.logger import logger
+from skills.run_trace import trace_browser_action, traced_llm_invoke
 
 
 def _dpcli_request_id(state: AgentState, action: Dict[str, Any]) -> str:
@@ -67,7 +69,13 @@ def coder_node(state: AgentState, config: RunnableConfig, llm) -> Command[Litera
 
     prompt = CODER_TASK_WRAPPER.format(plan=plan, base_prompt=base_prompt)
 
-    response = llm.invoke([HumanMessage(content=prompt)])
+    response = traced_llm_invoke(
+        llm,
+        [HumanMessage(content=prompt)],
+        node="Coder",
+        state=state,
+        config=config,
+    )
 
     content = response.content
     code = ""
@@ -117,7 +125,13 @@ def _dpcli_action_coder_node(state: AgentState, config: RunnableConfig, llm) -> 
         base_prompt=DPCLI_ACTION_GEN_PROMPT.replace(
             "{context}", _dpcli_action_context(state)),
     )
-    response = llm.invoke([HumanMessage(content=prompt)])
+    response = traced_llm_invoke(
+        llm,
+        [HumanMessage(content=prompt)],
+        node="Coder",
+        state=state,
+        config=config,
+    )
     action = _extract_json_object(getattr(response, "content", response))
     validation_error = _validate_dpcli_action(action or {}, state)
 
@@ -194,7 +208,15 @@ def _executor_dpcli_branch(state: AgentState, config: RunnableConfig) -> Command
     request_id = _dpcli_request_id(state, action)
     action_with_request = dict(action)
     action_with_request["request_id"] = request_id
+    action_started = time.perf_counter()
     result = executor.execute_action(action_with_request)
+    trace_browser_action(
+        config=config,
+        state=state,
+        action=action_with_request,
+        result=result,
+        duration_ms=(time.perf_counter() - action_started) * 1000,
+    )
     if str(action.get("skill") or "").lower() == "extract":
         from skills.dpcli_result_enricher import enrich_extract_result
 

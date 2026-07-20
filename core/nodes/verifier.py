@@ -1108,7 +1108,15 @@ def verifier_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lit
 
     # 4. LLM 验收（优化 Prompt）
     prompt = _build_dpcli_verifier_prompt(state, task, current_plan, current_url, log)
-    response = llm.invoke([HumanMessage(content=prompt)])
+    from skills.run_trace import traced_llm_invoke
+
+    response = traced_llm_invoke(
+        llm,
+        [HumanMessage(content=prompt)],
+        node="Verifier",
+        state=state,
+        config=config,
+    )
     content = response.content
 
     parsed = _parse_verifier_result_content(content)

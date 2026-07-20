@@ -12,6 +12,7 @@ from core.state_v2 import AgentState
 from core.nodes._verification import _build_verification_result
 from prompts.verifier_prompts import ERROR_RECOVERY_PROMPT
 from skills.logger import logger
+from skills.run_trace import traced_llm_invoke
 
 
 def error_handler_node(state: AgentState, config: RunnableConfig, llm) -> Command[Literal["Observer", "__end__"]]:
@@ -70,7 +71,13 @@ def error_handler_node(state: AgentState, config: RunnableConfig, llm) -> Comman
         last_reflection=reflections[-1] if reflections else 'None',
     )
 
-    response = llm.invoke([HumanMessage(content=prompt)])
+    response = traced_llm_invoke(
+        llm,
+        [HumanMessage(content=prompt)],
+        node="ErrorHandler",
+        state=state,
+        config=config,
+    )
     content = str(response.content or "")
 
     is_terminate = "Status: TERMINATE" in content

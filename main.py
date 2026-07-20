@@ -703,6 +703,28 @@ def interactive_loop(app, browser_instance, llm, observer, task_store=None):
                 print(f"THREAD ID: {thread_id}")
                 continue
 
+            if lower_input in ("usage", "tokens", "token", "用量", "token用量"):
+                from skills.run_trace import get_run_trace_store
+
+                trace_store = get_run_trace_store()
+                if trace_store is None:
+                    print("⚠️ Run Trace 未启用")
+                    continue
+                usage = trace_store.summarize(thread_id)
+                precision = (
+                    "含估算"
+                    if usage.estimated_call_count
+                    else "全部精确"
+                )
+                print(
+                    f"Token: {usage.total_tokens} "
+                    f"(输入 {usage.input_tokens} / 输出 {usage.output_tokens}, "
+                    f"{precision}) | LLM {usage.llm_call_count} 次 | "
+                    f"浏览器动作 {usage.browser_action_count} 次 | "
+                    f"成本 ${usage.cost_usd:.6f}"
+                )
+                continue
+
             if lower_input in ("runs", "任务列表", "恢复列表"):
                 if task_store is None:
                     print("⚠️ Task Run 持久化未启用")

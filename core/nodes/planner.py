@@ -14,6 +14,7 @@ from core.nodes._verification import _is_failed_verification, _verification_focu
 from config import RAG_STORE_KEYWORDS, RAG_QA_KEYWORDS, RAG_GOAL_KEYWORDS, RAG_DONE_KEYWORDS
 from prompts.planner_prompts import PLANNER_START_PROMPT, PLANNER_STEP_PROMPT, PLANNER_CONTINUE_PROMPT, PLANNER_FORCE_SKIP_PROMPT
 from skills.logger import logger
+from skills.run_trace import traced_llm_invoke
 
 
 def _dpcli_contract_planner_step(
@@ -88,7 +89,13 @@ def _dpcli_planner_step(
         logger.info("   ⚠️ [Planner] dpcli_agent_view 不可用，回退 legacy planner")
         return None
 
-    response = llm.invoke([HumanMessage(content=context)])
+    response = traced_llm_invoke(
+        llm,
+        [HumanMessage(content=context)],
+        node="Planner",
+        state=state,
+        config=config,
+    )
     content = response.content
     logger.info(f"   📋 [Planner-dp_cli] 原始输出: {content[:300]}")
 
@@ -237,7 +244,13 @@ def planner_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lite
     if loop_count == 0 and is_initial_page:
         logger.info("   ⏩ [Planner] 初始启动，跳过 DOM 分析，直接生成导航计划。")
         prompt = PLANNER_START_PROMPT.format(task=task)
-        response = llm.invoke([HumanMessage(content=prompt)])
+        response = traced_llm_invoke(
+            llm,
+            [HumanMessage(content=prompt)],
+            node="Planner",
+            state=state,
+            config=config,
+        )
 
         return Command(
             update={
@@ -278,7 +291,13 @@ def planner_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lite
                 current_url=current_url,
                 finished_steps_str=finished_steps_str
             )
-            response = llm.invoke([HumanMessage(content=prompt)])
+            response = traced_llm_invoke(
+                llm,
+                [HumanMessage(content=prompt)],
+                node="Planner",
+                state=state,
+                config=config,
+            )
 
             return Command(
                 update={
@@ -299,7 +318,13 @@ def planner_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lite
                 current_url=current_url,
                 finished_steps_str="(新任务，无历史步骤)"
             )
-            response = llm.invoke([HumanMessage(content=prompt)])
+            response = traced_llm_invoke(
+                llm,
+                [HumanMessage(content=prompt)],
+                node="Planner",
+                state=state,
+                config=config,
+            )
 
             return Command(
                 update={
@@ -409,7 +434,13 @@ def planner_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lite
     # 制定最终计划
     prompt = trial_prompt_template.replace(
         "{finished_steps_str}", finished_steps_str)
-    response = llm.invoke([HumanMessage(content=prompt)])
+    response = traced_llm_invoke(
+        llm,
+        [HumanMessage(content=prompt)],
+        node="Planner",
+        state=state,
+        config=config,
+    )
     content = response.content
     logger.info(f"   📋 [Planner] 计划内容: {content[:200]}")
     # 局部修复护栏：失败窗口内禁止 Planner 输出“全局重写”方案
@@ -419,7 +450,13 @@ def planner_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lite
             "\n\n【系统硬约束】\n"
             "你必须仅修复 failed_action / failed_locator，禁止从头重做或全局改写。"
         )
-        response = llm.invoke([HumanMessage(content=prompt + hard_local_fix)])
+        response = traced_llm_invoke(
+            llm,
+            [HumanMessage(content=prompt + hard_local_fix)],
+            node="Planner",
+            state=state,
+            config=config,
+        )
         content = response.content
     # 改进完成判断：当两个标记同时出现时，以【计划已生成】为准
     # (Planner 推理过程中可能先写"【任务已完成】"然后自己推翻，生成新计划)
