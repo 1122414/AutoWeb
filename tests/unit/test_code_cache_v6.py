@@ -1,6 +1,17 @@
-from skills.code_cache import code_cache_manager, CacheHit
-import sys
 import os
+import sys
+import time
+
+import pytest
+
+
+if os.getenv("AUTOWEB_RUN_INTEGRATION") != "1":
+    pytest.skip(
+        "requires live Milvus and embedding dependencies",
+        allow_module_level=True,
+    )
+
+from skills.code_cache import code_cache_manager, CacheHit
 
 # 将项目根目录添加到 sys.path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

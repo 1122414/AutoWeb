@@ -1,4 +1,14 @@
 import os
+
+import pytest
+
+
+if os.getenv("AUTOWEB_RUN_INTEGRATION") != "1":
+    pytest.skip(
+        "legacy live-network toolbox smoke test",
+        allow_module_level=True,
+    )
+
 from skills.toolbox import *
 from skills.tool_rag import ask_knowledge_base
 

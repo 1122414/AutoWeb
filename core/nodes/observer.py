@@ -145,25 +145,44 @@ def observer_node(state: AgentState, config: RunnableConfig, observer) -> Comman
                         step_context=step_context,
                         top_k=max(DOM_CACHE_TOP_K, 8),
                     )
-                    if failed_dom_cache_ids:
-                        raw_len = len(cache_hits)
-                        cache_hits = [
-                            hit for hit in cache_hits
-                            if (not hit.id) or (hit.id not in failed_dom_cache_ids)
-                        ]
-                        if len(cache_hits) < raw_len:
+                    from config import CACHE_GOVERNANCE_ENABLED
+                    if CACHE_GOVERNANCE_ENABLED:
+                        from skills.cache_governance import cache_governance
+
+                        cache_hits, decisions = cache_governance.filter_hits(
+                            "dom",
+                            cache_hits,
+                            threshold=DOM_CACHE_THRESHOLD,
+                            failed_ids=failed_dom_cache_ids,
+                            task_started_at=task_started_at,
+                        )
+                        rejected = {}
+                        for decision in decisions:
+                            if not decision.allowed:
+                                rejected[decision.reason] = (
+                                    rejected.get(decision.reason, 0) + 1
+                                )
+                        if rejected:
                             logger.info(
-                                f"   ⏭️ [DomCache] 过滤失败缓存命中: {raw_len - len(cache_hits)} 条")
-                    if task_started_at is not None and cache_hits:
-                        raw_len = len(cache_hits)
+                                f"   ⏭️ [CacheGovernance] dom rejected={rejected}"
+                            )
+                    else:
                         cache_hits = [
-                            hit for hit in cache_hits
-                            if not _is_hit_from_current_task(hit.created_at, task_started_at)
+                            hit
+                            for hit in cache_hits
+                            if (
+                                (not hit.id)
+                                or (hit.id not in failed_dom_cache_ids)
+                            )
+                            and not (
+                                task_started_at is not None
+                                and _is_hit_from_current_task(
+                                    hit.created_at,
+                                    task_started_at,
+                                )
+                            )
                         ]
-                        if len(cache_hits) < raw_len:
-                            logger.info(
-                                f"   ⏭️ [DomCache] 过滤同任务新写入缓存: {raw_len - len(cache_hits)} 条")
-                    if cache_hits and cache_hits[0].score >= DOM_CACHE_THRESHOLD:
+                    if cache_hits:
                         dom_cache_hit = cache_hits[0]
                         logger.info(
                             f"   ✅ [DomCache] 命中缓存 score={dom_cache_hit.score:.4f}, "

@@ -28,6 +28,7 @@ class DPCLIExecutor:
         cwd: str = DPCLI_CWD,
         timeout_seconds: float = DPCLI_TIMEOUT_SECONDS,
         batch_timeout_seconds: float = DPCLI_BATCH_TIMEOUT_SECONDS,
+        site_policy=None,
     ) -> None:
         self.session = session
         self.headless = headless
@@ -36,6 +37,12 @@ class DPCLIExecutor:
         self.timeout_seconds = timeout_seconds
         self.batch_timeout_seconds = batch_timeout_seconds
         self._active_request_id: Optional[str] = None
+        if site_policy is None:
+            from skills.site_policy import site_policy as default_site_policy
+
+            site_policy = default_site_policy
+        self.site_policy = site_policy
+        self._active_policy_decisions: List[Dict[str, Any]] = []
         trace_log(f"DPCLIExecutor 初始化: session={session}, headless={headless}")
 
     def open(self, url: str, wait_time: Optional[float] = None) -> Dict[str, Any]:
@@ -275,6 +282,25 @@ class DPCLIExecutor:
 
         trace_log(f"execute_action: skill={skill}")
         self._active_request_id = str(action.get("request_id") or "").strip() or None
+        self._active_policy_decisions = []
+        if self.site_policy is not None:
+            decisions = self.site_policy.authorize_action(action)
+            self._active_policy_decisions = [
+                decision.to_dict() for decision in decisions
+            ]
+            denied = next(
+                (decision for decision in decisions if not decision.allowed),
+                None,
+            )
+            if denied is not None:
+                return self._error_payload(
+                    action=skill or "action",
+                    code="site_policy_denied",
+                    message=f"Site policy denied access: {denied.reason}",
+                    details={
+                        "policy_decision": denied.to_dict(),
+                    },
+                )
 
         if "target_ref" in params and "ref" not in params:
             params = dict(params)
@@ -365,25 +391,25 @@ class DPCLIExecutor:
     def _run(self, *args: str, timeout: Optional[float] = None) -> Dict[str, Any]:
         raw = self._run_raw(list(args), timeout=timeout)
         if raw.get("timed_out"):
-            return self._error_payload(
+            return self._finalize_result(self._error_payload(
                 action=self._action_name(args),
                 code="timeout",
                 message=f"dp_cli command timed out after {raw.get('timeout')}s.",
                 details={"timeout": raw.get("timeout"), "stderr": raw.get("stderr") or ""},
-            )
+            ))
 
         parsed = self._parse_json(raw.get("stdout") or "")
         if parsed is not None:
             if isinstance(parsed, dict):
-                return parsed
-            return self._error_payload(
+                return self._finalize_result(parsed)
+            return self._finalize_result(self._error_payload(
                 action=self._action_name(args),
                 code="invalid_json",
                 message="dp_cli stdout JSON was not an object.",
                 details={"stdout": raw.get("stdout") or ""},
-            )
+            ))
 
-        return self._error_payload(
+        return self._finalize_result(self._error_payload(
             action=self._action_name(args),
             code="invalid_json" if raw.get("returncode") == 0 else "process_error",
             message="dp_cli did not return parseable JSON.",
@@ -392,7 +418,29 @@ class DPCLIExecutor:
                 "stdout": raw.get("stdout") or "",
                 "stderr": raw.get("stderr") or "",
             },
+        ))
+
+    def _finalize_result(self, result: Dict[str, Any]) -> Dict[str, Any]:
+        finalized = dict(result)
+        if self._active_policy_decisions:
+            finalized["_site_policy"] = {
+                "decisions": list(self._active_policy_decisions),
+            }
+        if self.site_policy is None:
+            return finalized
+        signal = self.site_policy.detect_block_signal(finalized)
+        if not signal.detected:
+            return finalized
+        finalized["ok"] = False
+        finalized["error"] = {
+            "code": "site_blocked",
+            "message": f"Site blocking signal detected: {signal.kind}",
+            "details": {"blocking_signal": signal.to_dict()},
+        }
+        finalized.setdefault("_site_policy", {})["blocking_signal"] = (
+            signal.to_dict()
         )
+        return finalized
 
     def _run_raw(self, args: List[str], timeout: Optional[float] = None) -> Dict[str, Any]:
         import time as _time

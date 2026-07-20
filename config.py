@@ -180,6 +180,35 @@ try:
 except json.JSONDecodeError:
     LLM_PRICING = {}
 
+# Production governance: cache admission and ethical site access.
+CACHE_GOVERNANCE_ENABLED = _env_bool("CACHE_GOVERNANCE_ENABLED", "True")
+CACHE_GOVERNANCE_ALLOW_LEGACY_FINGERPRINT = _env_bool(
+    "CACHE_GOVERNANCE_ALLOW_LEGACY_FINGERPRINT",
+    "True",
+)
+ACTION_CACHE_TTL_HOURS = int(os.getenv("ACTION_CACHE_TTL_HOURS", "168"))
+CODE_CACHE_TTL_HOURS = int(os.getenv("CODE_CACHE_TTL_HOURS", f"{24 * 30}"))
+
+SITE_POLICY_ENABLED = _env_bool("SITE_POLICY_ENABLED", "True")
+SITE_POLICY_ROBOTS_ENABLED = _env_bool("SITE_POLICY_ROBOTS_ENABLED", "True")
+SITE_POLICY_ROBOTS_FAIL_OPEN = _env_bool(
+    "SITE_POLICY_ROBOTS_FAIL_OPEN",
+    "True",
+)
+SITE_POLICY_ALLOW_PRIVATE = _env_bool("SITE_POLICY_ALLOW_PRIVATE", "False")
+SITE_POLICY_MIN_INTERVAL_SECONDS = _env_float(
+    "SITE_POLICY_MIN_INTERVAL_SECONDS",
+    "0.5",
+)
+SITE_POLICY_ROBOTS_TIMEOUT_SECONDS = _env_float(
+    "SITE_POLICY_ROBOTS_TIMEOUT_SECONDS",
+    "5",
+)
+SITE_POLICY_USER_AGENT = os.getenv(
+    "SITE_POLICY_USER_AGENT",
+    "AutoWeb/6 (+https://github.com/1122414/AutoWeb)",
+)
+
 # 关系型数据库连接串 (PostgreSQL)
 # 格式示例: postgresql://user:password@localhost:5432/dbname
 # POSTGRES_CONNECTION_STRING = os.getenv("POSTGRES_CONNECTION_STRING")

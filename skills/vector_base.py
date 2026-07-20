@@ -42,6 +42,7 @@ class VectorCacheBase(ABC):
         self._executor = ThreadPoolExecutor(
             max_workers=1, thread_name_prefix=tag
         )
+        self._shutdown_complete = False
         atexit.register(self._shutdown)
 
     # ------------------------------------------------------------------
@@ -276,9 +277,14 @@ class VectorCacheBase(ABC):
             return False
 
     def _shutdown(self):
-        logger.info(f"📧 [{self._tag}] Waiting for background tasks...")
+        if getattr(self, "_shutdown_complete", False):
+            return
+        self._shutdown_complete = True
+        # DEBUG avoids writing to pytest's already-closed captured console
+        # stream during interpreter teardown while retaining file evidence.
+        logger.debug(f"📧 [{self._tag}] Waiting for background tasks...")
         self._executor.shutdown(wait=True)
-        logger.info(f"✅ [{self._tag}] Background tasks finished")
+        logger.debug(f"✅ [{self._tag}] Background tasks finished")
 
     def _build_ann_request(
         self,

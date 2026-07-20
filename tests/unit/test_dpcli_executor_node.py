@@ -27,7 +27,21 @@ class DPCLIExecutorNodeTests(unittest.TestCase):
         self.assertEqual(command.goto, "Verifier")
         self.assertEqual(command.update["dpcli_result"], result_payload)
         self.assertEqual(command.update["current_url"], "https://example.test/next")
-        executor_cls.return_value.execute_action.assert_called_once_with(state["generated_action"])
+        executed_action = (
+            executor_cls.return_value.execute_action.call_args.args[0]
+        )
+        self.assertEqual(
+            executed_action["skill"],
+            state["generated_action"]["skill"],
+        )
+        self.assertEqual(
+            executed_action["params"],
+            state["generated_action"]["params"],
+        )
+        self.assertRegex(
+            executed_action["request_id"],
+            r"^autoweb-[0-9a-f]{24}$",
+        )
 
     def test_ref_stale_goes_to_observer(self):
         state = {

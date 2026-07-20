@@ -266,20 +266,27 @@ def _executor_dpcli_branch(state: AgentState, config: RunnableConfig) -> Command
     error_code = str(error.get("code") or "unknown")
     route = _dpcli_failure_goto(error_code)
     params = action.get("params") or {}
+    policy_failure = error_code in {"site_policy_denied", "site_blocked"}
     update.update({
         "error": str(error.get("message") or error_code),
         "error_type": f"dpcli_{error_code}",
         "reflections": [f"dp_cli action failed: {error_code}"],
+        "site_policy_decision": result.get("_site_policy")
+        or (error.get("details") or {}).get("policy_decision"),
         "verification_result": _build_verification_result(
             is_success=False,
             is_done=False,
             summary=f"dp_cli action failed: {error_code}",
             source="executor",
-            failure_scope="local",
+            failure_scope="global" if policy_failure else "local",
             failed_action=json.dumps(action, ensure_ascii=False),
             failed_locator=str(params.get("ref") or params.get("locator") or ""),
             evidence=json.dumps(error, ensure_ascii=False),
-            fix_hint="ref 失效或元素不可用时请重新 snapshot；参数无效时重新生成 action",
+            fix_hint=(
+                "停止自动重试并由人工处理站点授权、登录或访问限制"
+                if policy_failure
+                else "ref 失效或元素不可用时请重新 snapshot；参数无效时重新生成 action"
+            ),
         ),
     })
     if state.get("_action_source") == "action_cache":

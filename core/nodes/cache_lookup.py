@@ -9,7 +9,7 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.types import Command
 
 from core.state_v2 import AgentState
-from core.nodes._utils import _parse_iso_datetime, _is_hit_from_current_task
+from core.nodes._utils import _parse_iso_datetime
 from core.nodes._locators import (
     _extract_locator_info,
     _extract_locator_candidates,
@@ -21,6 +21,44 @@ from core.nodes._locators import (
 from core.nodes._cache import _record_cache_failure
 from core.nodes._verification import _build_verification_result
 from skills.logger import logger
+
+
+def _govern_cache_hits(
+    kind,
+    hits,
+    *,
+    threshold,
+    failed_ids,
+    task_started_at,
+):
+    """Apply one admission interface to heterogeneous cache adapters."""
+    from config import CACHE_GOVERNANCE_ENABLED
+
+    if not CACHE_GOVERNANCE_ENABLED:
+        return [
+            hit
+            for hit in hits
+            if (not getattr(hit, "id", ""))
+            or getattr(hit, "id", "") not in set(failed_ids or [])
+        ]
+    from skills.cache_governance import cache_governance
+
+    eligible, decisions = cache_governance.filter_hits(
+        kind,
+        hits,
+        threshold=threshold,
+        failed_ids=failed_ids,
+        task_started_at=task_started_at,
+    )
+    rejected = {}
+    for decision in decisions:
+        if decision.allowed:
+            continue
+        rejected[decision.reason] = rejected.get(decision.reason, 0) + 1
+    if rejected:
+        logger.info(f"   ⏭️ [CacheGovernance] {kind} rejected={rejected}")
+    return eligible
+
 
 def cache_lookup_node(state: AgentState, config: RunnableConfig) -> Command[Literal["Coder", "Executor", "Observer"]]:
     """
@@ -79,17 +117,21 @@ def cache_lookup_node(state: AgentState, config: RunnableConfig) -> Command[Lite
         try:
             from skills.action_cache import action_cache_manager
             failed_action_ids = set(state.get("_failed_action_cache_ids", []) or [])
-            hits = [
-                hit for hit in action_cache_manager.search(
-                    user_task=user_task,
-                    goal=plan,
-                    url=current_url,
-                    snapshot_view=state.get("dpcli_snapshot_view"),
-                    top_k=5,
-                )
-                if hit.id not in failed_action_ids
-            ]
-            if hits and hits[0].score >= ACTION_CACHE_THRESHOLD:
+            hits = action_cache_manager.search(
+                user_task=user_task,
+                goal=plan,
+                url=current_url,
+                snapshot_view=state.get("dpcli_snapshot_view"),
+                top_k=5,
+            )
+            hits = _govern_cache_hits(
+                "action",
+                hits,
+                threshold=ACTION_CACHE_THRESHOLD,
+                failed_ids=failed_action_ids,
+                task_started_at=state.get("_task_started_at"),
+            )
+            if hits:
                 best_hit = hits[0]
                 logger.info(
                     f"✅ [ActionCache] 命中 action 缓存: score={best_hit.score:.4f}")
@@ -127,26 +169,15 @@ def cache_lookup_node(state: AgentState, config: RunnableConfig) -> Command[Lite
             state.get("_failed_code_cache_ids", []) or [])
         task_started_at = _parse_iso_datetime(
             state.get("_task_started_at", ""))
-        eligible_hits = [
-            hit for hit in hits
-            if (not hit.id) or (hit.id not in failed_code_cache_ids)
-        ]
+        eligible_hits = _govern_cache_hits(
+            "code",
+            hits,
+            threshold=CODE_CACHE_THRESHOLD,
+            failed_ids=failed_code_cache_ids,
+            task_started_at=task_started_at,
+        )
 
-        if hits and len(eligible_hits) < len(hits):
-            logger.info(
-                f"   ⏭️ [CacheLookup] 过滤失败缓存命中: {len(hits) - len(eligible_hits)} 条")
-
-        if task_started_at is not None:
-            before_len = len(eligible_hits)
-            eligible_hits = [
-                hit for hit in eligible_hits
-                if not _is_hit_from_current_task(hit.created_at, task_started_at)
-            ]
-            if len(eligible_hits) < before_len:
-                logger.info(
-                    f"   ⏭️ [CacheLookup] 过滤同任务新写入缓存: {before_len - len(eligible_hits)} 条")
-
-        if eligible_hits and eligible_hits[0].score >= CODE_CACHE_THRESHOLD:
+        if eligible_hits:
             best_hit = eligible_hits[0]
             logger.info(
                 f"✅ 命中缓存! Score: {best_hit.score:.4f}, URL: {best_hit.url_pattern}")

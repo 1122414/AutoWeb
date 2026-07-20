@@ -98,6 +98,7 @@ class AgentState(EnvState, TaskState):
     dpcli_execution_evidence: Optional[Dict[str, Any]]
     dpcli_action_kind: Optional[str]
     dpcli_verification_contract: Optional[Dict[str, Any]]
+    site_policy_decision: Optional[Dict[str, Any]]    # robots/pacing/block evidence
 
     # Verifier 确定性判定策略配置（P3: 后续接口预留）
     # {min_target_confidence, schema_coverage_threshold,

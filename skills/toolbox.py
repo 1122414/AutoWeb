@@ -108,7 +108,9 @@ def download_file(url: str, save_path: str) -> bool:
     try:
         with httpx.stream("GET", url, verify=False, timeout=60.0) as resp:
             resp.raise_for_status()
-            os.makedirs(os.path.dirname(save_path), exist_ok=True)
+            parent = os.path.dirname(os.path.abspath(save_path))
+            if parent:
+                os.makedirs(parent, exist_ok=True)
             with open(save_path, "wb") as f:
                 for chunk in resp.iter_bytes():
                     f.write(chunk)
@@ -225,6 +227,47 @@ def db_query(sql: str, db_path: str = "autoweb_data.db") -> List[Dict]:
     except sqlite3.Error as e:
         logger.error(f"❌ [Toolbox] Query Error: {e}")
         return []
+
+
+def save_to_csv(data: Union[List[Dict], Dict], filename: str) -> bool:
+    """Backward-compatible exact-path CSV adapter.
+
+    Unlike ``save_data`` this helper intentionally does not add a timestamp;
+    callers that supplied a concrete path keep ownership of that filename.
+    """
+    rows = data if isinstance(data, list) else [data]
+    rows = [row for row in rows if isinstance(row, dict)]
+    if not rows:
+        return False
+    try:
+        parent = os.path.dirname(os.path.abspath(filename))
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        fieldnames = list(
+            dict.fromkeys(
+                key
+                for row in rows
+                for key in row.keys()
+            )
+        )
+        with open(
+            filename,
+            "w",
+            newline="",
+            encoding="utf-8-sig",
+        ) as stream:
+            writer = csv.DictWriter(
+                stream,
+                fieldnames=fieldnames,
+                extrasaction="ignore",
+            )
+            writer.writeheader()
+            writer.writerows(rows)
+        return True
+    except (OSError, csv.Error, TypeError) as exc:
+        logger.error(f"❌ [Toolbox] CSV Save Error: {exc}")
+        return False
+
 
 # 6. 💾 Unified Data Saver (The "Arm" for Coder)
 

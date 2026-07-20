@@ -560,6 +560,8 @@ def _dpcli_failure_goto(error_code: str) -> str:
         "execution_failed": "Observer",
         "timeout": "Observer",
         "snapshot_failed": "Observer",
+        "site_policy_denied": "ErrorHandler",
+        "site_blocked": "ErrorHandler",
     }
     return mapping.get(error_code, "Observer")
 
