@@ -78,6 +78,7 @@ class AgentState(EnvState, TaskState):
     dpcli_snapshot_ref: Optional[Dict[str, Any]]       # Snapshot file references
     dpcli_agent_view: Optional[Dict[str, Any]]          # Lossy planner view (Layer 1)
     dpcli_snapshot_index: Optional[Dict[str, Any]]      # Index summary (Layer 2)
+    dpcli_snapshot_delta: Optional[Dict[str, Any]]      # Added/removed/changed/rebound refs
     dpcli_observer_diagnostics: Optional[Dict[str, Any]] # Observer diagnostics
     dpcli_target_result: Optional[Dict[str, Any]]       # TargetSelector output
     dpcli_structured_plan: Optional[Dict[str, Any]]     # Planner structured intent

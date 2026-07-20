@@ -17,6 +17,12 @@ SNAPSHOT = {
     "data": {
         "page": {"url": "https://example.test", "title": "Example"},
         "page_identity": {"page_id": "page_1"},
+        "delta": {
+            "added_refs": [],
+            "removed_refs": [],
+            "changed_refs": [],
+            "rebound_refs": ["e2"],
+        },
         "index": {
             "interactable_elements": [{"ref": f"e{i}"} for i in range(35)],
             "data_regions": [{"ref": f"r{i}"} for i in range(8)],
@@ -36,6 +42,7 @@ class DPCLIObserverProjectionTests(unittest.TestCase):
         self.assertEqual(len(view["interactable_elements"]), 30)
         self.assertEqual(len(view["data_regions"]), 5)
         self.assertEqual(len(view["surface_index"]), 40)
+        self.assertEqual(view["delta"]["rebound_refs"], ["e2"])
 
     def test_compact_snapshot_only_keeps_small_last_result_evidence(self):
         last_result = {
@@ -77,6 +84,7 @@ class DPCLIObserverProjectionTests(unittest.TestCase):
         self.assertEqual(command.goto, "Planner")
         self.assertEqual(command.update["_observer_source"], "dp_cli_full")
         self.assertEqual(command.update["current_url"], "https://example.test")
+        self.assertEqual(command.update["dpcli_snapshot_delta"]["rebound_refs"], ["e2"])
         self.assertIn("dom_skeleton", command.update)
         self.assertEqual(
             command.update["dpcli_snapshot_view"],

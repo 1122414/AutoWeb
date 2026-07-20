@@ -826,6 +826,7 @@ def interactive_loop(app, browser_instance, llm, observer, task_store=None):
                 "dpcli_result": None,
                 "dpcli_snapshot": None,
                 "dpcli_snapshot_view": None,
+                "dpcli_snapshot_delta": None,
                 "dpcli_task_contract": None,
                 "dpcli_task_progress": None,
                 "dpcli_request_id": None,

@@ -105,6 +105,7 @@ def _compact_dpcli_snapshot(snapshot: Dict[str, Any], last_result: Optional[Dict
         "data_regions": (index.get("data_regions") or [])[:5],
         "surface_index": (index.get("surface_index") or [])[:40],
         "stats": index.get("stats") or {},
+        "delta": data.get("delta") or {},
         "last_result": (
             _compact_dpcli_result_for_log(last_result)
             if isinstance(last_result, dict)
@@ -122,6 +123,7 @@ def _render_dpcli_snapshot_text(view: Dict[str, Any]) -> str:
         "data_regions": view.get("data_regions"),
         "surface_index": view.get("surface_index"),
         "stats": view.get("stats"),
+        "delta": view.get("delta"),
         "last_result": view.get("last_result"),
     }, ensure_ascii=False, indent=2)
 
@@ -243,6 +245,7 @@ def _build_legacy_snapshot_command(
             "dpcli_session": session,
             "dpcli_snapshot": result,
             "dpcli_snapshot_view": view,
+            "dpcli_snapshot_delta": view.get("delta") or {},
             "dom_skeleton": text,
             "dom_hash": hashlib.md5(text.encode()).hexdigest(),
             "current_url": str(page.get("url") or state.get("current_url", "")),
@@ -270,6 +273,8 @@ def _build_full_snapshot_command(
     compressed_groups = indexer.build_compressed_index(all_nodes)
     agent_view = view_gen.generate(result, compressed_groups)
     diagnostics = view_gen.generate_diagnostics(result, compressed_groups)
+    delta = result.get("data", {}).get("delta") or {}
+    agent_view["delta"] = delta
 
     store.save_index(snapshot_id, index_data)
     store.save_compressed_index(snapshot_id, {
@@ -297,6 +302,7 @@ def _build_full_snapshot_command(
                 "data": {
                     "page": result.get("data", {}).get("page", {}),
                     "page_identity": result.get("data", {}).get("page_identity", {}),
+                    "delta": delta,
                     "index": {
                         "stats": result.get("data", {}).get("index", {}).get("stats", {}),
                         "data_regions": result.get("data", {}).get("index", {}).get("data_regions", [])[:5],
@@ -307,6 +313,7 @@ def _build_full_snapshot_command(
             "dpcli_snapshot_ref": snapshot_ref,
             "dpcli_agent_view": agent_view,
             "dpcli_snapshot_index": index_summary,
+            "dpcli_snapshot_delta": delta,
             "dpcli_observer_diagnostics": diagnostics,
             "dom_skeleton": text,
             "dom_hash": hashlib.md5(text.encode()).hexdigest(),
