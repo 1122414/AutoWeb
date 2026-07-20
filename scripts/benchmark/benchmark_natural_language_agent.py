@@ -460,13 +460,15 @@ def run_case(
     max_resumes: int,
 ) -> dict[str, Any]:
     session = f"benchmark-{case.key}-{repeat}-{uuid.uuid4().hex[:8]}"
+    initial_thread_id = str(uuid.uuid4())
     config = {
         "configurable": {
-            "thread_id": str(uuid.uuid4()),
+            "thread_id": initial_thread_id,
             "browser": browser,
         },
         "recursion_limit": 50,
     }
+    thread_ids = [initial_thread_id]
     initial_state = {
         "user_task": case.task,
         "messages": [("user", case.task)],
@@ -556,13 +558,15 @@ def run_case(
                         "is_complete": False,
                     }
                 )
+                restarted_thread_id = str(uuid.uuid4())
                 config = {
                     "configurable": {
-                        "thread_id": str(uuid.uuid4()),
+                        "thread_id": restarted_thread_id,
                         "browser": browser,
                     },
                     "recursion_limit": 50,
                 }
+                thread_ids.append(restarted_thread_id)
                 restart_count = 1
                 restart_checkpoint = {
                     "completed_pages": list(completed_pages),
@@ -593,6 +597,7 @@ def run_case(
         "case": asdict(case),
         "repeat": repeat,
         "session": session,
+        "thread_ids": thread_ids,
         "status": status,
         "exception": exception,
         "elapsed_seconds": round(elapsed, 3),
