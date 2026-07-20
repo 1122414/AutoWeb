@@ -34,6 +34,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from config import *
 from core.llm_factory import create_llm
 from skills.observer import BrowserObserver
+from skills.task_resume import parse_resume_thread_id, snapshot_has_checkpoint
 from skills.logger import logger, trace_log
 
 
@@ -326,7 +327,7 @@ def interactive_loop(app, browser_instance, llm, observer):
     # LLM 和 Observer 实例已通过 partial 绑定到节点
     config = {
         "configurable": {
-            "thread_id": str(uuid.uuid4()),
+            "thread_id": thread_id,
             "browser": browser_instance,  # 浏览器实例保留，因为需要动态获取 latest_tab
         },
         "recursion_limit": 50
@@ -635,6 +636,25 @@ def interactive_loop(app, browser_instance, llm, observer):
 
             if lower_input in ("hitl", "hitl status"):
                 print(f"HITL MODE: {session_hitl_mode}")
+                continue
+
+            if lower_input in ("thread", "thread id", "线程", "线程id"):
+                print(f"THREAD ID: {thread_id}")
+                continue
+
+            resume_thread_id = parse_resume_thread_id(user_input)
+            if resume_thread_id:
+                previous_thread_id = thread_id
+                config["configurable"]["thread_id"] = resume_thread_id
+                resume_snapshot = app.get_state(config)
+                if not snapshot_has_checkpoint(resume_snapshot):
+                    config["configurable"]["thread_id"] = previous_thread_id
+                    print(f"⚠️ 未找到可恢复的线程: {resume_thread_id}")
+                    continue
+                thread_id = resume_thread_id
+                logger.info(f"🔁 [main] 恢复线程: {thread_id}")
+                print(f"🔁 已切换到线程: {thread_id}")
+                print("   将从最后一个 LangGraph 检查点继续。")
                 continue
 
             if lower_input in ("hitl on", "hitl off"):

@@ -10,6 +10,7 @@ from core.nodes._dpcli import _dpcli_policy_action_from_structured_plan
 from core.nodes._dpcli import _should_use_dpcli_action
 from core.nodes.planner import _dpcli_contract_planner_step
 from core.nodes.verifier import (
+    _advance_contract_page_progress,
     _contract_action_verification,
     _merge_dpcli_contract_progress,
     _verify_dpcli_action_with_signals,
@@ -22,6 +23,7 @@ from skills.dpcli_task_contract import (
     merge_contract_progress,
 )
 from skills.dpcli_crawl_policy import (
+    build_detail_batch_action,
     goal_requests_detail_batch,
     should_run_detail_batch,
 )
@@ -55,6 +57,46 @@ class TaskContractParsingTests(unittest.TestCase):
         self.assertEqual(contract["max_items"], 10)
         self.assertEqual(contract["per_page_limit"], 5)
         self.assertEqual(contract["target_pages"], 2)
+
+    def test_three_page_contract_uses_pagination_collection_mode(self):
+        contract = build_task_contract(
+            "打开 https://example.test/products，连续抓取前3页，每页5个商品的"
+            "名称、价格和URL，总计15条；中断后从已完成页继续。"
+        )
+
+        self.assertEqual(contract["target_pages"], 3)
+        self.assertEqual(contract["min_items"], 15)
+        self.assertEqual(contract["per_page_limit"], 5)
+        self.assertEqual(contract["collection_mode"], "pagination")
+        self.assertTrue(contract["recovery"]["enabled"])
+
+    def test_infinite_scroll_contract_preserves_bounded_scroll_policy(self):
+        contract = build_task_contract(
+            "打开 https://example.test/feed，持续向下滚动加载，最多滚动4轮，"
+            "提取20篇文章的标题和URL，达到20条后结束。"
+        )
+
+        self.assertEqual(contract["collection_mode"], "infinite_scroll")
+        self.assertEqual(contract["max_scroll_rounds"], 4)
+        self.assertEqual(contract["min_items"], 20)
+        self.assertEqual(contract["target_pages"], 1)
+
+    def test_text_filter_contract_extracts_keyword_and_submit_semantics(self):
+        contract = build_task_contract(
+            "打开 https://example.test/teams，在搜索框筛选关键词“Boston”，"
+            "提交筛选后抓取前2页，每页10行球队名称和年份。"
+        )
+
+        self.assertEqual(contract["target_pages"], 2)
+        self.assertEqual(
+            contract["filter"],
+            {
+                "kind": "text",
+                "value": "Boston",
+                "field_hint": "搜索框",
+                "submit": True,
+            },
+        )
 
     def test_common_chinese_content_units_preserve_requested_count(self):
         tasks = (
@@ -386,8 +428,142 @@ class TaskContractPlanningTests(unittest.TestCase):
         )
 
         self.assertEqual(plan["step_intent"], "click")
-        self.assertEqual(plan["action_payload"], {"ref": "e26"})
-        self.assertEqual(updates["dpcli_task_progress"]["active_page"], 2)
+        self.assertEqual(
+            plan["action_payload"],
+            {"ref": "e26", "page_number": 2},
+        )
+        self.assertEqual(updates["dpcli_task_progress"]["active_page"], 1)
+
+    def test_filter_is_applied_before_list_extraction(self):
+        contract = build_task_contract(
+            "打开 https://example.test/teams，在搜索框筛选关键词“Boston”，"
+            "提交筛选后提取10行球队名称和年份。"
+        )
+        plan, updates = build_contract_plan(
+            {
+                "current_url": "https://example.test/teams",
+                "dpcli_agent_view": {
+                    "capability_map": {
+                        "search": [
+                            {
+                                "input_ref": "e10",
+                                "input_name": "Search",
+                                "nearby_buttons": ["e11"],
+                            }
+                        ],
+                        "forms": [],
+                        "data_regions": [
+                            {
+                                "ref": "r2",
+                                "kind": "table",
+                                "item_count": 10,
+                                "available_actions": ["extract"],
+                            }
+                        ],
+                        "pagination": [],
+                    }
+                },
+                "dpcli_task_progress": {},
+            },
+            contract,
+        )
+
+        self.assertEqual(plan["step_intent"], "type")
+        self.assertEqual(
+            plan["action_payload"],
+            {
+                "ref": "e10",
+                "text": "Boston",
+                "submit": True,
+                "filter_stage": "applied",
+            },
+        )
+        self.assertFalse(updates["dpcli_task_progress"]["filter_applied"])
+
+    def test_infinite_scroll_runs_after_current_region_is_consumed(self):
+        contract = build_task_contract(
+            "打开 https://example.test/feed，持续向下滚动加载，最多滚动4轮，"
+            "提取20篇文章的标题和URL。"
+        )
+        progress = {
+            "items": [
+                {"title": f"Article {index}", "url": f"https://example.test/{index}"}
+                for index in range(10)
+            ],
+            "completed_pages": [1],
+            "active_page": 1,
+            "failed_region_refs": ["r2"],
+            "scroll_round": 0,
+        }
+        plan, updates = build_contract_plan(
+            {
+                "current_url": "https://example.test/feed",
+                "dpcli_agent_view": {
+                    "capability_map": {
+                        "data_regions": [
+                            {
+                                "ref": "r2",
+                                "kind": "list",
+                                "item_count": 10,
+                                "available_actions": ["extract"],
+                            }
+                        ],
+                        "pagination": [],
+                    }
+                },
+                "dpcli_task_progress": progress,
+            },
+            contract,
+        )
+
+        self.assertEqual(plan["step_intent"], "scroll")
+        self.assertEqual(plan["action_payload"]["direction"], "down")
+        self.assertEqual(plan["action_payload"]["round"], 1)
+        self.assertEqual(updates["dpcli_task_progress"]["scroll_round"], 0)
+
+    def test_contract_type_and_scroll_plans_map_to_executable_actions(self):
+        type_action = _dpcli_policy_action_from_structured_plan(
+            {
+                "dpcli_structured_plan": {
+                    "step_intent": "type",
+                    "action_payload": {
+                        "ref": "e10",
+                        "text": "Boston",
+                        "submit": True,
+                    },
+                    "_contract_action": True,
+                }
+            }
+        )
+        scroll_action = _dpcli_policy_action_from_structured_plan(
+            {
+                "dpcli_structured_plan": {
+                    "step_intent": "scroll",
+                    "action_payload": {
+                        "direction": "down",
+                        "amount": 900,
+                        "to": "bottom",
+                        "wait_time": 1.0,
+                    },
+                    "_contract_action": True,
+                }
+            }
+        )
+
+        self.assertEqual(
+            type_action,
+            {
+                "skill": "type",
+                "params": {
+                    "text": "Boston",
+                    "ref": "e10",
+                    "submit": True,
+                },
+                "reason": "deterministic dp_cli plan",
+            },
+        )
+        self.assertEqual(scroll_action["skill"], "scroll")
+        self.assertEqual(scroll_action["params"]["to"], "bottom")
 
     def test_finish_plan_is_deterministic_when_contract_is_satisfied(self):
         contract = build_task_contract(
@@ -833,6 +1009,177 @@ class TaskContractVerificationTests(unittest.TestCase):
                 expected_count=contract["min_items"],
             )["is_success"]
         )
+
+    def test_detail_rows_merge_back_into_same_list_identity(self):
+        progress = merge_contract_progress(
+            {},
+            [
+                {
+                    "title": "Book One",
+                    "url": "https://example.test/book/1",
+                }
+            ],
+            page_number=1,
+        )
+        progress = merge_contract_progress(
+            progress,
+            [
+                {
+                    "title": "Book One",
+                    "url": "https://example.test/book/1",
+                    "description": "A complete description.",
+                }
+            ],
+            page_number=1,
+        )
+
+        self.assertEqual(len(progress["items"]), 1)
+        self.assertEqual(
+            progress["items"][0]["description"],
+            "A complete description.",
+        )
+
+    def test_verified_page_actions_advance_resume_progress_once(self):
+        pagination = _advance_contract_page_progress(
+            {
+                "dpcli_task_progress": {
+                    "active_page": 1,
+                    "failed_region_refs": ["r2"],
+                },
+                "dpcli_structured_plan": {
+                    "step_intent": "click",
+                    "action_payload": {"ref": "e20", "page_number": 2},
+                },
+            }
+        )
+        filtered = _advance_contract_page_progress(
+            {
+                "dpcli_task_progress": {
+                    "active_page": 2,
+                    "completed_pages": [1],
+                    "failed_region_refs": ["r2"],
+                    "filter_applied": False,
+                },
+                "dpcli_structured_plan": {
+                    "step_intent": "type",
+                    "action_payload": {"filter_stage": "applied"},
+                },
+            }
+        )
+        scrolled = _advance_contract_page_progress(
+            {
+                "dpcli_task_progress": {
+                    "scroll_round": 1,
+                    "failed_region_refs": ["r2"],
+                },
+                "dpcli_structured_plan": {
+                    "step_intent": "scroll",
+                    "action_payload": {"round": 2},
+                },
+            }
+        )
+
+        self.assertEqual(pagination["active_page"], 2)
+        self.assertEqual(pagination["failed_region_refs"], [])
+        self.assertTrue(filtered["filter_applied"])
+        self.assertEqual(filtered["active_page"], 1)
+        self.assertEqual(filtered["completed_pages"], [])
+        self.assertEqual(scrolled["scroll_round"], 2)
+        self.assertEqual(scrolled["failed_region_refs"], [])
+
+    def test_detail_contract_uses_list_schema_until_batch_finishes(self):
+        contract = build_task_contract(
+            "打开 https://example.test/books，提取2本书的标题和URL，"
+            "然后进入每本书详情页提取简介。"
+        )
+        list_state = {
+            "dpcli_task_contract": contract,
+            "generated_action": {
+                "skill": "extract",
+                "params": {
+                    "schema": contract["list_schema"],
+                    "limit": 2,
+                },
+            },
+            "dpcli_result": {
+                "ok": True,
+                "action": "extract",
+                "data": {
+                    "items": [
+                        {"title": "A", "url": "https://example.test/a"},
+                        {"title": "B", "url": "https://example.test/b"},
+                    ]
+                },
+            },
+            "dpcli_task_progress": {"active_page": 1},
+        }
+
+        verification = _contract_action_verification(list_state, "extract")
+        progress, _evaluation, is_done = _merge_dpcli_contract_progress(list_state)
+
+        self.assertTrue(verification["is_success"])
+        self.assertTrue(progress["list_complete"])
+        self.assertFalse(is_done)
+
+    def test_detail_batch_waits_for_all_list_pages_and_uses_cumulative_items(self):
+        contract = build_task_contract(
+            "打开 https://example.test/books，抓取前2页，每页2本书的标题和URL，"
+            "然后进入每本书详情页提取简介。"
+        )
+        first_page_state = {
+            "user_task": contract["task"],
+            "current_url": contract["target_url"],
+            "dpcli_task_contract": contract,
+            "dpcli_task_progress": {
+                "items": [
+                    {"title": "A", "url": "https://example.test/a"},
+                    {"title": "B", "url": "https://example.test/b"},
+                ],
+                "completed_pages": [1],
+                "active_page": 1,
+                "list_complete": False,
+            },
+            "dpcli_result": {
+                "ok": True,
+                "action": "extract",
+                "data": {
+                    "items": [
+                        {"title": "A", "url": "https://example.test/a"},
+                        {"title": "B", "url": "https://example.test/b"},
+                    ]
+                },
+            },
+            "dpcli_detail_batch_ran": False,
+        }
+        self.assertFalse(should_run_detail_batch(first_page_state))
+
+        complete_state = dict(first_page_state)
+        complete_state["dpcli_task_progress"] = {
+            "items": [
+                {"title": "A", "url": "https://example.test/a"},
+                {"title": "B", "url": "https://example.test/b"},
+                {"title": "C", "url": "https://example.test/c"},
+                {"title": "D", "url": "https://example.test/d"},
+            ],
+            "completed_pages": [1, 2],
+            "active_page": 2,
+            "list_complete": True,
+        }
+        complete_state["dpcli_result"] = {
+            "ok": True,
+            "action": "extract",
+            "data": {
+                "items": [
+                    {"title": "C", "url": "https://example.test/c"},
+                    {"title": "D", "url": "https://example.test/d"},
+                ]
+            },
+        }
+
+        self.assertTrue(should_run_detail_batch(complete_state))
+        action = build_detail_batch_action(complete_state)
+        self.assertEqual(len(action["params"]["items"]), 4)
+        self.assertEqual(action["params"]["schema"], ["description"])
 
 
 if __name__ == "__main__":

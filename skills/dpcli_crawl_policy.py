@@ -90,9 +90,15 @@ def _is_valid_detail_url(url: str) -> bool:
 
 
 def detail_candidate_items(result: Dict[str, Any]) -> List[Dict[str, Any]]:
+    return _detail_candidates(extract_items_from_result(result))
+
+
+def _detail_candidates(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     candidates: List[Dict[str, Any]] = []
     seen_urls = set()
-    for item in extract_items_from_result(result):
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
         url = _item_url(item)
         if not _is_valid_detail_url(url):
             continue
@@ -110,9 +116,17 @@ def should_run_detail_batch(state: Dict[str, Any]) -> bool:
     contract = state.get("dpcli_task_contract")
     if isinstance(contract, dict) and not contract.get("detail_required"):
         return False
+    progress = state.get("dpcli_task_progress") or {}
+    if isinstance(contract, dict) and not progress.get("list_complete"):
+        return False
     if not goal_requests_detail_batch(state.get("user_task", "")):
         return False
-    return bool(detail_candidate_items(state.get("dpcli_result") or {}))
+    items = (
+        progress.get("items")
+        if isinstance(progress, dict)
+        else None
+    ) or detail_candidate_items(state.get("dpcli_result") or {})
+    return bool(_detail_candidates(items))
 
 
 def _safe_domain(url: str) -> str:
@@ -125,7 +139,9 @@ def _safe_domain(url: str) -> str:
 
 def build_detail_batch_action(state: Dict[str, Any], max_items: int = 100) -> Dict[str, Any]:
     result = state.get("dpcli_result") or {}
-    items = detail_candidate_items(result)
+    progress = state.get("dpcli_task_progress") or {}
+    progress_items = progress.get("items") if isinstance(progress, dict) else None
+    items = _detail_candidates(progress_items or extract_items_from_result(result))
     if max_items > 0:
         items = items[:max_items]
     source_url = state.get("current_url") or ((result.get("data") or {}).get("page") or {}).get("url")
@@ -133,6 +149,8 @@ def build_detail_batch_action(state: Dict[str, Any], max_items: int = 100) -> Di
     output_dir.mkdir(parents=True, exist_ok=True)
     domain = _safe_domain(str(source_url or "site"))
     stamp = int(time.time())
+    contract = state.get("dpcli_task_contract") or {}
+    detail_schema = list(contract.get("detail_schema") or [])
     output_file = output_dir / f"dpcli_detail_{domain}_{stamp}.json"
     progress_file = output_dir / f"dpcli_detail_{domain}_{stamp}.jsonl"
     return {
@@ -140,7 +158,10 @@ def build_detail_batch_action(state: Dict[str, Any], max_items: int = 100) -> Di
         "params": {
             "items": items,
             "source_url": source_url,
+            "target_pages": int(contract.get("target_pages") or 1),
+            "list_pages_extracted": len(progress.get("completed_pages") or []),
             "limit": len(items),
+            "schema": detail_schema,
             "extractor": "legacy-js",
             "navigation_mode": "direct",
             "fallback_mode": "direct",

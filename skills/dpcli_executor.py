@@ -97,6 +97,7 @@ class DPCLIExecutor:
         text: str,
         ref: Optional[str] = None,
         locator: Optional[str] = None,
+        submit: bool = False,
         wait_time: Optional[float] = None,
     ) -> Dict[str, Any]:
         args = ["type"]
@@ -105,6 +106,27 @@ class DPCLIExecutor:
         if locator:
             args.extend(["--locator", locator])
         args.extend(["--text", text])
+        if submit:
+            args.append("--submit")
+        args.extend(self._wait_args(wait_time))
+        return self._run(*args)
+
+    def scroll(
+        self,
+        direction: str = "down",
+        amount: int = 900,
+        to: Optional[str] = None,
+        wait_time: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        args = [
+            "scroll",
+            "--direction",
+            str(direction or "down"),
+            "--amount",
+            str(max(1, int(amount))),
+        ]
+        if to:
+            args.extend(["--to", str(to)])
         args.extend(self._wait_args(wait_time))
         return self._run(*args)
 
@@ -288,6 +310,14 @@ class DPCLIExecutor:
                     text=str(params["text"]),
                     ref=params.get("ref"),
                     locator=params.get("locator"),
+                    submit=bool(params.get("submit", False)),
+                    wait_time=params.get("wait_time"),
+                )
+            if skill == "scroll":
+                return self.scroll(
+                    direction=str(params.get("direction") or "down"),
+                    amount=int(params.get("amount") or 900),
+                    to=params.get("to"),
                     wait_time=params.get("wait_time"),
                 )
             if skill == "expand":

@@ -104,9 +104,93 @@ def _extract_page_count(task: str) -> int:
         for value in re.findall(r"page\s*(\d+)", text, flags=re.IGNORECASE)
     ]
     pages.extend(english_pages)
+    pages.extend(
+        int(value)
+        for value in re.findall(
+            r"(?:前|连续(?:抓取|爬取|翻取)?|抓取|爬取|翻取|翻完|共|总共)"
+            r"\s*(\d+)\s*页",
+            text,
+            flags=re.IGNORECASE,
+        )
+    )
+    pages.extend(
+        int(value)
+        for value in re.findall(
+            r"(?:first\s+)?(\d+)\s+pages?",
+            text,
+            flags=re.IGNORECASE,
+        )
+    )
     if _contains_any(text, ("两页", "2页", "two pages")):
         pages.append(2)
     return max(pages or [1])
+
+
+def _collection_mode(task: str, target_pages: int) -> str:
+    if _contains_any(
+        task,
+        (
+            "无限滚动",
+            "持续向下滚动",
+            "滚动加载",
+            "下拉加载",
+            "滚动到底",
+            "infinite scroll",
+            "scroll to load",
+        ),
+    ):
+        return "infinite_scroll"
+    if target_pages > 1:
+        return "pagination"
+    return "single_page"
+
+
+def _extract_scroll_rounds(task: str) -> int:
+    rounds = _first_int(
+        (
+            r"(?:最多|至多|不超过)?\s*滚动\s*(\d+)\s*(?:轮|次)",
+            r"(?:最多|至多|不超过)?\s*(\d+)\s*(?:轮|次)\s*滚动",
+            r"(?:max(?:imum)?\s*)?(\d+)\s*scrolls?",
+        ),
+        str(task or ""),
+    )
+    return max(1, min(int(rounds or 6), 50))
+
+
+def _extract_filter(task: str) -> Optional[Dict[str, Any]]:
+    text = str(task or "")
+    if not _contains_any(text, ("筛选", "过滤", "搜索", "filter", "search")):
+        return None
+
+    quoted = re.search(
+        r"(?:筛选|过滤|搜索|filter|search)[^，。；;\n]{0,24}?"
+        r"[“\"']([^”\"']+)[”\"']",
+        text,
+        flags=re.IGNORECASE,
+    )
+    value = quoted.group(1).strip() if quoted else ""
+    if not value:
+        unquoted = re.search(
+            r"(?:关键词|关键字|包含|等于|为)\s*(?:是|：|:)?\s*"
+            r"([A-Za-z0-9_\-]{2,80})",
+            text,
+            flags=re.IGNORECASE,
+        )
+        value = unquoted.group(1).strip() if unquoted else ""
+    if not value:
+        return None
+
+    field_hint = ""
+    for hint in ("搜索框", "筛选框", "关键词", "关键字", "search"):
+        if hint.lower() in text.lower():
+            field_hint = hint
+            break
+    return {
+        "kind": "text",
+        "value": value,
+        "field_hint": field_hint,
+        "submit": True,
+    }
 
 
 def _first_int(patterns: Iterable[str], text: str) -> Optional[int]:
@@ -210,19 +294,52 @@ def build_task_contract(task: str) -> Dict[str, Any]:
     target_pages = _extract_page_count(text)
     min_items, max_items, per_page_limit = _extract_counts(text, target_pages)
     schema = _extract_schema(text)
+    detail_required = _detail_required(text)
+    detail_schema = (
+        [
+            field
+            for field in schema
+            if field in {"description", "text", "author", "tags"}
+        ]
+        if detail_required
+        else []
+    )
+    list_schema = [field for field in schema if field not in set(detail_schema)]
+    if detail_required:
+        for required in ("title", "url"):
+            if required not in list_schema:
+                list_schema.append(required)
+            if required not in schema:
+                schema.append(required)
+    collection_mode = _collection_mode(text, target_pages)
     return {
-        "version": 1,
+        "version": 2,
         "task": text,
         "target_url": target_url,
         "schema": schema,
+        "list_schema": list_schema or schema,
+        "detail_schema": detail_schema,
         "min_items": min_items,
         "max_items": max_items,
         "per_page_limit": per_page_limit,
         "target_pages": target_pages,
-        "detail_required": _detail_required(text),
+        "collection_mode": collection_mode,
+        "max_scroll_rounds": (
+            _extract_scroll_rounds(text)
+            if collection_mode == "infinite_scroll"
+            else 0
+        ),
+        "max_stagnant_rounds": 2,
+        "filter": _extract_filter(text),
+        "detail_required": detail_required,
         "requires_javascript_wait": _contains_any(
             text, ("javascript", "动态内容", "动态渲染", "js 渲染", "js-rendered")
         ),
+        "recovery": {
+            "enabled": True,
+            "resume_from": "last_verified_action",
+            "max_action_retries": 3,
+        },
     }
 
 
@@ -247,7 +364,7 @@ def _canonical_value(item: Dict[str, Any], field: str) -> Any:
 
 def _unique_items(items: Iterable[Dict[str, Any]]) -> list[Dict[str, Any]]:
     result: list[Dict[str, Any]] = []
-    seen: set[str] = set()
+    by_identity: Dict[str, int] = {}
     for item in items or []:
         if not isinstance(item, dict):
             continue
@@ -255,10 +372,17 @@ def _unique_items(items: Iterable[Dict[str, Any]]) -> list[Dict[str, Any]]:
             _canonical_value(item, "url")
             or json.dumps(item, ensure_ascii=False, sort_keys=True, default=str)
         ).strip().rstrip("/")
-        if not identity or identity in seen:
+        if not identity:
             continue
-        seen.add(identity)
-        result.append(dict(item))
+        existing_index = by_identity.get(identity)
+        if existing_index is None:
+            by_identity[identity] = len(result)
+            result.append(dict(item))
+            continue
+        existing = result[existing_index]
+        for key, value in item.items():
+            if _meaningful(value):
+                existing[key] = value
     return result
 
 
@@ -535,6 +659,48 @@ def _pagination_ref(
     return next_ref
 
 
+def _filter_input_ref(
+    capability_map: Dict[str, Any],
+    filter_spec: Dict[str, Any],
+) -> Optional[str]:
+    hint = str(filter_spec.get("field_hint") or "").strip().lower()
+    candidates: list[tuple[int, str]] = []
+    for area in capability_map.get("search") or []:
+        if not isinstance(area, dict):
+            continue
+        ref = str(area.get("input_ref") or "")
+        if not re.fullmatch(r"e\d+", ref):
+            continue
+        text = str(area.get("input_name") or "").lower()
+        candidates.append((100 + (30 if hint and hint in text else 0), ref))
+    for form in capability_map.get("forms") or []:
+        if not isinstance(form, dict):
+            continue
+        for field in form.get("inputs") or []:
+            if not isinstance(field, dict):
+                continue
+            ref = str(field.get("ref") or "")
+            if not re.fullmatch(r"e\d+", ref):
+                continue
+            role = str(field.get("role") or "").lower()
+            input_type = str(field.get("input_type") or "").lower()
+            if role not in {"textbox", "searchbox"} and input_type not in {
+                "text",
+                "search",
+            }:
+                continue
+            text = str(field.get("name") or "").lower()
+            score = 80
+            if role == "searchbox" or input_type == "search":
+                score += 20
+            if hint and hint in text:
+                score += 30
+            candidates.append((score, ref))
+    if not candidates:
+        return None
+    return max(candidates, key=lambda item: item[0])[1]
+
+
 def _plan(
     intent: str,
     payload: Optional[Dict[str, Any]] = None,
@@ -560,6 +726,12 @@ def build_contract_plan(
     progress.setdefault("items", [])
     progress.setdefault("completed_pages", [])
     progress.setdefault("active_page", 1)
+    progress.setdefault("failed_region_refs", [])
+    progress.setdefault("filter_applied", not bool(contract.get("filter")))
+    progress.setdefault("scroll_round", 0)
+    progress.setdefault("stagnant_rounds", 0)
+    progress.setdefault("list_complete", False)
+    progress.setdefault("detail_complete", False)
     updates = {
         "dpcli_task_contract": contract,
         "dpcli_task_progress": progress,
@@ -598,19 +770,33 @@ def build_contract_plan(
     capability_map = (state.get("dpcli_agent_view") or {}).get(
         "capability_map"
     ) or {}
+
+    filter_spec = contract.get("filter")
+    if isinstance(filter_spec, dict) and not progress.get("filter_applied"):
+        input_ref = _filter_input_ref(capability_map, filter_spec)
+        if input_ref:
+            return (
+                _plan(
+                    "type",
+                    {
+                        "ref": input_ref,
+                        "text": str(filter_spec.get("value") or ""),
+                        "submit": bool(filter_spec.get("submit", True)),
+                        "filter_stage": "applied",
+                    },
+                    "deterministic task contract: apply text filter before extraction",
+                ),
+                updates,
+            )
+
     if active_page in completed_pages and active_page < target_pages:
         next_page = active_page + 1
         ref = _pagination_ref(capability_map, next_page)
         if ref:
-            progress["active_page"] = next_page
-            # Element/container refs can be reused on the next page. Region
-            # exclusions are page-local and must not leak across pagination.
-            progress["failed_region_refs"] = []
-            updates["dpcli_task_progress"] = progress
             return (
                 _plan(
                     "click",
-                    {"ref": ref},
+                    {"ref": ref, "page_number": next_page},
                     f"deterministic task contract: open page {next_page}",
                 ),
                 updates,
@@ -624,6 +810,8 @@ def build_contract_plan(
         max(1, int(contract.get("per_page_limit") or remaining)),
         remaining,
     )
+    item_count = len(_unique_items(progress.get("items") or []))
+    required_count = int(contract.get("min_items") or 1)
     region = _select_region(state, contract, limit)
     if region:
         return (
@@ -631,13 +819,49 @@ def build_contract_plan(
                 "extract",
                 {
                     "target_ref": str(region["ref"]),
-                    "schema": list(contract.get("schema") or []),
+                    "schema": list(
+                        contract.get("list_schema")
+                        or contract.get("schema")
+                        or []
+                    ),
                     "limit": limit,
                 },
                 "deterministic task contract: extract required fields and count",
             ),
             updates,
         )
+
+    if (
+        contract.get("collection_mode") == "infinite_scroll"
+        and item_count < required_count
+    ):
+        scroll_round = max(0, int(progress.get("scroll_round") or 0))
+        max_scroll_rounds = max(1, int(contract.get("max_scroll_rounds") or 1))
+        stagnant_rounds = max(0, int(progress.get("stagnant_rounds") or 0))
+        max_stagnant_rounds = max(
+            1, int(contract.get("max_stagnant_rounds") or 2)
+        )
+        if (
+            scroll_round < max_scroll_rounds
+            and stagnant_rounds < max_stagnant_rounds
+        ):
+            return (
+                _plan(
+                    "scroll",
+                    {
+                        "direction": "down",
+                        "amount": 900,
+                        "to": "bottom",
+                        "wait_time": 1.0,
+                        "round": scroll_round + 1,
+                    },
+                    (
+                        "deterministic task contract: load more content "
+                        f"(scroll {scroll_round + 1}/{max_scroll_rounds})"
+                    ),
+                ),
+                updates,
+            )
 
     if contract.get("requires_javascript_wait") and not progress.get("waited"):
         progress["waited"] = True
@@ -650,8 +874,6 @@ def build_contract_plan(
             ),
             updates,
         )
-    item_count = len(_unique_items(progress.get("items") or []))
-    required_count = int(contract.get("min_items") or 1)
     return (
         _plan(
             "fail",

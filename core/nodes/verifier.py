@@ -34,8 +34,14 @@ def _contract_action_verification(state, skill: str):
     params = action.get("params") or {}
     expected_count = params.get("limit") or contract.get("per_page_limit") or 1
     items = result_items(state.get("dpcli_result") or {})
+    evaluation_contract = contract
+    if skill in {"extract", "list-items"} and contract.get("detail_required"):
+        evaluation_contract = dict(contract)
+        evaluation_contract["schema"] = list(
+            contract.get("list_schema") or ["title", "url"]
+        )
     evaluation = evaluate_contract_items(
-        contract,
+        evaluation_contract,
         items,
         # A data region may legitimately contain only part of the requested
         # page. Validate its schema here, then let cumulative progress decide
@@ -90,14 +96,23 @@ def _merge_dpcli_contract_progress(state):
     )
 
     progress = state.get("dpcli_task_progress") or {}
+    previous_item_count = len(progress.get("items") or [])
     page_number = max(1, int(progress.get("active_page") or 1))
     merged = merge_contract_progress(
         progress,
         result_items(state.get("dpcli_result") or {}),
         page_number=page_number,
     )
+    skill = str((state.get("generated_action") or {}).get("skill") or "")
+    is_list_action = skill in {"extract", "list-items"}
+    evaluation_contract = contract
+    if is_list_action and contract.get("detail_required"):
+        evaluation_contract = dict(contract)
+        evaluation_contract["schema"] = list(
+            contract.get("list_schema") or ["title", "url"]
+        )
     evaluation = evaluate_contract_items(
-        contract,
+        evaluation_contract,
         merged.get("items") or [],
         expected_count=int(contract.get("min_items") or 1),
     )
@@ -107,10 +122,53 @@ def _merge_dpcli_contract_progress(state):
         if str(value).isdigit()
     }
     target_pages = max(1, int(contract.get("target_pages") or 1))
+    pages_done = len(completed_pages) >= target_pages
+    list_complete = bool(evaluation["is_success"] and pages_done)
+    if is_list_action:
+        merged["list_complete"] = list_complete
+        if contract.get("collection_mode") == "infinite_scroll":
+            current_item_count = len(merged.get("items") or [])
+            merged["stagnant_rounds"] = (
+                int(progress.get("stagnant_rounds") or 0) + 1
+                if previous_item_count > 0 and current_item_count <= previous_item_count
+                else 0
+            )
+    if skill == "batch-detail-extract":
+        merged["detail_complete"] = bool(evaluation["is_success"] and pages_done)
     is_done = bool(
-        evaluation["is_success"] and len(completed_pages) >= target_pages
+        evaluation["is_success"]
+        and pages_done
+        and (
+            not contract.get("detail_required")
+            or skill == "batch-detail-extract"
+        )
     )
     return merged, evaluation, is_done
+
+
+def _advance_contract_page_progress(state):
+    """Apply page-action progress only after deterministic verification succeeds."""
+    progress = dict(state.get("dpcli_task_progress") or {})
+    plan = state.get("dpcli_structured_plan") or {}
+    payload = plan.get("action_payload") or {}
+    intent = str(plan.get("step_intent") or "").lower()
+
+    if intent == "click" and payload.get("page_number") is not None:
+        progress["active_page"] = max(1, int(payload["page_number"]))
+        progress["failed_region_refs"] = []
+    elif intent == "type" and payload.get("filter_stage") == "applied":
+        progress["filter_applied"] = True
+        progress["failed_region_refs"] = []
+        progress["completed_pages"] = []
+        progress["active_page"] = 1
+    elif intent == "scroll":
+        requested_round = int(payload.get("round") or 0)
+        progress["scroll_round"] = max(
+            int(progress.get("scroll_round") or 0),
+            requested_round,
+        )
+        progress["failed_region_refs"] = []
+    return progress
 
 
 def _mark_contract_region_failed(state, progress_override=None):
@@ -500,6 +558,18 @@ def _verify_dpcli_action_with_signals(state, current_url):
 
         # --- Type/Select: check target confidence ---
         if skill in ("type", "select"):
+            if is_contract_action:
+                return _build_verification_result(
+                    is_success=True,
+                    is_done=False,
+                    summary=f"task-contract form action succeeded: {skill}",
+                    source="verifier",
+                    failure_scope="local",
+                    evidence=_compact_result_evidence(result),
+                    confidence=1.0,
+                    needs_llm=False,
+                    decision_source="task_contract",
+                )
             target_confidence, ref_match, target_status = _check_target_confidence(state)
             if (target_confidence >= VERIFIER_MIN_TARGET_CONFIDENCE
                     and target_status == "selected"):
@@ -973,6 +1043,16 @@ def verifier_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lit
                 updates["_failed_code_cache_ids"] = []
                 updates["_failed_dom_cache_ids"] = []
                 updates["_cache_hit_id"] = None
+
+                if (
+                    action_kind == "page"
+                    and (state.get("dpcli_structured_plan") or {}).get(
+                        "_contract_action"
+                    )
+                ):
+                    updates["dpcli_task_progress"] = (
+                        _advance_contract_page_progress(state)
+                    )
 
                 if action_kind == "data":
                     contract_progress = _merge_dpcli_contract_progress(state)

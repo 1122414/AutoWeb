@@ -85,6 +85,49 @@ class DPCLIExecutorTests(unittest.TestCase):
         self.assertIn("--text", args)
 
     @patch("skills.dpcli_executor.subprocess.run")
+    def test_execute_action_dispatches_submit_and_scroll(self, run):
+        run.return_value = Mock(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "ok": True,
+                    "session": "unit",
+                    "action": "ok",
+                    "data": {"page": {}},
+                    "error": None,
+                }
+            ),
+            stderr="",
+        )
+        executor = self.make_executor()
+
+        executor.execute_action(
+            {
+                "skill": "type",
+                "params": {"ref": "e1", "text": "Boston", "submit": True},
+            }
+        )
+        type_args = run.call_args.args[0]
+        self.assertIn("--submit", type_args)
+
+        executor.execute_action(
+            {
+                "skill": "scroll",
+                "params": {
+                    "direction": "down",
+                    "amount": 900,
+                    "to": "bottom",
+                    "wait_time": 1,
+                },
+            }
+        )
+        scroll_args = run.call_args.args[0]
+        self.assertIn("scroll", scroll_args)
+        self.assertEqual(scroll_args[scroll_args.index("--direction") + 1], "down")
+        self.assertEqual(scroll_args[scroll_args.index("--amount") + 1], "900")
+        self.assertEqual(scroll_args[scroll_args.index("--to") + 1], "bottom")
+
+    @patch("skills.dpcli_executor.subprocess.run")
     def test_execute_action_wait_uses_snapshot_wait_and_preserves_wait_action(self, run):
         payload = {
             "ok": True,
