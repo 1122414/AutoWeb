@@ -24,167 +24,47 @@ from skills.logger import logger
 
 def _contract_action_verification(state, skill: str):
     """Validate one data result against the original user task contract."""
-    contract = state.get("dpcli_task_contract") or {}
-    if not contract or skill not in {"extract", "list-items", "batch-detail-extract"}:
+    from skills.task_lifecycle import task_lifecycle
+
+    evaluation = task_lifecycle.verify_action(state, skill)
+    if evaluation is None:
         return None
-
-    from skills.dpcli_task_contract import evaluate_contract_items, result_items
-
-    action = state.get("generated_action") or {}
-    params = action.get("params") or {}
-    expected_count = params.get("limit") or contract.get("per_page_limit") or 1
-    items = result_items(state.get("dpcli_result") or {})
-    evaluation_contract = contract
-    if skill in {"extract", "list-items"} and contract.get("detail_required"):
-        evaluation_contract = dict(contract)
-        evaluation_contract["schema"] = list(
-            contract.get("list_schema") or ["title", "url"]
-        )
-    evaluation = evaluate_contract_items(
-        evaluation_contract,
-        items,
-        # A data region may legitimately contain only part of the requested
-        # page. Validate its schema here, then let cumulative progress decide
-        # whether the overall task is complete.
-        expected_count=1,
-    )
-    item_count = int(evaluation["item_count"])
-    requested_count = int(expected_count)
-    is_success = bool(evaluation["is_success"])
-    is_partial = is_success and item_count < requested_count
-    if is_partial:
-        summary = (
-            f"partial task-contract data "
-            f"({item_count}/{requested_count} items; cumulative progress)"
-        )
-    elif is_success:
-        summary = f"task-contract data valid ({item_count} items)"
-    else:
-        summary = evaluation["summary"]
     return _build_verification_result(
-        is_success=is_success,
-        is_done=False,
-        summary=summary,
+        is_success=evaluation["is_success"],
+        is_done=evaluation["is_done"],
+        summary=evaluation["summary"],
         source="verifier",
         failure_scope="local",
         evidence=str(
             {
                 "item_count": evaluation["item_count"],
-                "required_count": requested_count,
+                "required_count": evaluation["requested_count"],
                 "field_coverage": evaluation["field_coverage"],
             }
         ),
-        fix_hint=(
-            "continue with task-contract progress"
-            if is_success
-            else "select another concrete data region matching the original task schema"
-        ),
+        fix_hint=evaluation["fix_hint"],
         decision_source="task_contract",
     )
 
 
 def _merge_dpcli_contract_progress(state):
     """Return progress, cumulative evaluation, and completion decision."""
-    contract = state.get("dpcli_task_contract") or {}
-    if not contract:
-        return None
+    from skills.task_lifecycle import task_lifecycle
 
-    from skills.dpcli_task_contract import (
-        evaluate_contract_items,
-        merge_contract_progress,
-        result_items,
-    )
-
-    progress = state.get("dpcli_task_progress") or {}
-    previous_item_count = len(progress.get("items") or [])
-    page_number = max(1, int(progress.get("active_page") or 1))
-    merged = merge_contract_progress(
-        progress,
-        result_items(state.get("dpcli_result") or {}),
-        page_number=page_number,
-    )
-    skill = str((state.get("generated_action") or {}).get("skill") or "")
-    is_list_action = skill in {"extract", "list-items"}
-    evaluation_contract = contract
-    if is_list_action and contract.get("detail_required"):
-        evaluation_contract = dict(contract)
-        evaluation_contract["schema"] = list(
-            contract.get("list_schema") or ["title", "url"]
-        )
-    evaluation = evaluate_contract_items(
-        evaluation_contract,
-        merged.get("items") or [],
-        expected_count=int(contract.get("min_items") or 1),
-    )
-    completed_pages = {
-        int(value)
-        for value in merged.get("completed_pages") or []
-        if str(value).isdigit()
-    }
-    target_pages = max(1, int(contract.get("target_pages") or 1))
-    pages_done = len(completed_pages) >= target_pages
-    list_complete = bool(evaluation["is_success"] and pages_done)
-    if is_list_action:
-        merged["list_complete"] = list_complete
-        if contract.get("collection_mode") == "infinite_scroll":
-            current_item_count = len(merged.get("items") or [])
-            merged["stagnant_rounds"] = (
-                int(progress.get("stagnant_rounds") or 0) + 1
-                if previous_item_count > 0 and current_item_count <= previous_item_count
-                else 0
-            )
-    if skill == "batch-detail-extract":
-        merged["detail_complete"] = bool(evaluation["is_success"] and pages_done)
-    is_done = bool(
-        evaluation["is_success"]
-        and pages_done
-        and (
-            not contract.get("detail_required")
-            or skill == "batch-detail-extract"
-        )
-    )
-    return merged, evaluation, is_done
+    return task_lifecycle.merge_verified_result(state)
 
 
 def _advance_contract_page_progress(state):
     """Apply page-action progress only after deterministic verification succeeds."""
-    progress = dict(state.get("dpcli_task_progress") or {})
-    plan = state.get("dpcli_structured_plan") or {}
-    payload = plan.get("action_payload") or {}
-    intent = str(plan.get("step_intent") or "").lower()
+    from skills.task_lifecycle import task_lifecycle
 
-    if intent == "click" and payload.get("page_number") is not None:
-        progress["active_page"] = max(1, int(payload["page_number"]))
-        progress["failed_region_refs"] = []
-    elif intent == "type" and payload.get("filter_stage") == "applied":
-        progress["filter_applied"] = True
-        progress["failed_region_refs"] = []
-        progress["completed_pages"] = []
-        progress["active_page"] = 1
-    elif intent == "scroll":
-        requested_round = int(payload.get("round") or 0)
-        progress["scroll_round"] = max(
-            int(progress.get("scroll_round") or 0),
-            requested_round,
-        )
-        progress["failed_region_refs"] = []
-    return progress
+    return task_lifecycle.advance_verified_page(state)
 
 
 def _mark_contract_region_failed(state, progress_override=None):
-    progress = dict(
-        progress_override
-        if progress_override is not None
-        else state.get("dpcli_task_progress") or {}
-    )
-    failed_refs = list(progress.get("failed_region_refs") or [])
-    plan = state.get("dpcli_structured_plan") or {}
-    payload = plan.get("action_payload") or {}
-    ref = payload.get("target_ref") or payload.get("group_ref") or payload.get("ref")
-    if ref and ref not in failed_refs:
-        failed_refs.append(str(ref))
-    progress["failed_region_refs"] = failed_refs
-    return progress
+    from skills.task_lifecycle import task_lifecycle
+
+    return task_lifecycle.mark_failed_region(state, progress_override)
 
 
 def _check_target_confidence(state):

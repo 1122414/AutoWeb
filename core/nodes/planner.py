@@ -23,12 +23,12 @@ def _dpcli_contract_planner_step(
     verification: dict,
 ) -> Command | None:
     """Build a deterministic dp_cli step from the original task constraints."""
-    from skills.dpcli_task_contract import build_contract_plan, build_task_contract
+    from skills.task_lifecycle import task_lifecycle
 
-    contract = state.get("dpcli_task_contract") or build_task_contract(
+    contract = state.get("dpcli_task_contract") or task_lifecycle.compile(
         state.get("user_task", "")
     )
-    structured_plan, contract_updates = build_contract_plan(state, contract)
+    structured_plan, contract_updates = task_lifecycle.decide(state, contract)
     if not structured_plan:
         return None
 

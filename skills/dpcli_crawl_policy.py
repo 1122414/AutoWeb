@@ -24,10 +24,10 @@ DETAIL_GOAL_TOKENS = (
 
 
 def goal_requests_detail_batch(goal: str) -> bool:
-    from skills.dpcli_task_contract import build_task_contract
+    from skills.task_lifecycle import task_lifecycle
 
     text = str(goal or "").lower()
-    if build_task_contract(text).get("detail_required"):
+    if task_lifecycle.compile(text).get("detail_required"):
         return True
     negative_tokens = (
         "不要进入详情",
