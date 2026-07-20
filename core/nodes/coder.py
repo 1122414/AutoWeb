@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from typing import Any, Dict, Literal
 
@@ -27,6 +28,19 @@ from core.nodes._dpcli import (
 from prompts.coder_prompts import ACTION_CODE_GEN_PROMPT, CODER_TASK_WRAPPER
 from prompts.dpcli_action_prompts import DPCLI_ACTION_GEN_PROMPT
 from skills.logger import logger
+
+
+def _dpcli_request_id(state: AgentState, action: Dict[str, Any]) -> str:
+    """Return a stable id for replaying one graph step after a cold restart."""
+    payload = {
+        "task_started_at": state.get("_task_started_at"),
+        "loop_count": state.get("loop_count", 0),
+        "session": state.get("dpcli_session"),
+        "skill": action.get("skill"),
+        "params": action.get("params") or {},
+    }
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+    return f"autoweb-{hashlib.sha256(raw.encode('utf-8')).hexdigest()[:24]}"
 
 
 def coder_node(state: AgentState, config: RunnableConfig, llm) -> Command[Literal["Executor", "Coder"]]:
@@ -177,7 +191,10 @@ def _executor_dpcli_branch(state: AgentState, config: RunnableConfig) -> Command
     session = state.get("dpcli_session") or DPCLI_SESSION
     before_url = state.get("current_url", "")
     executor = DPCLIExecutor(session=session, headless=DPCLI_HEADLESS)
-    result = executor.execute_action(action)
+    request_id = _dpcli_request_id(state, action)
+    action_with_request = dict(action)
+    action_with_request["request_id"] = request_id
+    result = executor.execute_action(action_with_request)
     if str(action.get("skill") or "").lower() == "extract":
         from skills.dpcli_result_enricher import enrich_extract_result
 
@@ -194,6 +211,7 @@ def _executor_dpcli_branch(state: AgentState, config: RunnableConfig) -> Command
         "execution_log": result_log,
         "dpcli_result": result,
         "dpcli_session": session,
+        "dpcli_request_id": request_id,
         "current_url": current_url,
         "dpcli_execution_evidence": {
             "before_url": before_url,

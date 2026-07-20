@@ -35,6 +35,7 @@ from config import *
 from core.llm_factory import create_llm
 from skills.observer import BrowserObserver
 from skills.task_resume import parse_resume_thread_id, snapshot_has_checkpoint
+from skills.task_run_store import TaskRunStore
 from skills.logger import logger, trace_log
 
 
@@ -71,12 +72,19 @@ def setup_agent():
 
     print(">>> 正在构建 AutoWeb V2 大脑 (LangGraph)...")
     logger.info("[setup_agent:67] 构建 LangGraph 工作流...")
-    memory = MemorySaver()
+    task_store = (
+        TaskRunStore(TASK_RUN_DB_PATH)
+        if TASK_RUN_PERSISTENCE_ENABLED
+        else None
+    )
+    checkpointer = task_store.checkpointer if task_store else MemorySaver()
     # 依赖注入：在构建图时通过 partial 绑定各节点独立 LLM
     app = build_graph(
-        checkpointer=memory, llm=llm, observer=observer,
+        checkpointer=checkpointer, llm=llm, observer=observer,
         coder_llm=coder_llm, planner_llm=planner_llm, verifier_llm=verifier_llm
     )
+    if task_store:
+        logger.info(f"   💾 [TaskRun] SQLite 持久化: {task_store.path}")
     logger.info("[setup_agent:73] LangGraph 工作流就绪")
 
     # 打印系统配置信息
@@ -115,7 +123,7 @@ def setup_agent():
         f"cache={'on' if ACTION_CACHE_ENABLED else 'off'})")
 
     # 返回应用、浏览器和依赖对象
-    return app, browser_instance, llm, observer
+    return app, browser_instance, llm, observer, task_store
 
 
 def print_step_output(event):
@@ -313,7 +321,34 @@ def _detect_verifier_forced_reasons(values: dict) -> List[str]:
     return reasons
 
 
-def interactive_loop(app, browser_instance, llm, observer):
+def _record_task_run(app, config, task_store):
+    if task_store is None:
+        return None
+    snapshot = app.get_state(config)
+    values = getattr(snapshot, "values", {}) or {}
+    if not values:
+        return None
+    thread_id = str(config.get("configurable", {}).get("thread_id") or "")
+    return task_store.record_snapshot(
+        thread_id,
+        values,
+        getattr(snapshot, "next", ()) or (),
+    )
+
+
+def _stream_with_task_run(app, stream_input, *, config, task_store):
+    """Stream graph updates and always refresh the durable Run Manifest."""
+    try:
+        yield from app.stream(
+            stream_input,
+            config=config,
+            stream_mode="updates",
+        )
+    finally:
+        _record_task_run(app, config, task_store)
+
+
+def interactive_loop(app, browser_instance, llm, observer, task_store=None):
     """交互式主循环"""
     print("\n🤖 AutoWeb Agent (LangGraph V2) 已启动 — 输入自然语言任务（输入 exit 退出）")
 
@@ -359,7 +394,9 @@ def interactive_loop(app, browser_instance, llm, observer):
                     if not needs_review:
                         logger.info("   🔔 [HITL] Executor — HITL 已关闭且未触发强制审核点，自动继续")
                         print("   🔔 HITL 已关闭且未触发强制审核点，自动继续...")
-                        for event in app.stream(None, config=config, stream_mode="updates"):
+                        for event in _stream_with_task_run(
+                            app, None, config=config, task_store=task_store
+                        ):
                             print_step_output(event)
                         continue
 
@@ -406,7 +443,9 @@ def interactive_loop(app, browser_instance, llm, observer):
                     if user_input.lower() in ("c", "continue", "yes", "y"):
                         logger.info("   ✅ [HITL] Executor — 用户批准执行")
                         print("   ✅ 批准执行，继续...")
-                        for event in app.stream(None, config=config, stream_mode="updates"):
+                        for event in _stream_with_task_run(
+                            app, None, config=config, task_store=task_store
+                        ):
                             print_step_output(event)
                         continue
 
@@ -454,7 +493,12 @@ def interactive_loop(app, browser_instance, llm, observer):
                             print("   ℹ️ 代码未修改，继续执行原代码...")
 
                         # [Fix] 使用 Command(goto="Executor") 强制指定下一步执行的节点
-                        for event in app.stream(Command(goto="Executor"), config=config, stream_mode="updates"):
+                        for event in _stream_with_task_run(
+                            app,
+                            Command(goto="Executor"),
+                            config=config,
+                            task_store=task_store,
+                        ):
                             print_step_output(event)
                         continue
 
@@ -465,7 +509,12 @@ def interactive_loop(app, browser_instance, llm, observer):
                         print(f"   🔄 收到新指令，正在更新状态并重规划: {user_input}")
                         app.update_state(
                             config, {"user_task": f"{user_input} (User Feedback)"})
-                        for event in app.stream(Command(goto="Executor"), config=config, stream_mode="updates"):
+                        for event in _stream_with_task_run(
+                            app,
+                            Command(goto="Executor"),
+                            config=config,
+                            task_store=task_store,
+                        ):
                             print_step_output(event)
                         continue
 
@@ -507,7 +556,12 @@ def interactive_loop(app, browser_instance, llm, observer):
                             print("   🔔 HITL 已关闭且未触发强制审核点，自动接受验证结果")
                             if is_done:
                                 goto_node = "__end__"
-                            for event in app.stream(Command(goto=goto_node), config=config, stream_mode="updates"):
+                            for event in _stream_with_task_run(
+                                app,
+                                Command(goto=goto_node),
+                                config=config,
+                                task_store=task_store,
+                            ):
                                 print_step_output(event)
                             continue
 
@@ -601,7 +655,12 @@ def interactive_loop(app, browser_instance, llm, observer):
                                 goto_node = "__end__"
 
                     # 统一使用 Command(goto=goto_node) 跳转
-                    for event in app.stream(Command(goto=goto_node), config=config, stream_mode="updates"):
+                    for event in _stream_with_task_run(
+                        app,
+                        Command(goto=goto_node),
+                        config=config,
+                        task_store=task_store,
+                    ):
                         print_step_output(event)
                     continue
 
@@ -613,7 +672,9 @@ def interactive_loop(app, browser_instance, llm, observer):
                 # === 其他节点中断 ===
                 else:
                     print(f"   ℹ️ 未知中断点 {next_node}，自动继续...")
-                    for event in app.stream(None, config=config, stream_mode="updates"):
+                    for event in _stream_with_task_run(
+                        app, None, config=config, task_store=task_store
+                    ):
                         print_step_output(event)
                     continue
 
@@ -642,6 +703,21 @@ def interactive_loop(app, browser_instance, llm, observer):
                 print(f"THREAD ID: {thread_id}")
                 continue
 
+            if lower_input in ("runs", "任务列表", "恢复列表"):
+                if task_store is None:
+                    print("⚠️ Task Run 持久化未启用")
+                    continue
+                recent = task_store.recent(limit=10)
+                if not recent:
+                    print("暂无可恢复任务")
+                    continue
+                for run in recent:
+                    print(
+                        f"{run.thread_id} | {run.status} | "
+                        f"{run.item_count} items | {run.user_task[:48]}"
+                    )
+                continue
+
             resume_thread_id = parse_resume_thread_id(user_input)
             if resume_thread_id:
                 previous_thread_id = thread_id
@@ -654,6 +730,18 @@ def interactive_loop(app, browser_instance, llm, observer):
                 thread_id = resume_thread_id
                 logger.info(f"🔁 [main] 恢复线程: {thread_id}")
                 print(f"🔁 已切换到线程: {thread_id}")
+                manifest = (
+                    task_store.get_manifest(thread_id)
+                    if task_store is not None
+                    else None
+                )
+                if manifest:
+                    print(
+                        "   已从持久存储加载："
+                        f"{manifest.item_count} 条，"
+                        f"完成页 {manifest.completed_pages}，"
+                        f"CLI 会话 {manifest.dpcli_session or '-'}"
+                    )
                 print("   将从最后一个 LangGraph 检查点继续。")
                 continue
 
@@ -718,6 +806,7 @@ def interactive_loop(app, browser_instance, llm, observer):
                 "dpcli_snapshot_view": None,
                 "dpcli_task_contract": None,
                 "dpcli_task_progress": None,
+                "dpcli_request_id": None,
                 "dpcli_detail_batch_ran": False,
                 "_action_source": None,
                 "_action_cache_hit_id": None,
@@ -730,7 +819,12 @@ def interactive_loop(app, browser_instance, llm, observer):
 
             try:
                 # stream_mode="updates" 只返回增量更新，适合 UI 展示
-                for event in app.stream(input_state, config=config, stream_mode="updates"):
+                for event in _stream_with_task_run(
+                    app,
+                    input_state,
+                    config=config,
+                    task_store=task_store,
+                ):
                     print_step_output(event)
 
                 snapshot_after = app.get_state(config)
@@ -754,13 +848,16 @@ def interactive_loop(app, browser_instance, llm, observer):
 
 
 if __name__ == "__main__":
+    task_store = None
     try:
-        app, browser, llm, observer = setup_agent()
-        interactive_loop(app, browser, llm, observer)
+        app, browser, llm, observer, task_store = setup_agent()
+        interactive_loop(app, browser, llm, observer, task_store)
     except Exception as e:
         logger.critical(f"❌ [main] 启动失败: {e}")
         traceback.print_exc()
     finally:
+        if task_store is not None:
+            task_store.close()
         # 确保知识库缓冲区刷新
         try:
             from skills.tool_rag import kb_manager

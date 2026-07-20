@@ -160,6 +160,14 @@ ACTION_CACHE_STORE_PATH = os.getenv(
 # 运行结果输出目录 (用于存放截图、下载的文件、生成的报告)
 OUTPUT_DIR = os.getenv("OUTPUT_DIR", "./output")
 
+# Task Run durable checkpoint storage. SQLite is the default local adapter.
+TASK_RUN_PERSISTENCE_ENABLED = _env_bool(
+    "TASK_RUN_PERSISTENCE_ENABLED", "True")
+TASK_RUN_DB_PATH = os.getenv(
+    "TASK_RUN_DB_PATH",
+    os.path.join(OUTPUT_DIR, "state", "autoweb_task_runs.sqlite3"),
+)
+
 # 关系型数据库连接串 (PostgreSQL)
 # 格式示例: postgresql://user:password@localhost:5432/dbname
 # POSTGRES_CONNECTION_STRING = os.getenv("POSTGRES_CONNECTION_STRING")

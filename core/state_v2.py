@@ -83,6 +83,7 @@ class AgentState(EnvState, TaskState):
     dpcli_structured_plan: Optional[Dict[str, Any]]     # Planner structured intent
     dpcli_task_contract: Optional[Dict[str, Any]]       # End-to-end user crawl constraints
     dpcli_task_progress: Optional[Dict[str, Any]]       # Deduplicated rows/pages/failed refs
+    dpcli_request_id: Optional[str]                     # Stable per-step CLI idempotency key
     dpcli_detail_batch_ran: bool
     execution_log: Optional[str]        # Executor 运行代码后的日志/返回值
 

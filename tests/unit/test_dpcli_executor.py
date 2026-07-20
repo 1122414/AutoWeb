@@ -128,6 +128,36 @@ class DPCLIExecutorTests(unittest.TestCase):
         self.assertEqual(scroll_args[scroll_args.index("--to") + 1], "bottom")
 
     @patch("skills.dpcli_executor.subprocess.run")
+    def test_execute_action_passes_stable_request_id_to_cli(self, run):
+        run.return_value = Mock(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "ok": True,
+                    "session": "unit",
+                    "action": "click",
+                    "data": {},
+                    "error": None,
+                }
+            ),
+            stderr="",
+        )
+
+        self.make_executor().execute_action(
+            {
+                "skill": "click",
+                "params": {"ref": "e1"},
+                "request_id": "autoweb-request-1",
+            }
+        )
+
+        args = run.call_args.args[0]
+        self.assertEqual(
+            args[args.index("--request-id") + 1],
+            "autoweb-request-1",
+        )
+
+    @patch("skills.dpcli_executor.subprocess.run")
     def test_execute_action_wait_uses_snapshot_wait_and_preserves_wait_action(self, run):
         payload = {
             "ok": True,

@@ -35,6 +35,7 @@ class DPCLIExecutor:
         self.cwd = cwd
         self.timeout_seconds = timeout_seconds
         self.batch_timeout_seconds = batch_timeout_seconds
+        self._active_request_id: Optional[str] = None
         trace_log(f"DPCLIExecutor 初始化: session={session}, headless={headless}")
 
     def open(self, url: str, wait_time: Optional[float] = None) -> Dict[str, Any]:
@@ -273,6 +274,7 @@ class DPCLIExecutor:
             return self._invalid_action("Action params must be a JSON object.", skill=skill)
 
         trace_log(f"execute_action: skill={skill}")
+        self._active_request_id = str(action.get("request_id") or "").strip() or None
 
         if "target_ref" in params and "ref" not in params:
             params = dict(params)
@@ -400,6 +402,12 @@ class DPCLIExecutor:
             cmd.append("--headless")
         if "--session" not in cmd:
             cmd.extend(["--session", self.session])
+        if (
+            self._active_request_id
+            and accepts_headless
+            and "--request-id" not in cmd
+        ):
+            cmd.extend(["--request-id", self._active_request_id])
 
         trace_log(f"dp_cli run: {' '.join(cmd)}")
 
