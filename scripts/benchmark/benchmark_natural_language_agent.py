@@ -64,6 +64,7 @@ class BenchmarkCase:
     forbidden_url_patterns: tuple[str, ...] = ()
     minimum_relevant_item_ratio: float = 0.0
     minimum_title_length: int = 0
+    restart_after_pages: int = 0
 
 
 CASES = {
@@ -303,7 +304,7 @@ def _evaluate(
         all_items.extend(_result_items(result))
 
     unique_items: list[dict[str, Any]] = []
-    seen = set()
+    by_identity: dict[str, int] = {}
     for item in all_items:
         identity = str(
             item.get("final_url")
@@ -312,10 +313,17 @@ def _evaluate(
             or item.get("href")
             or json.dumps(item, ensure_ascii=False, sort_keys=True, default=str)
         ).strip().rstrip("/")
-        if not identity or identity in seen:
+        if not identity:
             continue
-        seen.add(identity)
-        unique_items.append(item)
+        existing_index = by_identity.get(identity)
+        if existing_index is None:
+            by_identity[identity] = len(unique_items)
+            unique_items.append(dict(item))
+            continue
+        existing = unique_items[existing_index]
+        for key, value in item.items():
+            if _meaningful(value):
+                existing[key] = value
 
     field_group_coverage: dict[str, float] = {}
     for aliases in case.required_field_groups:
@@ -427,6 +435,11 @@ def _compact_update(node: str, update: Any) -> dict[str, Any]:
                     "completed_pages": value.get("completed_pages") or [],
                     "active_page": value.get("active_page"),
                     "failed_region_refs": value.get("failed_region_refs") or [],
+                    "filter_applied": value.get("filter_applied"),
+                    "scroll_round": value.get("scroll_round"),
+                    "stagnant_rounds": value.get("stagnant_rounds"),
+                    "list_complete": value.get("list_complete"),
+                    "detail_complete": value.get("detail_complete"),
                 }
             compact[key] = _json_safe(value)
     return compact
@@ -492,6 +505,8 @@ def run_case(
     status = "max_resumes"
     next_input: Any = initial_state
     resume_count = 0
+    restart_count = 0
+    restart_checkpoint: dict[str, Any] | None = None
 
     try:
         for resume_count in range(max_resumes + 1):
@@ -508,6 +523,59 @@ def run_case(
             snapshot = app.get_state(config)
             next_nodes = tuple(getattr(snapshot, "next", ()) or ())
             values = getattr(snapshot, "values", {}) or {}
+            progress = values.get("dpcli_task_progress") or {}
+            completed_pages = progress.get("completed_pages") or []
+            if (
+                case.restart_after_pages > 0
+                and restart_count == 0
+                and len(completed_pages) >= case.restart_after_pages
+                and not values.get("is_complete")
+            ):
+                checkpoint_payload = _json_safe(
+                    {
+                        "dpcli_task_contract": values.get("dpcli_task_contract"),
+                        "dpcli_task_progress": progress,
+                    }
+                )
+                recovered_state = dict(values)
+                recovered_state.update(checkpoint_payload)
+                recovered_state.update(
+                    {
+                        "generated_action": None,
+                        "generated_code": None,
+                        "dpcli_result": None,
+                        "dpcli_snapshot": None,
+                        "dpcli_snapshot_view": None,
+                        "dpcli_snapshot_ref": None,
+                        "dpcli_agent_view": None,
+                        "dpcli_snapshot_index": None,
+                        "dpcli_structured_plan": None,
+                        "dpcli_target_result": None,
+                        "verification_result": None,
+                        "is_complete": False,
+                    }
+                )
+                config = {
+                    "configurable": {
+                        "thread_id": str(uuid.uuid4()),
+                        "browser": browser,
+                    },
+                    "recursion_limit": 50,
+                }
+                restart_count = 1
+                restart_checkpoint = {
+                    "completed_pages": list(completed_pages),
+                    "item_count": len(progress.get("items") or []),
+                    "active_page": progress.get("active_page"),
+                }
+                events.append(
+                    {
+                        "node": "__simulated_restart__",
+                        "restart_checkpoint": restart_checkpoint,
+                    }
+                )
+                next_input = recovered_state
+                continue
             if not next_nodes:
                 status = _terminal_status(values)
                 break
@@ -529,6 +597,9 @@ def run_case(
         "elapsed_seconds": round(elapsed, 3),
         "resume_count": resume_count,
         "event_count": len(events),
+        "restart_simulated": bool(restart_count),
+        "restart_count": restart_count,
+        "restart_checkpoint": restart_checkpoint,
         "events": events,
         "results": [
             {
