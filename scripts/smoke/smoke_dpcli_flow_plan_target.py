@@ -7,7 +7,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).parents[2]))
 
 SAMPLE_SNAPSHOT = {
     "ok": True, "session": "flow_test", "action": "snapshot",
@@ -112,7 +112,7 @@ def test_full_flow():
         store.save_compressed_index(sid, {"groups": compressed})
 
         view_gen = PlannerViewGenerator()
-        agent_view = view_gen.generate(SAMPLE_SNAPSHOT, index_data, compressed)
+        agent_view = view_gen.generate(SAMPLE_SNAPSHOT, compressed)
         store.save_planner_view(sid, agent_view)
         diagnostics = view_gen.generate_diagnostics(SAMPLE_SNAPSHOT, compressed)
 

@@ -4,6 +4,7 @@ import json
 import subprocess
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
+from urllib.parse import urlparse
 
 from config import (
     DPCLI_BATCH_TIMEOUT_SECONDS,
@@ -54,6 +55,14 @@ class DPCLIExecutor:
             args.extend(["--depth", str(depth)])
         args.extend(self._wait_args(wait_time))
         return self._run(*args)
+
+    def wait(self, seconds: float = 1.0) -> Dict[str, Any]:
+        """Wait through dp_cli and return refreshed page evidence."""
+        result = self.snapshot(mode="agent_summary", wait_time=max(0.0, float(seconds)))
+        if isinstance(result, dict):
+            result = dict(result)
+            result["action"] = "wait"
+        return result
 
     def find(
         self,
@@ -146,6 +155,9 @@ class DPCLIExecutor:
     def session_inspect(self, wait_time: Optional[float] = None) -> Dict[str, Any]:
         return self._run("session", "inspect", *self._wait_args(wait_time))
 
+    def session_close(self) -> Dict[str, Any]:
+        return self._run("session", "close")
+
     def batch_detail_extract(
         self,
         items: List[Dict[str, Any]],
@@ -154,7 +166,7 @@ class DPCLIExecutor:
         list_pages_extracted: Optional[int] = None,
         limit: Optional[int] = None,
         schema: Optional[Iterable[str]] = None,
-        extractor: str = "ai",
+        extractor: str = "legacy-js",
         navigation_mode: str = "click",
         fallback_mode: str = "direct",
         wait_time: Optional[float] = None,
@@ -166,6 +178,12 @@ class DPCLIExecutor:
         progress_file: Optional[str] = None,
         command_timeout: Optional[float] = None,
     ) -> Dict[str, Any]:
+        items = self._filter_detail_items(items)
+        if not items:
+            return self._invalid_action(
+                "batch-detail-extract requires at least one valid http(s) item URL.",
+                skill="batch-detail-extract",
+            )
         args = ["batch-detail-extract", "--items-json", json.dumps(items, ensure_ascii=False)]
         if source_url:
             args.extend(["--source-url", source_url])
@@ -199,6 +217,31 @@ class DPCLIExecutor:
             timeout=command_timeout if command_timeout is not None else self.batch_timeout_seconds,
         )
 
+    @staticmethod
+    def _filter_detail_items(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        filtered: List[Dict[str, Any]] = []
+        seen_urls = set()
+        for item in items or []:
+            if not isinstance(item, dict):
+                continue
+            url = str(
+                item.get("detail_url") or item.get("url") or item.get("href") or ""
+            ).strip()
+            if not url:
+                continue
+            try:
+                parsed = urlparse(url)
+            except Exception:
+                continue
+            if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                continue
+            normalized = url.rstrip("/")
+            if normalized in seen_urls:
+                continue
+            seen_urls.add(normalized)
+            filtered.append(item)
+        return filtered
+
     def execute_action(self, action: Dict[str, Any]) -> Dict[str, Any]:
         if not isinstance(action, dict):
             return self._invalid_action("Action must be a JSON object.")
@@ -223,6 +266,11 @@ class DPCLIExecutor:
                     depth=params.get("depth"),
                     wait_time=params.get("wait_time"),
                 )
+            if skill == "wait":
+                seconds = params.get("seconds")
+                if seconds is None and params.get("timeout_ms") is not None:
+                    seconds = float(params["timeout_ms"]) / 1000.0
+                return self.wait(float(seconds if seconds is not None else 1.0))
             if skill == "find":
                 return self.find(
                     text=params.get("text"),
@@ -269,6 +317,8 @@ class DPCLIExecutor:
                 return self.resolve_locator(str(params["ref"]), wait_time=params.get("wait_time"))
             if skill in {"session.inspect", "session_inspect"}:
                 return self.session_inspect(wait_time=params.get("wait_time"))
+            if skill in {"session.close", "session_close"}:
+                return self.session_close()
             if skill == "batch-detail-extract":
                 return self.batch_detail_extract(**params)
             if skill == "eval":
@@ -315,7 +365,8 @@ class DPCLIExecutor:
     def _run_raw(self, args: List[str], timeout: Optional[float] = None) -> Dict[str, Any]:
         import time as _time
         cmd = [self.python_executable, "-m", "dp_cli", *args]
-        if self.headless and "--headless" not in cmd:
+        accepts_headless = list(args[:2]) != ["session", "close"]
+        if self.headless and accepts_headless and "--headless" not in cmd:
             cmd.append("--headless")
         if "--session" not in cmd:
             cmd.extend(["--session", self.session])

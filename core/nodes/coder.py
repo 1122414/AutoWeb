@@ -20,6 +20,8 @@ from core.nodes._dpcli import (
     _dpcli_error,
     _dpcli_failure_goto,
     _dpcli_action_kind,
+    _compact_dpcli_result_for_log,
+    _compact_dpcli_snapshot,
     _dpcli_policy_action_from_structured_plan,
 )
 from prompts.coder_prompts import ACTION_CODE_GEN_PROMPT, CODER_TASK_WRAPPER
@@ -176,7 +178,15 @@ def _executor_dpcli_branch(state: AgentState, config: RunnableConfig) -> Command
     before_url = state.get("current_url", "")
     executor = DPCLIExecutor(session=session, headless=DPCLI_HEADLESS)
     result = executor.execute_action(action)
-    result_log = json.dumps(result, ensure_ascii=False, indent=2)
+    if str(action.get("skill") or "").lower() == "extract":
+        from skills.dpcli_result_enricher import enrich_extract_result
+
+        result = enrich_extract_result(state, action, result)
+    result_log = json.dumps(
+        _compact_dpcli_result_for_log(result),
+        ensure_ascii=False,
+        indent=2,
+    )
     current_url = _dpcli_result_url(result) or state.get("current_url", "")
     url_changed = bool(before_url and current_url and before_url != current_url)
     update: Dict[str, Any] = {
@@ -194,7 +204,7 @@ def _executor_dpcli_branch(state: AgentState, config: RunnableConfig) -> Command
         },
     }
     if result.get("action") == "snapshot" and result.get("ok"):
-        update["dpcli_snapshot"] = result
+        update["dpcli_snapshot"] = _compact_dpcli_snapshot(result)
 
     if result.get("ok"):
         action_kind = _dpcli_action_kind(action)

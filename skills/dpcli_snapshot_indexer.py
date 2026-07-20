@@ -46,11 +46,13 @@ class SnapshotIndexer:
 
         all_nodes_raw = list(interactables) + list(surface) + list(deep)
         self._ref_cache = {}
-        all_nodes: List[Dict[str, Any]] = []
+        nodes_without_ref: List[Dict[str, Any]] = []
         for n in all_nodes_raw:
+            if not isinstance(n, dict):
+                continue
             ref = (n or {}).get("ref")
             if not ref:
-                all_nodes.append(n)
+                nodes_without_ref.append(dict(n))
                 continue
             ref_str = str(ref)
             existing = self._ref_cache.get(ref_str)
@@ -58,8 +60,8 @@ class SnapshotIndexer:
                 merged = self._merge_node_info(existing, n)
                 self._ref_cache[ref_str] = merged
             else:
-                self._ref_cache[ref_str] = n
-                all_nodes.append(n)
+                self._ref_cache[ref_str] = dict(n)
+        all_nodes = nodes_without_ref + list(self._ref_cache.values())
 
         return {
             "snapshot_id": self._extract_snapshot_id(data),
@@ -84,10 +86,25 @@ class SnapshotIndexer:
 
         按 parent_ref 分组后，对每个组内的 siblings 做 structural hash 分组。
         """
-        by_parent: Dict[str, List[Dict[str, Any]]] = {}
+        deduplicated: Dict[str, Dict[str, Any]] = {}
+        nodes_without_ref: List[Dict[str, Any]] = []
         for n in nodes:
             if not isinstance(n, dict):
                 continue
+            ref = str(n.get("ref") or "")
+            if not ref:
+                nodes_without_ref.append(dict(n))
+                continue
+            existing = deduplicated.get(ref)
+            deduplicated[ref] = (
+                self._merge_node_info(existing, n)
+                if existing
+                else dict(n)
+            )
+
+        unique_nodes = nodes_without_ref + list(deduplicated.values())
+        by_parent: Dict[str, List[Dict[str, Any]]] = {}
+        for n in unique_nodes:
             parent = str(n.get("parent_ref") or "__root__")
             by_parent.setdefault(parent, []).append(n)
 
@@ -111,11 +128,11 @@ class SnapshotIndexer:
                     processed_refs.add(n.get("ref", ""))
 
         # 未被压缩的节点保留
-        uncompressed = [n for n in nodes if n.get("ref") not in processed_refs]
+        uncompressed = [n for n in unique_nodes if n.get("ref") not in processed_refs]
 
         logger.info(
             f"   🗜️  [Indexer] 压缩: {len(compressed_groups)} groups, "
-            f"{len(uncompressed)} uncompressed (total {len(nodes)} nodes)"
+            f"{len(uncompressed)} uncompressed (total {len(unique_nodes)} nodes)"
         )
         return compressed_groups
 
@@ -240,11 +257,31 @@ class SnapshotIndexer:
     def _merge_node_info(
         existing: Dict[str, Any], incoming: Dict[str, Any]
     ) -> Dict[str, Any]:
-        def _info_score(n: Dict[str, Any]) -> int:
-            fields = ("name", "text", "placeholder", "role", "tag",
-                      "input_type", "href", "aria_label")
-            return sum(1 for f in fields if n.get(f))
-        return incoming if _info_score(incoming) > _info_score(existing) else existing
+        merged = dict(existing)
+        for key, value in incoming.items():
+            if value in (None, "", [], {}):
+                continue
+            current = merged.get(key)
+            if isinstance(current, dict) and isinstance(value, dict):
+                merged[key] = {
+                    **current,
+                    **{
+                        nested_key: nested_value
+                        for nested_key, nested_value in value.items()
+                        if nested_value not in (None, "", [], {})
+                    },
+                }
+                continue
+            if current in (None, "", [], {}):
+                merged[key] = value
+
+        ref = str(merged.get("ref") or "")
+        if not merged.get("ref_type"):
+            if ref.startswith("e"):
+                merged["ref_type"] = "element"
+            elif ref.startswith("r"):
+                merged["ref_type"] = "container"
+        return merged
 
     def _group_by_structural_hash(
         self, siblings: List[Dict[str, Any]]

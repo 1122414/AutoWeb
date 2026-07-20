@@ -302,7 +302,7 @@ if __name__ == "__main__":
 
 import tests.unit.stubs  # noqa: F401, E402
 
-from core.nodes.verifier import _verify_dpcli_action_with_signals  # noqa: E402
+from core.nodes.verifier import _verify_dpcli_action_with_signals, verifier_node  # noqa: E402
 
 
 class TestDeterministicWithSignals(unittest.TestCase):
@@ -377,6 +377,60 @@ class TestDeterministicWithSignals(unittest.TestCase):
         result = _verify_dpcli_action_with_signals(state, "")
         self.assertIsNone(result)
 
+    def test_schema_keys_with_empty_values_are_not_success(self):
+        state = {
+            "generated_action": {"skill": "extract", "params": {"schema": ["title", "url"]}},
+            "dpcli_result": {"ok": True, "data": {"items": [
+                {"title": "", "url": ""},
+                {"title": None, "url": "javascript:void(0)"},
+            ]}},
+            "dpcli_structured_plan": {
+                "step_intent": "extract",
+                "action_payload": {"schema": ["title", "url"]},
+            },
+        }
+
+        result = _verify_dpcli_action_with_signals(state, "")
+
+        self.assertIsNotNone(result)
+        self.assertFalse(result["is_success"])
+        self.assertEqual(result["decision_source"], "data_quality")
+
+    def test_batch_detail_requires_verified_detail_rows(self):
+        state = {
+            "generated_action": {
+                "skill": "batch-detail-extract",
+                "params": {"schema": ["title", "description"]},
+            },
+            "dpcli_result": {"ok": True, "data": {"items": [
+                {
+                    "detail_ok": True,
+                    "final_url": "https://example.test/1",
+                    "detail_info": {"title": "One", "description": "Good"},
+                },
+                {
+                    "detail_ok": True,
+                    "final_url": "javascript:void(0)",
+                    "detail_info": {"title": "Wrong", "description": "Repeated list page"},
+                },
+                {
+                    "detail_ok": False,
+                    "final_url": "https://example.test/3",
+                    "detail_info": {},
+                },
+            ]}},
+            "dpcli_structured_plan": {
+                "step_intent": "batch-detail-extract",
+                "action_payload": {"schema": ["title", "description"]},
+            },
+        }
+
+        result = _verify_dpcli_action_with_signals(state, "")
+
+        self.assertIsNotNone(result)
+        self.assertFalse(result["is_success"])
+        self.assertEqual(result["decision_source"], "batch_detail_quality")
+
     def test_scroll_gives_tentative_success(self):
         state = {
             "generated_action": {"skill": "scroll", "params": {"direction": "down"}},
@@ -387,6 +441,7 @@ class TestDeterministicWithSignals(unittest.TestCase):
         result = _verify_dpcli_action_with_signals(state, "https://example.com")
         self.assertIsNotNone(result)
         self.assertTrue(result["is_success"])
+        self.assertEqual(result["decision_source"], "dpcli_page_passive")
         self.assertTrue(result["needs_llm"])
         self.assertAlmostEqual(result["confidence"], 0.8, delta=0.05)
 
@@ -399,3 +454,46 @@ class TestDeterministicWithSignals(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertTrue(result["is_success"])
         self.assertEqual(result["decision_source"], "dpcli_observation")
+
+    def test_dpcli_verifier_never_reads_the_other_browser_url(self):
+        class ExplodingBrowser:
+            @property
+            def latest_tab(self):
+                raise AssertionError("AutoWeb browser must not be read during dp_cli verification")
+
+        class ExplodingLLM:
+            def invoke(self, _messages):
+                raise AssertionError("deterministic dp_cli verification should not call the LLM")
+
+        state = {
+            "execution_mode": "dp_cli",
+            "current_url": "https://example.test/list",
+            "execution_log": "ok",
+            "user_task": "extract list items",
+            "plan": "extract the current list",
+            "generated_action": {
+                "skill": "extract",
+                "params": {"schema": ["title", "url"]},
+            },
+            "dpcli_result": {
+                "ok": True,
+                "data": {
+                    "items": [
+                        {"title": "One", "url": "https://example.test/1"},
+                    ]
+                },
+            },
+            "dpcli_structured_plan": {
+                "step_intent": "extract",
+                "action_payload": {"schema": ["title", "url"]},
+            },
+        }
+
+        command = verifier_node(
+            state,
+            {"configurable": {"browser": ExplodingBrowser()}},
+            ExplodingLLM(),
+        )
+
+        self.assertEqual(command.goto, "Observer")
+        self.assertEqual(command.update["current_url"], "https://example.test/list")

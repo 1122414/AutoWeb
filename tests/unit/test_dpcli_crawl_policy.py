@@ -16,6 +16,9 @@ EXTRACT_RESULT = {
             {"title": "One", "detail_url": "https://example.test/one"},
             {"title": "Two", "url": "https://example.test/two"},
             {"title": "No URL"},
+            {"title": "Script", "url": "javascript:"},
+            {"title": "Mail", "url": "mailto:hello@example.test"},
+            {"title": "Duplicate", "url": "https://example.test/two/"},
         ]
     },
     "error": None,
@@ -32,6 +35,7 @@ class DPCLICrawlPolicyTests(unittest.TestCase):
 
         self.assertEqual(len(items), 2)
         self.assertEqual(items[0]["title"], "One")
+        self.assertNotIn("javascript:", [item.get("url") for item in items])
 
     def test_should_run_detail_batch(self):
         self.assertTrue(should_run_detail_batch({
@@ -54,6 +58,7 @@ class DPCLICrawlPolicyTests(unittest.TestCase):
         self.assertEqual(action["skill"], "batch-detail-extract")
         self.assertEqual(len(action["params"]["items"]), 1)
         self.assertEqual(action["params"]["limit"], 1)
+        self.assertEqual(action["params"]["extractor"], "legacy-js")
         self.assertIn("output_file", action["params"])
         self.assertIn("progress_file", action["params"])
 

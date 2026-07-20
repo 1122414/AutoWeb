@@ -21,8 +21,48 @@ def error_handler_node(state: AgentState, config: RunnableConfig, llm) -> Comman
     """
     logger.info("\n🚑 [ErrorHandler] 检测到严重错误，正在尝试恢复...")
 
-    error_msg = state.get("error", "Unknown Error")
+    error_msg = str(state.get("error") or "Unknown Error").strip()
     reflections = state.get("reflections", [])
+    previous_error = str(state.get("_last_recovery_error") or "").strip()
+    previous_count = int(state.get("_error_recovery_count") or 0)
+    recovery_count = previous_count + 1 if error_msg == previous_error else 1
+    base_updates = {
+        "_error_recovery_count": recovery_count,
+        "_last_recovery_error": error_msg,
+        # 清除错误标志，以便重试或干净终止。
+        "error": None,
+    }
+
+    if recovery_count >= 3:
+        logger.info(
+            "   ❌ ErrHandler: 同一严重错误连续 3 次，停止无界恢复。"
+        )
+        verification = _build_verification_result(
+            is_success=False,
+            is_done=True,
+            summary=f"ErrorHandler 连续 3 次同类错误后终止: {error_msg}",
+            source="error_handler",
+            failure_scope="global",
+            failed_action=state.get("plan", ""),
+            evidence=error_msg,
+            fix_hint="页面或浏览器状态持续不可用；保留错误证据并停止重复快照",
+        )
+        return Command(
+            update={
+                **base_updates,
+                "messages": [
+                    AIMessage(
+                        content=(
+                            "【系统故障】同一严重错误连续出现 3 次，"
+                            "已停止自动恢复以避免无界循环。"
+                        )
+                    )
+                ],
+                "verification_result": verification,
+                "is_complete": True,
+            },
+            goto="__end__",
+        )
 
     # 构建回退策略
     prompt = ERROR_RECOVERY_PROMPT.format(
@@ -31,15 +71,14 @@ def error_handler_node(state: AgentState, config: RunnableConfig, llm) -> Comman
     )
 
     response = llm.invoke([HumanMessage(content=prompt)])
-    content = response.content
+    content = str(response.content or "")
 
     is_terminate = "Status: TERMINATE" in content
 
     plan = state.get("plan", "")
     updates = {
+        **base_updates,
         "messages": [AIMessage(content=f"【系统故障】正在恢复...\n{content}")],
-        # 清除错误标志，以便重试
-        "error": None,
     }
 
     if is_terminate:

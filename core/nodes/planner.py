@@ -16,6 +16,57 @@ from prompts.planner_prompts import PLANNER_START_PROMPT, PLANNER_STEP_PROMPT, P
 from skills.logger import logger
 
 
+def _dpcli_contract_planner_step(
+    state: AgentState,
+    loop_count: int,
+    verification: dict,
+) -> Command | None:
+    """Build a deterministic dp_cli step from the original task constraints."""
+    from skills.dpcli_task_contract import build_contract_plan, build_task_contract
+
+    contract = state.get("dpcli_task_contract") or build_task_contract(
+        state.get("user_task", "")
+    )
+    structured_plan, contract_updates = build_contract_plan(state, contract)
+    if not structured_plan:
+        return None
+
+    step_intent = str(structured_plan.get("step_intent") or "").lower()
+    plan_text = json.dumps(structured_plan, ensure_ascii=False, indent=2)
+    update_dict = {
+        **contract_updates,
+        "messages": [AIMessage(content=f"[dp_cli task contract]\n{plan_text}")],
+        "plan": plan_text,
+        "dpcli_structured_plan": structured_plan,
+        "execution_mode": "dp_cli",
+        "loop_count": loop_count + 1,
+        "is_complete": step_intent in {"finish", "fail"},
+    }
+    if step_intent == "fail":
+        payload = structured_plan.get("action_payload") or {}
+        item_count = int(payload.get("item_count") or 0)
+        required_count = int(payload.get("required_count") or 1)
+        update_dict["verification_result"] = {
+            "is_success": False,
+            "is_done": True,
+            "summary": (
+                "task contract exhausted available regions "
+                f"({item_count}/{required_count} items)"
+            ),
+            "source": "planner",
+            "failure_scope": "local",
+            "decision_source": "task_contract_exhausted",
+            "needs_llm": False,
+            "confidence": 1.0,
+        }
+        return Command(update=update_dict, goto="__end__")
+    if verification:
+        update_dict["verification_result"] = {}
+    if step_intent == "finish":
+        return Command(update=update_dict, goto="__end__")
+    return Command(update=update_dict, goto="Coder")
+
+
 def _dpcli_planner_step(
     state: AgentState,
     config: RunnableConfig,
@@ -164,6 +215,24 @@ def planner_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lite
     is_google_home = "google.com" in current_url and "/search" not in current_url
     is_initial_page = is_blank or is_google_home
 
+    from config import DPCLI_ENABLED
+    execution_mode = state.get("execution_mode")
+    is_dpcli_requested = (
+        execution_mode == "dp_cli"
+        or (DPCLI_ENABLED and execution_mode != "python_code")
+    )
+    if is_dpcli_requested:
+        contract_state = dict(state)
+        contract_state["current_url"] = current_url or state.get("current_url", "")
+        contract_command = _dpcli_contract_planner_step(
+            contract_state,
+            loop_count,
+            verification,
+        )
+        if contract_command is not None:
+            logger.info("   [Planner] using deterministic dp_cli task contract")
+            return contract_command
+
     # 0.1 初始启动（空白页/Google首页）
     if loop_count == 0 and is_initial_page:
         logger.info("   ⏩ [Planner] 初始启动，跳过 DOM 分析，直接生成导航计划。")
@@ -182,11 +251,9 @@ def planner_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lite
         )
 
     # 0.2 dp_cli 模式：Observer 已生成 dpcli_agent_view 时优先使用结构化 Planner
-    from config import DPCLI_ENABLED
     is_dpcli = (
-        DPCLI_ENABLED
+        is_dpcli_requested
         and state.get("dpcli_agent_view")
-        and state.get("execution_mode") != "python_code"
     )
     if is_dpcli:
         logger.info("   🧠 [Planner] dp_cli 模式，使用结构化规划 prompt")
@@ -249,6 +316,8 @@ def planner_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lite
                     "dpcli_result": None,
                     "dpcli_snapshot": None,
                     "dpcli_snapshot_view": None,
+                    "dpcli_task_contract": None,
+                    "dpcli_task_progress": None,
                     "dpcli_detail_batch_ran": False,
                     "execution_log": None,          # 清空执行日志
                     "verification_result": None,    # 清空验收结果

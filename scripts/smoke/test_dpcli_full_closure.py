@@ -11,7 +11,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).parents[2]))
 
 PASS = 0
 FAIL = 0
@@ -152,7 +152,7 @@ def test_p4_smoke_isolation():
 
     # Verify no langgraph/tiktoken imports in pure module
     import importlib.util
-    repo_root = Path(__file__).parent.parent
+    repo_root = Path(__file__).parents[2]
     spec = importlib.util.spec_from_file_location(
         "check_ts", repo_root / "skills" / "dpcli_target_selector.py")
     with open(repo_root / "skills" / "dpcli_target_selector.py", "r") as f:

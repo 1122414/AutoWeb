@@ -163,7 +163,12 @@ def print_step_output(event):
 
         if "execution_log" in updates and updates['execution_log']:
             log = updates['execution_log']
-            if "Error" in log or "Exception" in log:
+            dpcli_result = updates.get("dpcli_result")
+            if isinstance(dpcli_result, dict) and "ok" in dpcli_result:
+                execution_failed = not bool(dpcli_result.get("ok"))
+            else:
+                execution_failed = "Error" in log or "Exception" in log
+            if execution_failed:
                 logger.error(f"   ❌ 执行失败: {log[:200]}")
                 print(
                     f"   ❌ \033[1;31m执行失败\033[0m: {log[:200]}...")
@@ -348,10 +353,8 @@ def interactive_loop(app, browser_instance, llm, observer):
 
                 # === 处理 Executor 中断（代码执行前审批）===
                 if next_node == "Executor":
-                    forced_reasons = _detect_executor_forced_reasons(
-                        snapshot.values)
-                    needs_review = (active_mode == "review_all") or bool(
-                        forced_reasons)
+                    forced_reasons = _detect_executor_forced_reasons(snapshot.values)
+                    needs_review = (active_mode == "review_all") or bool(forced_reasons)
                     if not needs_review:
                         logger.info("   🔔 [HITL] Executor — HITL 已关闭且未触发强制审核点，自动继续")
                         print("   🔔 HITL 已关闭且未触发强制审核点，自动继续...")
@@ -693,12 +696,16 @@ def interactive_loop(app, browser_instance, llm, observer):
                 "dpcli_result": None,
                 "dpcli_snapshot": None,
                 "dpcli_snapshot_view": None,
+                "dpcli_task_contract": None,
+                "dpcli_task_progress": None,
                 "dpcli_detail_batch_ran": False,
                 "_action_source": None,
                 "_action_cache_hit_id": None,
                 "_failed_action_cache_ids": [],
                 "_dpcli_action_disabled": False,
                 "_failed_dom_cache_ids": [],
+                "_error_recovery_count": 0,
+                "_last_recovery_error": None,
             }
 
             try:

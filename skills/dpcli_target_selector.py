@@ -175,6 +175,13 @@ class TargetSelector:
     ) -> List[Dict[str, Any]]:
         candidates: List[Dict[str, Any]] = []
 
+        region_hint = constraints.get("region_hint")
+        if region_hint:
+            node = self._engine.get_ref(region_hint)
+            if node:
+                candidates.append(node)
+                return candidates
+
         roles = constraints.get("role") or []
         text_hints = (
             constraints.get("text_or_name") or

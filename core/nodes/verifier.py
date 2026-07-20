@@ -22,6 +22,113 @@ from prompts.verifier_prompts import VERIFIER_CHECK_PROMPT
 from skills.logger import logger
 
 
+def _contract_action_verification(state, skill: str):
+    """Validate one data result against the original user task contract."""
+    contract = state.get("dpcli_task_contract") or {}
+    if not contract or skill not in {"extract", "list-items", "batch-detail-extract"}:
+        return None
+
+    from skills.dpcli_task_contract import evaluate_contract_items, result_items
+
+    action = state.get("generated_action") or {}
+    params = action.get("params") or {}
+    expected_count = params.get("limit") or contract.get("per_page_limit") or 1
+    items = result_items(state.get("dpcli_result") or {})
+    evaluation = evaluate_contract_items(
+        contract,
+        items,
+        # A data region may legitimately contain only part of the requested
+        # page. Validate its schema here, then let cumulative progress decide
+        # whether the overall task is complete.
+        expected_count=1,
+    )
+    item_count = int(evaluation["item_count"])
+    requested_count = int(expected_count)
+    is_success = bool(evaluation["is_success"])
+    is_partial = is_success and item_count < requested_count
+    if is_partial:
+        summary = (
+            f"partial task-contract data "
+            f"({item_count}/{requested_count} items; cumulative progress)"
+        )
+    elif is_success:
+        summary = f"task-contract data valid ({item_count} items)"
+    else:
+        summary = evaluation["summary"]
+    return _build_verification_result(
+        is_success=is_success,
+        is_done=False,
+        summary=summary,
+        source="verifier",
+        failure_scope="local",
+        evidence=str(
+            {
+                "item_count": evaluation["item_count"],
+                "required_count": requested_count,
+                "field_coverage": evaluation["field_coverage"],
+            }
+        ),
+        fix_hint=(
+            "continue with task-contract progress"
+            if is_success
+            else "select another concrete data region matching the original task schema"
+        ),
+        decision_source="task_contract",
+    )
+
+
+def _merge_dpcli_contract_progress(state):
+    """Return progress, cumulative evaluation, and completion decision."""
+    contract = state.get("dpcli_task_contract") or {}
+    if not contract:
+        return None
+
+    from skills.dpcli_task_contract import (
+        evaluate_contract_items,
+        merge_contract_progress,
+        result_items,
+    )
+
+    progress = state.get("dpcli_task_progress") or {}
+    page_number = max(1, int(progress.get("active_page") or 1))
+    merged = merge_contract_progress(
+        progress,
+        result_items(state.get("dpcli_result") or {}),
+        page_number=page_number,
+    )
+    evaluation = evaluate_contract_items(
+        contract,
+        merged.get("items") or [],
+        expected_count=int(contract.get("min_items") or 1),
+    )
+    completed_pages = {
+        int(value)
+        for value in merged.get("completed_pages") or []
+        if str(value).isdigit()
+    }
+    target_pages = max(1, int(contract.get("target_pages") or 1))
+    is_done = bool(
+        evaluation["is_success"] and len(completed_pages) >= target_pages
+    )
+    return merged, evaluation, is_done
+
+
+def _mark_contract_region_failed(state, progress_override=None):
+    progress = dict(
+        progress_override
+        if progress_override is not None
+        else state.get("dpcli_task_progress") or {}
+    )
+    failed_refs = list(progress.get("failed_region_refs") or [])
+    plan = state.get("dpcli_structured_plan") or {}
+    payload = plan.get("action_payload") or {}
+    ref = payload.get("target_ref") or payload.get("group_ref") or payload.get("ref")
+    if ref and ref not in failed_refs:
+        failed_refs.append(str(ref))
+    progress["failed_region_refs"] = failed_refs
+    return progress
+
+
 def _check_target_confidence(state):
     """Check TargetSelector confidence for click/type/select actions.
 
@@ -39,6 +146,38 @@ def _check_target_confidence(state):
     ref_match = bool(target_ref and action_ref and target_ref == action_ref)
 
     return (confidence, ref_match, status)
+
+
+def _is_meaningful_value(value) -> bool:
+    if value is None or value is False:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, (list, tuple, set, dict)):
+        return bool(value)
+    return True
+
+
+def _valid_http_url(value) -> bool:
+    if not isinstance(value, str) or not value.strip():
+        return False
+    parsed = urllib.parse.urlparse(value.strip())
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
+def _schema_item_view(item, skill: str) -> dict:
+    if not isinstance(item, dict):
+        return {}
+    if skill != "batch-detail-extract":
+        return item
+    merged = {}
+    list_info = item.get("list_info")
+    detail_info = item.get("detail_info")
+    if isinstance(list_info, dict):
+        merged.update(list_info)
+    if isinstance(detail_info, dict):
+        merged.update(detail_info)
+    return merged
 
 
 def _verify_dpcli_action_with_signals(state, current_url):
@@ -79,7 +218,7 @@ def _verify_dpcli_action_with_signals(state, current_url):
     if kind == "data":
         data = result.get("data") or {}
         items = data.get("items") if isinstance(data, dict) else None
-        has_items = items and isinstance(items, list) and len(items) > 0
+        has_items = isinstance(items, list) and len(items) > 0
 
         # No items → deterministic fail
         if not has_items:
@@ -94,6 +233,43 @@ def _verify_dpcli_action_with_signals(state, current_url):
                 decision_source="dpcli_data",
             )
 
+        contract_result = _contract_action_verification(state, skill)
+        if contract_result is not None:
+            return contract_result
+
+        if skill == "batch-detail-extract":
+            verified_detail_items = [
+                item
+                for item in items
+                if isinstance(item, dict)
+                and item.get("detail_ok") is True
+                and _valid_http_url(item.get("final_url"))
+                and isinstance(item.get("detail_info"), dict)
+                and any(
+                    _is_meaningful_value(value)
+                    for value in item.get("detail_info", {}).values()
+                )
+            ]
+            success_ratio = len(verified_detail_items) / len(items)
+            if success_ratio < 0.8:
+                return _build_verification_result(
+                    is_success=False,
+                    is_done=False,
+                    summary=(
+                        f"batch detail quality failed: {len(verified_detail_items)}/"
+                        f"{len(items)} rows verified ({success_ratio:.0%})"
+                    ),
+                    source="verifier",
+                    failure_scope="local",
+                    evidence=_compact_result_evidence(result),
+                    fix_hint=(
+                        "filter invalid detail URLs and retry failed rows; require final_url "
+                        "and meaningful detail fields"
+                    ),
+                    decision_source="batch_detail_quality",
+                )
+            items = verified_detail_items
+
         # Get schema from action params or structured_plan
         structured_plan = state.get("dpcli_structured_plan") or {}
         schema = (
@@ -101,12 +277,30 @@ def _verify_dpcli_action_with_signals(state, current_url):
             or structured_plan.get("action_payload", {}).get("schema")
         )
 
+        usable_items = [
+            item
+            for item in items
+            if isinstance(item, dict)
+            and any(_is_meaningful_value(value) for value in item.values())
+        ]
+        if not usable_items:
+            return _build_verification_result(
+                is_success=False,
+                is_done=False,
+                summary=f"data action returned only empty item shells: {skill}",
+                source="verifier",
+                failure_scope="local",
+                evidence=_compact_result_evidence(result),
+                fix_hint="select a better data region and require non-empty field values",
+                decision_source="data_quality",
+            )
+
         # No schema defined → old behavior (items exist = success)
         if not schema or not isinstance(schema, list) or len(schema) == 0:
             return _build_verification_result(
                 is_success=True,
                 is_done=False,
-                summary=f"data action succeeded: {skill} ({len(items)} items)",
+                summary=f"data action succeeded: {skill} ({len(usable_items)} items)",
                 source="verifier",
                 failure_scope="local",
                 evidence=_compact_result_evidence(result),
@@ -119,27 +313,63 @@ def _verify_dpcli_action_with_signals(state, current_url):
             return _build_verification_result(
                 is_success=True,
                 is_done=False,
-                summary=f"data action succeeded: {skill} ({len(items)} items)",
+                summary=f"data action succeeded: {skill} ({len(usable_items)} items)",
                 source="verifier",
                 failure_scope="local",
                 evidence=_compact_result_evidence(result),
                 decision_source="dpcli_data",
             )
 
-        fields_present = 0
-        for field in schema_fields:
-            for item in items:
-                if isinstance(item, dict) and field in {str(k).strip().lower() for k in item}:
-                    fields_present += 1
-                    break
+        populated_cells = 0
+        total_cells = len(schema_fields) * len(usable_items)
+        extracted_urls = []
+        for item in usable_items:
+            view = _schema_item_view(item, skill)
+            normalized = {
+                str(key).strip().lower(): value
+                for key, value in view.items()
+            }
+            for field in schema_fields:
+                value = normalized.get(field)
+                if field in {"url", "href", "link", "detail_url", "final_url"}:
+                    if _valid_http_url(value):
+                        populated_cells += 1
+                        extracted_urls.append(str(value).rstrip("/"))
+                elif _is_meaningful_value(value):
+                    populated_cells += 1
 
-        coverage = fields_present / len(schema_fields)
+        coverage = populated_cells / total_cells if total_cells else 0.0
+        if coverage == 0:
+            return _build_verification_result(
+                is_success=False,
+                is_done=False,
+                summary=f"data action produced no valid schema values: {skill}",
+                source="verifier",
+                failure_scope="local",
+                evidence=_compact_result_evidence(result),
+                fix_hint="retry extraction with a specific data region and valid http(s) URLs",
+                decision_source="data_quality",
+            )
+
+        if len(extracted_urls) > 1:
+            unique_ratio = len(set(extracted_urls)) / len(extracted_urls)
+            if unique_ratio < 0.8:
+                return _build_verification_result(
+                    is_success=False,
+                    is_done=False,
+                    summary=f"data action returned duplicate URLs ({unique_ratio:.0%} unique): {skill}",
+                    source="verifier",
+                    failure_scope="local",
+                    evidence=_compact_result_evidence(result),
+                    fix_hint="deduplicate list items and reject repeated list-page URLs",
+                    decision_source="data_quality",
+                )
 
         if coverage >= VERIFIER_SCHEMA_COVERAGE_THRESHOLD:
             return _build_verification_result(
                 is_success=True,
                 is_done=False,
-                summary=f"data action succeeded: {skill} ({len(items)} items, schema coverage {coverage:.0%})",
+                summary=f"data action succeeded: {skill} ({len(usable_items)} items, value coverage {coverage:.0%})",
                 source="verifier",
                 failure_scope="local",
                 evidence=_compact_result_evidence(result),
@@ -163,6 +393,7 @@ def _verify_dpcli_action_with_signals(state, current_url):
         )
 
         step_intent = str(structured_plan.get("step_intent") or "").lower()
+        is_contract_action = structured_plan.get("_contract_action") is True
 
         def _url_matches(expected, after):
             """3-tier URL matching for navigation verification.
@@ -217,6 +448,16 @@ def _verify_dpcli_action_with_signals(state, current_url):
 
         # --- Click without expected URL: check URL change signal ---
         if skill == "click" and not expected_url:
+            if is_contract_action:
+                return _build_verification_result(
+                    is_success=True,
+                    is_done=False,
+                    summary="task-contract click succeeded",
+                    source="verifier",
+                    failure_scope="local",
+                    evidence=_compact_result_evidence(result),
+                    decision_source="task_contract",
+                )
             page_transition_keywords = [
                 "navigate", "open", "go to", "visit", "redirect",
                 "\u8fdb\u5165", "\u8df3\u8f6c", "\u6253\u5f00", "\u8bbf\u95ee",
@@ -246,10 +487,15 @@ def _verify_dpcli_action_with_signals(state, current_url):
                 source="verifier",
                 failure_scope="local",
                 evidence=_compact_result_evidence(result),
-                confidence=0.8,
-                needs_llm=True,
-                decision_source="dpcli_page_passive",
-                warnings=["scroll/wait cannot be deterministically verified"],
+                confidence=1.0 if is_contract_action else 0.8,
+                needs_llm=not is_contract_action,
+                decision_source=(
+                    "task_contract" if is_contract_action else "dpcli_page_passive"
+                ),
+                warnings=(
+                    [] if is_contract_action
+                    else ["scroll/wait cannot be deterministically verified"]
+                ),
             )
 
         # --- Type/Select: check target confidence ---
@@ -604,14 +850,17 @@ def verifier_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lit
     current_suggestions = state.get("locator_suggestions", [])
 
     # 获取最新标签页（处理新标签页打开的情况）
-    dpcli_current_url = ""
-    if state.get("execution_mode") == "dp_cli":
-        dpcli_current_url = _dpcli_result_url(state.get("dpcli_result") or {})
+    is_dpcli_execution = state.get("execution_mode") == "dp_cli"
+    dpcli_current_url = (
+        _dpcli_result_url(state.get("dpcli_result") or {})
+        if is_dpcli_execution
+        else ""
+    )
 
     browser = config["configurable"].get("browser")
-    if dpcli_current_url:
+    if is_dpcli_execution:
         tab = None
-        current_url = dpcli_current_url
+        current_url = dpcli_current_url or str(state.get("current_url") or "")
     elif browser:
         time.sleep(0.3)  # 短暂等待，让新标签页有时间创建
         tab = browser.latest_tab
@@ -726,6 +975,34 @@ def verifier_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lit
                 updates["_cache_hit_id"] = None
 
                 if action_kind == "data":
+                    contract_progress = _merge_dpcli_contract_progress(state)
+                    if contract_progress is not None:
+                        progress, cumulative, is_done = contract_progress
+                        updates["dpcli_task_progress"] = progress
+                        if is_done:
+                            done_result = dict(deterministic)
+                            done_result.update({
+                                "is_done": True,
+                                "summary": cumulative["summary"],
+                                "decision_source": "task_contract",
+                            })
+                            updates.update({
+                                "is_complete": True,
+                                "verification_result": done_result,
+                                "finished_steps": [cumulative["summary"]],
+                            })
+                            logger.info(
+                                "   [Verifier] task contract satisfied, ending graph"
+                            )
+                            return Command(update=updates, goto="__end__")
+                        # The region was valid but did not yet complete the
+                        # cumulative contract. Exclude it for the rest of this
+                        # page so Planner can collect another region instead
+                        # of extracting the same partial rows forever.
+                        updates["dpcli_task_progress"] = (
+                            _mark_contract_region_failed(state, progress)
+                        )
+
                     detail_cmd = _handle_dpcli_success_after_verification(
                         state=state,
                         updates=updates,
@@ -740,6 +1017,11 @@ def verifier_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lit
                 logger.info("   [Verifier] dp_cli action succeeded, continuing to Observer")
                 return Command(update=updates, goto="Observer")
 
+            if (
+                _dpcli_action_kind(state.get("generated_action") or {}) == "data"
+                and state.get("dpcli_task_contract")
+            ):
+                updates["dpcli_task_progress"] = _mark_contract_region_failed(state)
             updates["reflections"] = [f"dp_cli step failed: {summary}"]
             logger.info("   [Verifier] dp_cli action failed, returning to Observer")
             return Command(update=updates, goto="Observer")

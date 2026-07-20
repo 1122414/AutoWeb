@@ -15,7 +15,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).parents[2]))
 
 
 def test_full_pipeline():
@@ -24,13 +24,13 @@ def test_full_pipeline():
     import sys
     from pathlib import Path
 
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
     from skills.dpcli_snapshot_store import SnapshotStore
     from skills.dpcli_snapshot_indexer import SnapshotIndexer
     from skills.dpcli_planner_view import PlannerViewGenerator
     from skills.dpcli_snapshot_query import SnapshotQueryEngine
-    from core.nodes.target_selector import TargetSelector
+    from skills.dpcli_target_selector import TargetSelector
 
     SAMPLE_SNAPSHOT = {
         "ok": True, "session": "test", "action": "snapshot",
@@ -111,7 +111,7 @@ def test_full_pipeline():
         passed += 1
 
         view_gen = PlannerViewGenerator()
-        agent_view = view_gen.generate(SAMPLE_SNAPSHOT, index_data, compressed)
+        agent_view = view_gen.generate(SAMPLE_SNAPSHOT, compressed)
         store.save_planner_view(ref["snapshot_id"], agent_view)
         print(f"  ✓ 保存 planner view: {len(agent_view.get('capability_map', {}))} capabilities")
         passed += 1

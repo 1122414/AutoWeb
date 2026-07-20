@@ -131,7 +131,10 @@ class SnapshotQueryEngine:
 
         ref_type_filter = query.get("ref_type")
         if ref_type_filter:
-            candidates = [n for n in candidates if n.get("ref_type") == ref_type_filter]
+            if isinstance(ref_type_filter, list):
+                candidates = [n for n in candidates if n.get("ref_type") in ref_type_filter]
+            else:
+                candidates = [n for n in candidates if n.get("ref_type") == ref_type_filter]
 
         parent_filter = query.get("parent_ref")
         if parent_filter:

@@ -81,6 +81,8 @@ class AgentState(EnvState, TaskState):
     dpcli_observer_diagnostics: Optional[Dict[str, Any]] # Observer diagnostics
     dpcli_target_result: Optional[Dict[str, Any]]       # TargetSelector output
     dpcli_structured_plan: Optional[Dict[str, Any]]     # Planner structured intent
+    dpcli_task_contract: Optional[Dict[str, Any]]       # End-to-end user crawl constraints
+    dpcli_task_progress: Optional[Dict[str, Any]]       # Deduplicated rows/pages/failed refs
     dpcli_detail_batch_ran: bool
     execution_log: Optional[str]        # Executor 运行代码后的日志/返回值
 
@@ -92,6 +94,8 @@ class AgentState(EnvState, TaskState):
     # {before_url, after_url, url_changed, before_dom_hash, after_dom_hash,
     #  dom_changed, page_title, page_identity, viewport_scroll, action_skill, result_ok}
     dpcli_execution_evidence: Optional[Dict[str, Any]]
+    dpcli_action_kind: Optional[str]
+    dpcli_verification_contract: Optional[Dict[str, Any]]
 
     # Verifier 确定性判定策略配置（P3: 后续接口预留）
     # {min_target_confidence, schema_coverage_threshold,
@@ -122,6 +126,8 @@ class AgentState(EnvState, TaskState):
 
     # 连续失败保底
     _step_fail_count: int               # 连续步骤失败计数（成功时重置为 0）
+    _error_recovery_count: int          # 同一严重错误的连续恢复次数
+    _last_recovery_error: Optional[str] # 最近一次严重错误指纹
 
     # RAG Node 控制
     # RAG 任务类型: "store_kb" | "store_cache" | "qa" | None

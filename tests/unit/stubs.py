@@ -4,50 +4,57 @@ Import this module to install mock replacements for langchain, tiktoken,
 and other heavy dependencies that are not needed in pure unit tests.
 No side effects beyond sys.modules patching.
 """
+import importlib.util
 import sys
 import types
 
 sys.modules.setdefault("tiktoken", types.SimpleNamespace())
 
-messages_mod = types.ModuleType("langchain_core.messages")
+_graph_stack_available = (
+    importlib.util.find_spec("langchain_core") is not None
+    and importlib.util.find_spec("langgraph") is not None
+)
+
+if not _graph_stack_available:
+    messages_mod = types.ModuleType("langchain_core.messages")
 
 
-class _Message:
-    def __init__(self, content=""):
-        self.content = content
+    class _Message:
+        def __init__(self, content=""):
+            self.content = content
 
 
-messages_mod.HumanMessage = _Message
-messages_mod.AIMessage = _Message
-messages_mod.RemoveMessage = _Message
-messages_mod.BaseMessage = _Message
-sys.modules.setdefault("langchain_core", types.ModuleType("langchain_core"))
-sys.modules.setdefault("langchain_core.messages", messages_mod)
+    messages_mod.HumanMessage = _Message
+    messages_mod.AIMessage = _Message
+    messages_mod.RemoveMessage = _Message
+    messages_mod.BaseMessage = _Message
+    sys.modules.setdefault("langchain_core", types.ModuleType("langchain_core"))
+    sys.modules.setdefault("langchain_core.messages", messages_mod)
 
-runnables_mod = types.ModuleType("langchain_core.runnables")
-runnables_mod.RunnableConfig = dict
-sys.modules.setdefault("langchain_core.runnables", runnables_mod)
+    runnables_mod = types.ModuleType("langchain_core.runnables")
+    runnables_mod.RunnableConfig = dict
+    sys.modules.setdefault("langchain_core.runnables", runnables_mod)
 
-langgraph_types_mod = types.ModuleType("langgraph.types")
-
-
-class _Command:
-    def __class_getitem__(cls, item):
-        return cls
-
-    def __init__(self, update=None, goto=None):
-        self.update = update or {}
-        self.goto = goto
+    langgraph_types_mod = types.ModuleType("langgraph.types")
 
 
-langgraph_types_mod.Command = _Command
-sys.modules.setdefault("langgraph", types.ModuleType("langgraph"))
-sys.modules.setdefault("langgraph.types", langgraph_types_mod)
+    class _Command:
+        def __class_getitem__(cls, item):
+            return cls
 
-langgraph_message_mod = types.ModuleType("langgraph.graph.message")
-langgraph_message_mod.add_messages = lambda existing, update: (existing or []) + (update or [])
-sys.modules.setdefault("langgraph.graph", types.ModuleType("langgraph.graph"))
-sys.modules.setdefault("langgraph.graph.message", langgraph_message_mod)
+        def __init__(self, update=None, goto=None):
+            self.update = update or {}
+            self.goto = goto
+
+
+    langgraph_types_mod.Command = _Command
+    sys.modules.setdefault("langgraph", types.ModuleType("langgraph"))
+    sys.modules.setdefault("langgraph.types", langgraph_types_mod)
+
+    langgraph_message_mod = types.ModuleType("langgraph.graph.message")
+    langgraph_message_mod.add_messages = lambda existing, update: (existing or []) + (update or [])
+    sys.modules.setdefault("langgraph.graph", types.ModuleType("langgraph.graph"))
+    sys.modules.setdefault("langgraph.graph.message", langgraph_message_mod)
 
 actor_mod = types.ModuleType("skills.actor")
 actor_mod.BrowserActor = object
@@ -60,6 +67,8 @@ logger_mod.logger = types.SimpleNamespace(
     debug=lambda *args, **kwargs: None,
     error=lambda *args, **kwargs: None,
 )
+logger_mod.trace_log = lambda *args, **kwargs: None
+logger_mod.save_dpcli_code_log = lambda *args, **kwargs: None
 sys.modules.setdefault("skills.logger", logger_mod)
 
 coder_prompts_mod = types.ModuleType("prompts.coder_prompts")

@@ -133,6 +133,40 @@ class DPCLIExecutorNodeTests(unittest.TestCase):
         evidence = command.update["dpcli_execution_evidence"]
         self.assertFalse(evidence["result_ok"])
 
+    def test_large_batch_result_is_compact_in_messages_but_full_in_state(self):
+        state = {
+            "generated_action": {"skill": "batch-detail-extract", "params": {}},
+            "dpcli_session": "unit",
+            "current_url": "https://example.test/list",
+        }
+        items = [
+            {
+                "title": f"Item {index}",
+                "url": f"https://example.test/{index}",
+                "final_url": f"https://example.test/{index}",
+                "detail_ok": True,
+                "detail_info": {"description": "x" * 1000},
+            }
+            for index in range(100)
+        ]
+        result_payload = {
+            "ok": True,
+            "session": "unit",
+            "action": "batch-detail-extract",
+            "data": {
+                "page": {"url": "https://example.test/99"},
+                "items": items,
+            },
+        }
+        with patch("skills.dpcli_executor.DPCLIExecutor") as executor_cls:
+            executor_cls.return_value.execute_action.return_value = result_payload
+            command = _executor_dpcli_branch(state, {"configurable": {}})
+
+        self.assertIs(command.update["dpcli_result"], result_payload)
+        self.assertLess(len(command.update["execution_log"]), 3000)
+        self.assertIn('"items_omitted": 97', command.update["execution_log"])
+        self.assertNotIn("x" * 100, command.update["execution_log"])
+
 
 if __name__ == "__main__":
     unittest.main()

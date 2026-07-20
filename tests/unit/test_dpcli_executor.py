@@ -84,11 +84,90 @@ class DPCLIExecutorTests(unittest.TestCase):
         self.assertIn("--ref", args)
         self.assertIn("--text", args)
 
+    @patch("skills.dpcli_executor.subprocess.run")
+    def test_execute_action_wait_uses_snapshot_wait_and_preserves_wait_action(self, run):
+        payload = {
+            "ok": True,
+            "session": "unit",
+            "action": "snapshot",
+            "data": {"page": {"url": "https://example.test"}},
+            "error": None,
+        }
+        run.return_value = Mock(returncode=0, stdout=json.dumps(payload), stderr="")
+
+        result = self.make_executor().execute_action(
+            {"skill": "wait", "params": {"seconds": 1.25}}
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["action"], "wait")
+        args = run.call_args.args[0]
+        self.assertIn("snapshot", args)
+        self.assertEqual(args[args.index("--wait-time") + 1], "1.25")
+
     def test_execute_action_rejects_unknown_skill(self):
         result = self.make_executor().execute_action({"skill": "unknown", "params": {}})
 
         self.assertFalse(result["ok"])
         self.assertEqual(result["error"]["code"], "invalid_action")
+
+    @patch("skills.dpcli_executor.subprocess.run")
+    def test_batch_detail_filters_invalid_and_duplicate_urls(self, run):
+        payload = {
+            "ok": True,
+            "session": "unit",
+            "action": "batch-detail-extract",
+            "data": {"items": []},
+            "error": None,
+        }
+        run.return_value = Mock(returncode=0, stdout=json.dumps(payload), stderr="")
+
+        result = self.make_executor().batch_detail_extract(
+            items=[
+                {"title": "A", "url": "https://example.test/book/1/"},
+                {"title": "Script", "url": "javascript:"},
+                {"title": "Mail", "url": "mailto:hello@example.test"},
+                {"title": "Duplicate", "url": "https://example.test/book/1"},
+                {"title": "B", "href": "https://example.test/book/2"},
+            ]
+        )
+
+        self.assertTrue(result["ok"])
+        args = run.call_args.args[0]
+        self.assertEqual(args[args.index("--extractor") + 1], "legacy-js")
+        items_json = args[args.index("--items-json") + 1]
+        items = json.loads(items_json)
+        self.assertEqual(len(items), 2)
+        self.assertEqual([item.get("title") for item in items], ["A", "B"])
+
+    def test_batch_detail_rejects_when_no_valid_urls_remain(self):
+        result = self.make_executor().batch_detail_extract(
+            items=[
+                {"title": "Script", "url": "javascript:"},
+                {"title": "Empty", "url": ""},
+            ]
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"]["code"], "invalid_action")
+
+    @patch("skills.dpcli_executor.subprocess.run")
+    def test_session_close_dispatches_without_headless_flag(self, run):
+        payload = {
+            "ok": True,
+            "session": "unit",
+            "action": "session.close",
+            "data": {"closed": True},
+            "error": None,
+        }
+        run.return_value = Mock(returncode=0, stdout=json.dumps(payload), stderr="")
+
+        result = self.make_executor().session_close()
+
+        self.assertTrue(result["ok"])
+        args = run.call_args.args[0]
+        self.assertEqual(args[:5], ["python", "-m", "dp_cli", "session", "close"])
+        self.assertNotIn("--headless", args)
 
 
 if __name__ == "__main__":

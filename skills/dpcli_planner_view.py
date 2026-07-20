@@ -49,12 +49,11 @@ class PlannerViewGenerator:
     def generate(
         self,
         snapshot: Dict[str, Any],
-        index: Optional[Dict[str, Any]] = None,
         compressed_groups: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         """生成 dpcli_agent_view"""
         data = snapshot.get("data") or {}
-        idx = index or data.get("index") or {}
+        idx = data.get("index") or {}
 
         self._interactables = list(idx.get("interactable_elements") or [])
         self._surface_nodes = list(idx.get("surface_index") or [])
@@ -65,7 +64,9 @@ class PlannerViewGenerator:
         page = data.get("page") or {}
         identity = data.get("page_identity") or {}
 
-        all_nodes = self._interactables + self._surface_nodes + self._deep_nodes
+        all_nodes = self._dedupe_nodes(
+            self._interactables + self._surface_nodes + self._deep_nodes
+        )
 
         capability_map = self._build_capability_map(all_nodes, compressed_groups or [])
         top_level_groups = self._build_top_level_groups(all_nodes)
@@ -101,9 +102,11 @@ class PlannerViewGenerator:
         data = raw_snapshot.get("data") or {}
         idx = data.get("index") or {}
         stats = idx.get("stats") or {}
-        all_nodes = (idx.get("interactable_elements") or []) + \
-                    (idx.get("surface_index") or []) + \
-                    (idx.get("deep_index") or [])
+        all_nodes = self._dedupe_nodes(
+            (idx.get("interactable_elements") or [])
+            + (idx.get("surface_index") or [])
+            + (idx.get("deep_index") or [])
+        )
 
         data_regions = idx.get("data_regions") or []
         groups = compressed_groups or []
@@ -282,10 +285,33 @@ class PlannerViewGenerator:
                 "item_count": r.get("item_count", 0),
                 "name": r.get("name", ""),
                 "tag": r.get("tag", ""),
+                "source_score": r.get("score", 0),
+                "why": r.get("why", ""),
                 "samples": r.get("sample_items", [])[:3],
                 "available_actions": self._region_actions(r),
             })
         return formatted
+
+    @staticmethod
+    def _dedupe_nodes(nodes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        from skills.dpcli_snapshot_indexer import SnapshotIndexer
+
+        merged_by_ref: Dict[str, Dict[str, Any]] = {}
+        nodes_without_ref: List[Dict[str, Any]] = []
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+            ref = str(node.get("ref") or "")
+            if not ref:
+                nodes_without_ref.append(dict(node))
+                continue
+            existing = merged_by_ref.get(ref)
+            merged_by_ref[ref] = (
+                SnapshotIndexer._merge_node_info(existing, node)
+                if existing
+                else dict(node)
+            )
+        return nodes_without_ref + list(merged_by_ref.values())
 
     @staticmethod
     def _region_actions(region: Dict[str, Any]) -> List[str]:

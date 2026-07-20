@@ -24,7 +24,41 @@ DETAIL_GOAL_TOKENS = (
 
 
 def goal_requests_detail_batch(goal: str) -> bool:
+    from skills.dpcli_task_contract import build_task_contract
+
     text = str(goal or "").lower()
+    if build_task_contract(text).get("detail_required"):
+        return True
+    negative_tokens = (
+        "不要进入详情",
+        "不进入详情",
+        "无需进入详情",
+        "只提取详情链接",
+        "仅提取详情链接",
+        "do not open detail",
+        "without opening detail",
+    )
+    if any(token in text for token in negative_tokens):
+        return False
+    link_only = any(
+        token in text
+        for token in ("详情链接", "详情 url", "detail link", "detail url")
+    )
+    detail_content = any(
+        token in text
+        for token in (
+            "进入详情",
+            "打开详情",
+            "点进去",
+            "简介",
+            "描述",
+            "detail page",
+            "description",
+            "summary",
+        )
+    )
+    if link_only and not detail_content:
+        return False
     return any(token in text for token in DETAIL_GOAL_TOKENS)
 
 
@@ -45,12 +79,36 @@ def _item_url(item: Dict[str, Any]) -> str:
     return str(value or "").strip()
 
 
+def _is_valid_detail_url(url: str) -> bool:
+    if not url:
+        return False
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return False
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
 def detail_candidate_items(result: Dict[str, Any]) -> List[Dict[str, Any]]:
-    return [item for item in extract_items_from_result(result) if _item_url(item)]
+    candidates: List[Dict[str, Any]] = []
+    seen_urls = set()
+    for item in extract_items_from_result(result):
+        url = _item_url(item)
+        if not _is_valid_detail_url(url):
+            continue
+        normalized = url.rstrip("/")
+        if normalized in seen_urls:
+            continue
+        seen_urls.add(normalized)
+        candidates.append(item)
+    return candidates
 
 
 def should_run_detail_batch(state: Dict[str, Any]) -> bool:
     if state.get("dpcli_detail_batch_ran"):
+        return False
+    contract = state.get("dpcli_task_contract")
+    if isinstance(contract, dict) and not contract.get("detail_required"):
         return False
     if not goal_requests_detail_batch(state.get("user_task", "")):
         return False
@@ -83,7 +141,7 @@ def build_detail_batch_action(state: Dict[str, Any], max_items: int = 100) -> Di
             "items": items,
             "source_url": source_url,
             "limit": len(items),
-            "extractor": "auto",
+            "extractor": "legacy-js",
             "navigation_mode": "direct",
             "fallback_mode": "direct",
             "wait_time": 0.5,
