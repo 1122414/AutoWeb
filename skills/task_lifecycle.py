@@ -18,7 +18,7 @@ from skills.dpcli_task_contract import (
 )
 
 
-LIFECYCLE_VERSION = 3
+LIFECYCLE_VERSION = 4
 
 
 def _contains_text(item: Mapping[str, Any], needle: str) -> bool:
@@ -119,6 +119,13 @@ class TaskLifecycle:
         if output["required"]:
             phases.append("export")
         phases.append("complete")
+        collection_mode = str(normalized.get("collection_mode") or "single_page")
+        target_pages = max(1, int(normalized.get("target_pages") or 1))
+        required_scroll_rounds = (
+            max(1, int(normalized.get("required_scroll_rounds") or 0))
+            if collection_mode == "infinite_scroll"
+            else 0
+        )
         normalized.update(
             {
                 "version": self.version,
@@ -128,7 +135,7 @@ class TaskLifecycle:
                 "stop_conditions": {
                     "min_items": int(normalized.get("min_items") or 1),
                     "max_items": int(normalized.get("max_items") or 1),
-                    "target_pages": int(normalized.get("target_pages") or 1),
+                "target_pages": target_pages,
                     "max_scroll_rounds": int(
                         normalized.get("max_scroll_rounds") or 0
                     ),
@@ -140,9 +147,59 @@ class TaskLifecycle:
                 },
                 "dedupe_by": "url",
                 "output": output,
+                # A Task Contract is not satisfied merely because a matching
+                # row happened to be visible. These obligations preserve the
+                # user-requested navigation semantics in durable progress.
+                "execution_obligations": {
+                    "open_target": False,
+                    "filters": len(filters),
+                    "pagination_pages": target_pages,
+                    "scroll_rounds": required_scroll_rounds,
+                    "details": bool(normalized.get("detail_required")),
+                },
             }
         )
         return normalized
+
+    @staticmethod
+    def execution_status(
+        contract: Mapping[str, Any], progress: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Evaluate whether requested navigation work has verified evidence."""
+        obligations = dict(contract.get("execution_obligations") or {})
+        applied_filters = {
+            int(value)
+            for value in progress.get("applied_filter_indices") or []
+            if str(value).isdigit()
+        }
+        completed_pages = {
+            int(value)
+            for value in progress.get("completed_pages") or []
+            if str(value).isdigit()
+        }
+        required_filters = max(0, int(obligations.get("filters") or 0))
+        required_pages = max(1, int(obligations.get("pagination_pages") or 1))
+        required_scrolls = max(0, int(obligations.get("scroll_rounds") or 0))
+        checks = {
+            "open_target": (
+                not bool(obligations.get("open_target"))
+                or bool(progress.get("opened_target"))
+            ),
+            "filters": len(applied_filters) >= required_filters,
+            "pagination": len(completed_pages) >= required_pages,
+            "scroll": int(progress.get("scroll_round") or 0) >= required_scrolls,
+            "details": (
+                not bool(obligations.get("details"))
+                or bool(progress.get("detail_complete"))
+            ),
+        }
+        unmet = [name for name, satisfied in checks.items() if not satisfied]
+        return {
+            "is_satisfied": not unmet,
+            "checks": checks,
+            "unmet": unmet,
+            "required_scroll_rounds": required_scrolls,
+        }
 
     def decide(
         self,
@@ -323,6 +380,7 @@ class TaskLifecycle:
                 "summary": f"conditional stop matched: {until_text}",
             }
             pages_done = True
+        execution = self.execution_status(contract, merged)
         list_complete = bool(evaluation["is_success"] and pages_done)
         if is_list_action:
             merged["list_complete"] = list_complete
@@ -340,15 +398,18 @@ class TaskLifecycle:
                 evaluation["is_success"] and pages_done
             )
             merged["active_phase"] = "complete"
+        execution = self.execution_status(contract, merged)
         is_done = bool(
             evaluation["is_success"]
             and pages_done
+            and execution["is_satisfied"]
             and (
                 condition_met
                 or not contract.get("detail_required")
                 or skill == "batch-detail-extract"
             )
         )
+        evaluation = {**evaluation, "execution_obligations": execution}
         return merged, evaluation, is_done
 
     def advance_verified_page(self, state: Mapping[str, Any]) -> dict[str, Any]:
@@ -356,7 +417,10 @@ class TaskLifecycle:
         plan = state.get("dpcli_structured_plan") or {}
         payload = plan.get("action_payload") or {}
         intent = str(plan.get("step_intent") or "").lower()
-        if intent == "click" and payload.get("page_number") is not None:
+        if intent == "open":
+            progress["opened_target"] = True
+            progress["failed_region_refs"] = []
+        elif intent == "click" and payload.get("page_number") is not None:
             progress["active_page"] = max(1, int(payload["page_number"]))
             progress["failed_region_refs"] = []
         elif intent == "type" and payload.get("filter_stage") == "applied":

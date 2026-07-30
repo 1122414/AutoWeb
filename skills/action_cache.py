@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import copy
 import json
+import os
+import tempfile
+import threading
 import time
 import uuid
 from dataclasses import dataclass
@@ -22,6 +25,7 @@ class ActionCacheHit:
     user_task: str
     url_pattern: str
     created_at: str
+    fingerprint_version: str = ""
 
 
 def _domain(url: str) -> str:
@@ -39,6 +43,7 @@ def _tokens(text: str) -> set[str]:
 class ActionCacheManager:
     def __init__(self, store_path: str = ACTION_CACHE_STORE_PATH) -> None:
         self.store_path = Path(store_path)
+        self._lock = threading.RLock()
 
     def search(
         self,
@@ -54,10 +59,16 @@ class ActionCacheManager:
         query_tokens = _tokens(f"{user_task} {goal} {query_signature}")
         query_domain = _domain(url)
         hits: List[ActionCacheHit] = []
-        records = self._load()
+        with self._lock:
+            records = self._load()
         logger.debug(f"   🔍 [ActionCache] 检索中: domain={query_domain}, records={len(records)}")
-        for record in self._load():
+        for record in records:
             if query_domain and record.get("domain_key") and record.get("domain_key") != query_domain:
+                continue
+            verification = record.get("verification_evidence")
+            if isinstance(verification, dict) and not verification.get("is_success"):
+                continue
+            if int(record.get("failure_count") or 0) >= 2:
                 continue
             record_tokens = _tokens(
                 f"{record.get('user_task', '')} {record.get('goal', '')} {record.get('snapshot_signature', '')}"
@@ -83,6 +94,7 @@ class ActionCacheManager:
                 user_task=str(record.get("user_task") or ""),
                 url_pattern=str(record.get("url_pattern") or ""),
                 created_at=str(record.get("created_at") or ""),
+                fingerprint_version=str(record.get("fingerprint_version") or ""),
             ))
         hits.sort(key=lambda item: item.score, reverse=True)
         return hits[:top_k]
@@ -96,44 +108,51 @@ class ActionCacheManager:
         action: Dict[str, Any],
         snapshot_view: Optional[Dict[str, Any]] = None,
         result_summary: str = "",
+        verification_evidence: Optional[Dict[str, Any]] = None,
     ) -> str:
         trace_log(f"ActionCache save: url={url[:60]}, task_type={(action or {}).get('skill', '')}")
-        records = self._load()
-        cache_id = f"action_{uuid.uuid4().hex[:12]}"
-        records.append({
-            "cache_id": cache_id,
-            "user_task": user_task,
-            "goal": goal,
-            "url_pattern": url,
-            "domain_key": _domain(url),
-            "snapshot_signature": self._snapshot_signature(snapshot_view),
-            "task_type": (action or {}).get("skill", ""),
-            "action_json": action,
-            "action_target": self._action_target_descriptor(
-                snapshot_view,
-                action,
-            ),
-            "result_summary": result_summary,
-            "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-            "success_count": 1,
-            "failure_count": 0,
-        })
-        self._write(records)
+        with self._lock:
+            records = self._load()
+            cache_id = f"action_{uuid.uuid4().hex[:12]}"
+            records.append({
+                "cache_id": cache_id,
+                "user_task": user_task,
+                "goal": goal,
+                "url_pattern": url,
+                "domain_key": _domain(url),
+                "snapshot_signature": self._snapshot_signature(snapshot_view),
+                "fingerprint_version": "action-v2",
+                "task_type": (action or {}).get("skill", ""),
+                "action_json": action,
+                "action_target": self._action_target_descriptor(
+                    snapshot_view,
+                    action,
+                ),
+                "result_summary": result_summary,
+                "verification_evidence": dict(
+                    verification_evidence or {"is_success": True}
+                ),
+                "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                "success_count": 1,
+                "failure_count": 0,
+            })
+            self._write(records)
         logger.info(f"   ✅ [ActionCache] 已保存: id={cache_id}, task_type={(action or {}).get('skill', '')}")
         return cache_id
 
     def record_failure(self, cache_id: str, reason: str = "") -> None:
         trace_log(f"ActionCache record_failure: id={cache_id}, reason={reason}")
-        records = self._load()
-        changed = False
-        for record in records:
-            if record.get("cache_id") == cache_id:
-                record["failure_count"] = int(record.get("failure_count") or 0) + 1
-                record["last_failure_reason"] = reason
-                changed = True
-                break
-        if changed:
-            self._write(records)
+        with self._lock:
+            records = self._load()
+            changed = False
+            for record in records:
+                if record.get("cache_id") == cache_id:
+                    record["failure_count"] = int(record.get("failure_count") or 0) + 1
+                    record["last_failure_reason"] = reason
+                    changed = True
+                    break
+            if changed:
+                self._write(records)
 
     def _load(self) -> List[Dict[str, Any]]:
         if not self.store_path.exists():
@@ -146,10 +165,20 @@ class ActionCacheManager:
 
     def _write(self, records: List[Dict[str, Any]]) -> None:
         self.store_path.parent.mkdir(parents=True, exist_ok=True)
-        self.store_path.write_text(
-            json.dumps(records, ensure_ascii=False, indent=2),
-            encoding="utf-8",
+        fd, temporary_path = tempfile.mkstemp(
+            prefix=f".{self.store_path.name}.",
+            suffix=".tmp",
+            dir=str(self.store_path.parent),
         )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(records, handle, ensure_ascii=False, indent=2)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary_path, self.store_path)
+        finally:
+            if os.path.exists(temporary_path):
+                os.unlink(temporary_path)
         logger.debug(f"   💾 [ActionCache] 写入 {len(records)} 条记录到 {self.store_path}")
 
     def _snapshot_signature(self, snapshot_view: Optional[Dict[str, Any]]) -> str:

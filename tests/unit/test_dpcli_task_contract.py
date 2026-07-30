@@ -78,6 +78,7 @@ class TaskContractParsingTests(unittest.TestCase):
 
         self.assertEqual(contract["collection_mode"], "infinite_scroll")
         self.assertEqual(contract["max_scroll_rounds"], 4)
+        self.assertEqual(contract["required_scroll_rounds"], 1)
         self.assertEqual(contract["min_items"], 20)
         self.assertEqual(contract["target_pages"], 1)
 
@@ -543,7 +544,8 @@ class TaskContractPlanningTests(unittest.TestCase):
                         "direction": "down",
                         "amount": 900,
                         "to": "bottom",
-                        "wait_time": 1.0,
+                        "ready_condition": "network-idle",
+                        "ready_timeout": 10.0,
                     },
                     "_contract_action": True,
                 }
@@ -564,6 +566,8 @@ class TaskContractPlanningTests(unittest.TestCase):
         )
         self.assertEqual(scroll_action["skill"], "scroll")
         self.assertEqual(scroll_action["params"]["to"], "bottom")
+        self.assertEqual(scroll_action["params"]["ready_condition"], "network-idle")
+        self.assertEqual(scroll_action["params"]["ready_timeout"], 10.0)
 
     def test_finish_plan_is_deterministic_when_contract_is_satisfied(self):
         contract = build_task_contract(
@@ -964,6 +968,30 @@ class TaskContractVerificationTests(unittest.TestCase):
         self.assertFalse(result.get("needs_llm", False))
         self.assertEqual(result["decision_source"], "task_contract")
 
+    def test_contract_scroll_requires_a_real_scroll_metric_change(self):
+        result = _verify_dpcli_action_with_signals(
+            {
+                "generated_action": {"skill": "scroll", "params": {"to": "bottom"}},
+                "dpcli_result": {
+                    "ok": True,
+                    "data": {
+                        "before": {"x": 0, "y": 0},
+                        "after": {"x": 0, "y": 0, "at_bottom": False},
+                    },
+                },
+                "dpcli_structured_plan": {
+                    "step_intent": "scroll",
+                    "action_payload": {"round": 1},
+                    "_contract_action": True,
+                },
+            },
+            "https://example.test",
+        )
+
+        self.assertIsNotNone(result)
+        self.assertFalse(result["is_success"])
+        self.assertEqual(result["decision_source"], "scroll_no_effect")
+
     def test_wrong_navigation_rows_fail_task_schema_even_if_action_schema_passes(self):
         contract = build_task_contract(
             "从 https://example.test 提取25行球队名称、年份、胜场和负场。"
@@ -981,6 +1009,20 @@ class TaskContractVerificationTests(unittest.TestCase):
         self.assertFalse(result["is_success"])
         self.assertEqual(result["field_coverage"]["year"], 0.0)
         self.assertIn("required field coverage", result["summary"])
+
+    def test_contract_rejects_malformed_values_even_when_fields_are_populated(self):
+        result = evaluate_contract_items(
+            {"schema": ["title", "url"], "min_items": 2},
+            [
+                {"title": "One", "url": "javascript:alert(1)"},
+                {"title": "Two", "url": "not-a-url"},
+            ],
+        )
+
+        self.assertFalse(result["is_success"])
+        self.assertEqual(result["field_coverage"]["url"], 1.0)
+        self.assertEqual(result["field_validity"]["url"], 0.0)
+        self.assertIn("invalid required field values", result["summary"])
 
     def test_progress_deduplicates_and_completes_across_pages(self):
         contract = build_task_contract(

@@ -140,6 +140,17 @@ DPCLI_OBSERVER_FALLBACK_TO_DOM=True
 ACTION_CACHE_ENABLED=False
 ACTION_CACHE_THRESHOLD=0.75
 ACTION_CACHE_STORE_PATH=./output/action_cache.json
+
+# --- Public structured-content fallback (SessionPage JSON-LD only) ---
+SESSION_STRUCTURED_FALLBACK_ENABLED=True
+
+# --- Site policy: robots, shared budget, and 429 cooldown ---
+SITE_POLICY_ENABLED=True
+SITE_POLICY_MIN_INTERVAL_SECONDS=0.5
+SITE_POLICY_ACCESS_LEDGER_PATH=./output/state/site_access_policy.sqlite3
+SITE_POLICY_MAX_REQUESTS_PER_DOMAIN=240
+SITE_POLICY_REQUEST_WINDOW_SECONDS=3600
+SITE_POLICY_COOLDOWN_SECONDS=300
 ```
 
 建议按阶段开启：
@@ -233,6 +244,11 @@ ActionCache 是本次更新新增的轻量动作缓存。它面向 dp_cli 模式
 | `ACTION_CACHE_ENABLED` | `False` | 是否启用 dp_cli ActionCache |
 | `ACTION_CACHE_THRESHOLD` | `0.75` | ActionCache 相似度阈值 |
 | `ACTION_CACHE_STORE_PATH` | `./output/action_cache.json` | ActionCache JSON 存储路径 |
+| `SESSION_STRUCTURED_FALLBACK_ENABLED` | `True` | 浏览器抽取不满足契约时，是否允许使用 Site Policy 约束的公开 JSON-LD 回退 |
+| `SITE_POLICY_ACCESS_LEDGER_PATH` | `./output/state/site_access_policy.sqlite3` | 跨 Task Run 的域名访问预算与冷却账本 |
+| `SITE_POLICY_MAX_REQUESTS_PER_DOMAIN` | `240` | 每域名在窗口期内的最大请求数，`0` 表示不设置上限 |
+| `SITE_POLICY_REQUEST_WINDOW_SECONDS` | `3600` | 域名请求预算的统计窗口（秒） |
+| `SITE_POLICY_COOLDOWN_SECONDS` | `300` | 收到 429 时的最短域名冷却时间（秒） |
 
 ## Test Commands
 

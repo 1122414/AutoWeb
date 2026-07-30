@@ -221,6 +221,15 @@ def _executor_dpcli_branch(state: AgentState, config: RunnableConfig) -> Command
         from skills.dpcli_result_enricher import enrich_extract_result
 
         result = enrich_extract_result(state, action, result)
+        from config import SESSION_STRUCTURED_FALLBACK_ENABLED
+
+        if SESSION_STRUCTURED_FALLBACK_ENABLED:
+            from skills.content_acquisition import enrich_extract_result_from_session
+
+            result = enrich_extract_result_from_session(state, action, result)
+    from skills.crawl_data_quality import annotate_result_provenance
+
+    result = annotate_result_provenance(state, action, result)
     result_log = json.dumps(
         _compact_dpcli_result_for_log(result),
         ensure_ascii=False,
@@ -228,6 +237,26 @@ def _executor_dpcli_branch(state: AgentState, config: RunnableConfig) -> Command
     )
     current_url = _dpcli_result_url(result) or state.get("current_url", "")
     url_changed = bool(before_url and current_url and before_url != current_url)
+    result_data = result.get("data") if isinstance(result.get("data"), dict) else {}
+    result_page = result_data.get("page") if isinstance(result_data.get("page"), dict) else {}
+    execution_evidence = {
+        "before_url": before_url,
+        "after_url": current_url,
+        "url_changed": url_changed,
+        "action_skill": action.get("skill", ""),
+        "result_ok": bool(result.get("ok")),
+    }
+    if str(action.get("skill") or "").lower() == "scroll":
+        execution_evidence.update(
+            {
+                "scroll_before": result_data.get("before"),
+                "scroll_after": result_data.get("after"),
+                "readiness": result_data.get("readiness"),
+            }
+        )
+    status_code = result_page.get("status_code") or result_page.get("http_status")
+    if status_code is not None:
+        execution_evidence["http_status"] = status_code
     update: Dict[str, Any] = {
         "messages": [AIMessage(content=f"【dp_cli执行报告】\n{result_log}")],
         "execution_log": result_log,
@@ -235,13 +264,7 @@ def _executor_dpcli_branch(state: AgentState, config: RunnableConfig) -> Command
         "dpcli_session": session,
         "dpcli_request_id": request_id,
         "current_url": current_url,
-        "dpcli_execution_evidence": {
-            "before_url": before_url,
-            "after_url": current_url,
-            "url_changed": url_changed,
-            "action_skill": action.get("skill", ""),
-            "result_ok": bool(result.get("ok")),
-        },
+        "dpcli_execution_evidence": execution_evidence,
     }
     if result.get("action") == "snapshot" and result.get("ok"):
         update["dpcli_snapshot"] = _compact_dpcli_snapshot(result)

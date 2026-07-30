@@ -36,7 +36,7 @@ def test_compile_builds_versioned_composite_phases_and_stop_condition():
         "然后进入详情页提取描述，直到看到“Stop Book”。"
     )
 
-    assert contract["version"] == 3
+    assert contract["version"] == 4
     assert [item["value"] for item in contract["filters"]] == [
         "Fiction",
         "light",
@@ -130,5 +130,48 @@ def test_lifecycle_checkpoint_roundtrip_is_json_safe():
     )
     restored = lifecycle.restore(payload)
 
-    assert restored["dpcli_task_contract"]["version"] == 3
+    assert restored["dpcli_task_contract"]["version"] == 4
     assert restored["dpcli_task_progress"]["items"] == [{"title": "A"}]
+
+
+def test_infinite_scroll_contract_requires_verified_scroll_before_completion():
+    lifecycle = TaskLifecycle()
+    contract = lifecycle.compile("在无限滚动列表中滚动加载后抓取1条标题。")
+    state = {
+        "user_task": contract["task"],
+        "current_url": "",
+        "dpcli_task_contract": contract,
+        "dpcli_task_progress": {"active_page": 1, "items": []},
+        "dpcli_agent_view": {"capability_map": {}},
+        "generated_action": {"skill": "extract", "params": {"limit": 1}},
+        "dpcli_result": {"ok": True, "data": {"items": [{"title": "A"}]}},
+    }
+
+    progress, evaluation, done = lifecycle.merge_verified_result(state)
+
+    assert evaluation["is_success"] is True
+    assert done is False
+    next_plan, _ = lifecycle.decide(
+        {**state, "dpcli_task_progress": progress}, contract
+    )
+    assert next_plan["step_intent"] == "scroll"
+
+    verified_progress = lifecycle.advance_verified_page(
+        {
+            **state,
+            "dpcli_task_progress": progress,
+            "dpcli_structured_plan": next_plan,
+            "dpcli_execution_evidence": {
+                "action_skill": "scroll",
+                "scroll_before": {"y": 0},
+                "scroll_after": {"y": 900},
+            },
+        }
+    )
+    final_state = {
+        **state,
+        "dpcli_task_progress": verified_progress,
+        "generated_action": {"skill": "extract", "params": {"limit": 1}},
+    }
+    _, _, done = lifecycle.merge_verified_result(final_state)
+    assert done is True

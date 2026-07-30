@@ -92,3 +92,44 @@ def test_blocking_signals_stop_instead_of_attempting_bypass():
     assert captcha.kind == "captcha"
     assert rate.detected is True
     assert rate.kind == "rate_limit"
+
+
+def test_shared_ledger_enforces_domain_budget_across_policy_instances(tmp_path):
+    config = SitePolicyConfig(
+        robots_enabled=False,
+        min_interval_seconds=0,
+        access_ledger_path=str(tmp_path / "site_access.sqlite3"),
+        max_requests_per_domain=1,
+        request_window_seconds=60,
+    )
+    first = SitePolicy(config)
+    second = SitePolicy(config)
+
+    assert first.authorize("https://example.test/one").allowed is True
+    denied = second.authorize("https://example.test/two")
+
+    assert denied.allowed is False
+    assert denied.reason == "domain_request_budget_exhausted"
+
+
+def test_retry_after_response_cools_down_the_shared_domain(tmp_path):
+    policy = SitePolicy(
+        SitePolicyConfig(
+            robots_enabled=False,
+            min_interval_seconds=0,
+            access_ledger_path=str(tmp_path / "site_access.sqlite3"),
+            cooldown_seconds=1,
+        )
+    )
+
+    signal = policy.observe_response(
+        "https://example.test/products",
+        status_code=429,
+        headers={"Retry-After": "60"},
+    )
+    denied = policy.authorize("https://example.test/next")
+
+    assert signal.detected is True
+    assert signal.kind == "rate_limit"
+    assert denied.allowed is False
+    assert denied.reason == "domain_cooldown"

@@ -110,6 +110,32 @@ class DPCLIExecutorNodeTests(unittest.TestCase):
         self.assertFalse(evidence["url_changed"])
         self.assertEqual(evidence["before_url"], evidence["after_url"])
 
+    def test_scroll_evidence_preserves_metrics_and_readiness(self):
+        state = {
+            "generated_action": {"skill": "scroll", "params": {"to": "bottom"}},
+            "dpcli_session": "unit",
+            "current_url": "https://example.test/list",
+        }
+        result_payload = {
+            "ok": True,
+            "session": "unit",
+            "action": "scroll",
+            "data": {
+                "page": {"url": "https://example.test/list"},
+                "before": {"x": 0, "y": 0},
+                "after": {"x": 0, "y": 900},
+                "readiness": {"condition": "network-idle", "ready": True},
+            },
+        }
+        with patch("skills.dpcli_executor.DPCLIExecutor") as executor_cls:
+            executor_cls.return_value.execute_action.return_value = result_payload
+            command = _executor_dpcli_branch(state, {"configurable": {}})
+
+        evidence = command.update["dpcli_execution_evidence"]
+        self.assertEqual(evidence["scroll_before"]["y"], 0)
+        self.assertEqual(evidence["scroll_after"]["y"], 900)
+        self.assertEqual(evidence["readiness"]["condition"], "network-idle")
+
     def test_empty_before_url_url_unchanged(self):
         state = {
             "generated_action": {"skill": "open", "params": {"url": "https://x.com"}},

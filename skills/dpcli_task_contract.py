@@ -15,6 +15,8 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, Optional, Tuple
 from urllib.parse import urlparse
 
+from skills.crawl_data_quality import is_valid_field_value
+
 
 _HTTP_URL_RE = re.compile(r"https?://[^\s，。；;）)】\]>\"']+", re.IGNORECASE)
 _COUNT_UNIT = (
@@ -155,6 +157,19 @@ def _extract_scroll_rounds(task: str) -> int:
         str(task or ""),
     )
     return max(1, min(int(rounds or 6), 50))
+
+
+def _extract_required_scroll_rounds(task: str) -> int:
+    """Return an explicit minimum; ``最多`` remains a safety ceiling only."""
+    rounds = _first_int(
+        (
+            r"(?:至少|最少|不少于)\s*滚动\s*(\d+)\s*(?:轮|次)",
+            r"(?:至少|最少|不少于)\s*(\d+)\s*(?:轮|次)\s*滚动",
+            r"(?:at least\s*)?(\d+)\s*scrolls?",
+        ),
+        str(task or ""),
+    )
+    return max(1, min(int(rounds or 1), 50))
 
 
 def _extract_filter(task: str) -> Optional[Dict[str, Any]]:
@@ -329,6 +344,11 @@ def build_task_contract(task: str) -> Dict[str, Any]:
             if collection_mode == "infinite_scroll"
             else 0
         ),
+        "required_scroll_rounds": (
+            _extract_required_scroll_rounds(text)
+            if collection_mode == "infinite_scroll"
+            else 0
+        ),
         "max_stagnant_rounds": 2,
         "filter": _extract_filter(text),
         "detail_required": detail_required,
@@ -394,13 +414,19 @@ def evaluate_contract_items(
     unique_items = _unique_items(items)
     schema = [str(field) for field in contract.get("schema") or []]
     field_coverage: Dict[str, float] = {}
+    field_validity: Dict[str, float] = {}
     for field in schema:
         populated = sum(
             _meaningful(_canonical_value(item, field)) for item in unique_items
         )
+        valid = sum(
+            is_valid_field_value(field, _canonical_value(item, field))
+            for item in unique_items
+        )
         field_coverage[field] = (
             populated / len(unique_items) if unique_items else 0.0
         )
+        field_validity[field] = valid / len(unique_items) if unique_items else 0.0
 
     required_count = int(
         expected_count
@@ -409,12 +435,15 @@ def evaluate_contract_items(
     )
     count_ok = len(unique_items) >= required_count
     fields_ok = bool(schema) and all(value >= 0.8 for value in field_coverage.values())
-    is_success = count_ok and fields_ok
+    values_ok = bool(schema) and all(value >= 0.8 for value in field_validity.values())
+    is_success = count_ok and fields_ok and values_ok
     failures = []
     if not count_ok:
         failures.append(f"item count {len(unique_items)}/{required_count}")
     if not fields_ok:
         failures.append("required field coverage below 80%")
+    if not values_ok:
+        failures.append("invalid required field values")
     return {
         "is_success": is_success,
         "summary": (
@@ -425,6 +454,7 @@ def evaluate_contract_items(
         "item_count": len(unique_items),
         "required_count": required_count,
         "field_coverage": field_coverage,
+        "field_validity": field_validity,
         "items": unique_items,
     }
 
@@ -760,7 +790,22 @@ def build_contract_plan(
         for value in progress.get("completed_pages") or []
         if str(value).isdigit()
     }
-    if completed["is_success"] and len(completed_pages) >= target_pages:
+    obligations = dict(contract.get("execution_obligations") or {})
+    required_scroll_rounds = (
+        max(1, int(contract.get("required_scroll_rounds") or 0))
+        if contract.get("collection_mode") == "infinite_scroll"
+        else 0
+    )
+    required_scroll_rounds = max(
+        required_scroll_rounds,
+        int(obligations.get("scroll_rounds") or 0),
+    )
+    scroll_complete = int(progress.get("scroll_round") or 0) >= required_scroll_rounds
+    if (
+        completed["is_success"]
+        and len(completed_pages) >= target_pages
+        and scroll_complete
+    ):
         return (
             _plan("finish", {}, "deterministic task contract satisfied"),
             updates,
@@ -801,6 +846,30 @@ def build_contract_plan(
                 ),
                 updates,
             )
+
+    if (
+        contract.get("collection_mode") == "infinite_scroll"
+        and not scroll_complete
+    ):
+        scroll_round = max(0, int(progress.get("scroll_round") or 0))
+        return (
+            _plan(
+                "scroll",
+                {
+                    "direction": "down",
+                    "amount": 900,
+                    "to": "bottom",
+                    "ready_condition": "network-idle",
+                    "ready_timeout": 10.0,
+                    "round": scroll_round + 1,
+                },
+                (
+                    "deterministic task contract: satisfy required scroll "
+                    f"({scroll_round + 1}/{required_scroll_rounds})"
+                ),
+            ),
+            updates,
+        )
 
     remaining = max(
         1,

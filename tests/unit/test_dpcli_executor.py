@@ -118,6 +118,8 @@ class DPCLIExecutorTests(unittest.TestCase):
                     "amount": 900,
                     "to": "bottom",
                     "wait_time": 1,
+                    "ready_condition": "network-idle",
+                    "ready_timeout": 8,
                 },
             }
         )
@@ -126,6 +128,11 @@ class DPCLIExecutorTests(unittest.TestCase):
         self.assertEqual(scroll_args[scroll_args.index("--direction") + 1], "down")
         self.assertEqual(scroll_args[scroll_args.index("--amount") + 1], "900")
         self.assertEqual(scroll_args[scroll_args.index("--to") + 1], "bottom")
+        self.assertEqual(
+            scroll_args[scroll_args.index("--ready-condition") + 1],
+            "network-idle",
+        )
+        self.assertEqual(scroll_args[scroll_args.index("--ready-timeout") + 1], "8")
 
     @patch("skills.dpcli_executor.subprocess.run")
     def test_execute_action_passes_stable_request_id_to_cli(self, run):
@@ -158,11 +165,11 @@ class DPCLIExecutorTests(unittest.TestCase):
         )
 
     @patch("skills.dpcli_executor.subprocess.run")
-    def test_execute_action_wait_uses_snapshot_wait_and_preserves_wait_action(self, run):
+    def test_execute_action_wait_uses_native_ready_wait_and_preserves_wait_action(self, run):
         payload = {
             "ok": True,
             "session": "unit",
-            "action": "snapshot",
+            "action": "wait-ready",
             "data": {"page": {"url": "https://example.test"}},
             "error": None,
         }
@@ -175,8 +182,9 @@ class DPCLIExecutorTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(result["action"], "wait")
         args = run.call_args.args[0]
-        self.assertIn("snapshot", args)
-        self.assertEqual(args[args.index("--wait-time") + 1], "1.25")
+        self.assertIn("wait-ready", args)
+        self.assertEqual(args[args.index("--condition") + 1], "network-idle")
+        self.assertEqual(args[args.index("--timeout") + 1], "1.25")
 
     def test_execute_action_rejects_unknown_skill(self):
         result = self.make_executor().execute_action({"skill": "unknown", "params": {}})

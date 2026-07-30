@@ -37,6 +37,7 @@ class DPCLIExecutor:
         self.timeout_seconds = timeout_seconds
         self.batch_timeout_seconds = batch_timeout_seconds
         self._active_request_id: Optional[str] = None
+        self._active_action: Dict[str, Any] = {}
         if site_policy is None:
             from skills.site_policy import site_policy as default_site_policy
 
@@ -65,8 +66,14 @@ class DPCLIExecutor:
         return self._run(*args)
 
     def wait(self, seconds: float = 1.0) -> Dict[str, Any]:
-        """Wait through dp_cli and return refreshed page evidence."""
-        result = self.snapshot(mode="agent_summary", wait_time=max(0.0, float(seconds)))
+        """Wait for browser network quiescence instead of blindly sleeping."""
+        result = self._run(
+            "wait-ready",
+            "--condition",
+            "network-idle",
+            "--timeout",
+            str(max(0.0, float(seconds))),
+        )
         if isinstance(result, dict):
             result = dict(result)
             result["action"] = "wait"
@@ -125,6 +132,9 @@ class DPCLIExecutor:
         amount: int = 900,
         to: Optional[str] = None,
         wait_time: Optional[float] = None,
+        ready_condition: Optional[str] = None,
+        ready_locator: Optional[str] = None,
+        ready_timeout: Optional[float] = None,
     ) -> Dict[str, Any]:
         args = [
             "scroll",
@@ -135,6 +145,12 @@ class DPCLIExecutor:
         ]
         if to:
             args.extend(["--to", str(to)])
+        if ready_condition:
+            args.extend(["--ready-condition", str(ready_condition)])
+        if ready_locator:
+            args.extend(["--ready-locator", str(ready_locator)])
+        if ready_timeout is not None:
+            args.extend(["--ready-timeout", str(ready_timeout)])
         args.extend(self._wait_args(wait_time))
         return self._run(*args)
 
@@ -282,6 +298,7 @@ class DPCLIExecutor:
 
         trace_log(f"execute_action: skill={skill}")
         self._active_request_id = str(action.get("request_id") or "").strip() or None
+        self._active_action = dict(action)
         self._active_policy_decisions = []
         if self.site_policy is not None:
             decisions = self.site_policy.authorize_action(action)
@@ -347,6 +364,9 @@ class DPCLIExecutor:
                     amount=int(params.get("amount") or 900),
                     to=params.get("to"),
                     wait_time=params.get("wait_time"),
+                    ready_condition=params.get("ready_condition"),
+                    ready_locator=params.get("ready_locator"),
+                    ready_timeout=params.get("ready_timeout"),
                 )
             if skill == "expand":
                 return self.expand(
@@ -422,13 +442,27 @@ class DPCLIExecutor:
 
     def _finalize_result(self, result: Dict[str, Any]) -> Dict[str, Any]:
         finalized = dict(result)
+        navigation_denied = self._post_navigation_policy_decision(finalized)
         if self._active_policy_decisions:
             finalized["_site_policy"] = {
                 "decisions": list(self._active_policy_decisions),
             }
         if self.site_policy is None:
             return finalized
-        signal = self.site_policy.detect_block_signal(finalized)
+        if navigation_denied is not None:
+            finalized["ok"] = False
+            finalized["error"] = {
+                "code": "site_policy_denied",
+                "message": (
+                    "Site policy denied follow-up work after navigation: "
+                    f"{navigation_denied.reason}"
+                ),
+                "details": {"policy_decision": navigation_denied.to_dict()},
+            }
+            return finalized
+        signal = self._response_policy_signal(finalized)
+        if not signal.detected:
+            signal = self.site_policy.detect_block_signal(finalized)
         if not signal.detected:
             return finalized
         finalized["ok"] = False
@@ -441,6 +475,61 @@ class DPCLIExecutor:
             signal.to_dict()
         )
         return finalized
+
+    def _post_navigation_policy_decision(self, result: Dict[str, Any]):
+        """Prevent extraction after a click/type navigation into a denied URL."""
+        if (
+            self.site_policy is None
+            or not result.get("ok")
+            or not hasattr(self.site_policy, "authorize")
+        ):
+            return None
+        skill = str(self._active_action.get("skill") or "").lower()
+        if skill not in {"click", "type"}:
+            return None
+        data = result.get("data") if isinstance(result.get("data"), dict) else {}
+        page = data.get("page") if isinstance(data.get("page"), dict) else {}
+        url = str(page.get("url") or data.get("url") or "").strip()
+        if not url:
+            return None
+        decision = self.site_policy.authorize(url, pace=False)
+        self._active_policy_decisions.append(decision.to_dict())
+        return decision if not decision.allowed else None
+
+    def _response_policy_signal(self, result: Dict[str, Any]):
+        """Forward explicit HTTP restrictions to the durable Site Policy."""
+        if not result.get("ok") or not hasattr(self.site_policy, "observe_response"):
+            from skills.site_policy import BlockingSignal
+
+            return BlockingSignal(False)
+        data = result.get("data")
+        data = data if isinstance(data, dict) else {}
+        page = data.get("page")
+        page = page if isinstance(page, dict) else {}
+        status_code = (
+            page.get("status_code")
+            or page.get("http_status")
+            or data.get("status_code")
+            or data.get("http_status")
+            or result.get("status_code")
+        )
+        headers = page.get("headers") or data.get("headers") or result.get("headers")
+        url = (
+            page.get("url")
+            or data.get("url")
+            or result.get("url")
+            or ""
+        )
+        try:
+            return self.site_policy.observe_response(
+                str(url),
+                status_code=int(status_code) if status_code is not None else None,
+                headers=headers if isinstance(headers, dict) else None,
+            )
+        except (TypeError, ValueError):
+            from skills.site_policy import BlockingSignal
+
+            return BlockingSignal(False)
 
     def _run_raw(self, args: List[str], timeout: Optional[float] = None) -> Dict[str, Any]:
         import time as _time

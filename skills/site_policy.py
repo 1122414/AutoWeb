@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import ipaddress
 import json
+from pathlib import Path
+import sqlite3
 import threading
 import time
 import urllib.error
@@ -24,6 +26,12 @@ class SitePolicyConfig:
     robots_timeout_seconds: float = 5.0
     user_agent: str = "AutoWeb/6"
     robots_cache_seconds: float = 600.0
+    # A SQLite ledger makes per-domain policy survive restarts and coordinate
+    # concurrent Task Runs without depending on a particular worker process.
+    access_ledger_path: str = ""
+    max_requests_per_domain: int = 240
+    request_window_seconds: float = 3600.0
+    cooldown_seconds: float = 300.0
 
 
 @dataclass(frozen=True)
@@ -48,6 +56,148 @@ class BlockingSignal:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+@dataclass(frozen=True)
+class _LedgerReservation:
+    allowed: bool
+    reason: str = "allowed"
+    waited_seconds: float = 0.0
+
+
+class SiteAccessLedger:
+    """Small durable, cross-process per-domain access ledger."""
+
+    def __init__(self, path: str) -> None:
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._ensure_schema()
+
+    def _connect(self):
+        connection = sqlite3.connect(str(self.path), timeout=10)
+        connection.execute("PRAGMA busy_timeout = 10000")
+        return connection
+
+    def _ensure_schema(self) -> None:
+        connection = self._connect()
+        try:
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS site_access_ledger (
+                    domain TEXT PRIMARY KEY,
+                    window_started REAL NOT NULL,
+                    request_count INTEGER NOT NULL,
+                    last_access REAL NOT NULL,
+                    cooldown_until REAL NOT NULL DEFAULT 0
+                )
+                """
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+    def reserve(
+        self,
+        domain: str,
+        *,
+        now: float,
+        interval_seconds: float,
+        max_requests: int,
+        window_seconds: float,
+    ) -> _LedgerReservation:
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                """
+                SELECT window_started, request_count, last_access, cooldown_until
+                FROM site_access_ledger WHERE domain = ?
+                """,
+                (domain,),
+            ).fetchone()
+            if row is None:
+                window_started, request_count, last_access, cooldown_until = (
+                    now,
+                    0,
+                    0.0,
+                    0.0,
+                )
+            else:
+                window_started, request_count, last_access, cooldown_until = row
+            if now < float(cooldown_until or 0.0):
+                return _LedgerReservation(False, "domain_cooldown")
+            if now - float(window_started) >= max(1.0, float(window_seconds)):
+                window_started, request_count = now, 0
+            if max_requests > 0 and int(request_count) >= int(max_requests):
+                return _LedgerReservation(False, "domain_request_budget_exhausted")
+            waited = max(0.0, float(interval_seconds) - (now - float(last_access)))
+            scheduled = now + waited
+            connection.execute(
+                """
+                INSERT INTO site_access_ledger(
+                    domain, window_started, request_count, last_access, cooldown_until
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(domain) DO UPDATE SET
+                    window_started = excluded.window_started,
+                    request_count = excluded.request_count,
+                    last_access = excluded.last_access,
+                    cooldown_until = excluded.cooldown_until
+                """,
+                (
+                    domain,
+                    float(window_started),
+                    int(request_count) + 1,
+                    scheduled,
+                    float(cooldown_until or 0.0),
+                ),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        return _LedgerReservation(True, waited_seconds=waited)
+
+    def impose_cooldown(self, domain: str, *, until: float, now: float) -> None:
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                """
+                SELECT window_started, request_count, last_access, cooldown_until
+                FROM site_access_ledger WHERE domain = ?
+                """,
+                (domain,),
+            ).fetchone()
+            if row is None:
+                window_started, request_count, last_access, current_cooldown = (
+                    now,
+                    0,
+                    0.0,
+                    0.0,
+                )
+            else:
+                window_started, request_count, last_access, current_cooldown = row
+            connection.execute(
+                """
+                INSERT INTO site_access_ledger(
+                    domain, window_started, request_count, last_access, cooldown_until
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(domain) DO UPDATE SET
+                    window_started = excluded.window_started,
+                    request_count = excluded.request_count,
+                    last_access = excluded.last_access,
+                    cooldown_until = excluded.cooldown_until
+                """,
+                (
+                    domain,
+                    float(window_started),
+                    int(request_count),
+                    float(last_access),
+                    max(float(current_cooldown or 0.0), float(until)),
+                ),
+            )
+            connection.commit()
+        finally:
+            connection.close()
 
 
 class SitePolicy:
@@ -88,11 +238,14 @@ class SitePolicy:
         *,
         opener: Callable[..., Any] | None = None,
         monotonic: Callable[[], float] | None = None,
+        wall_clock: Callable[[], float] | None = None,
         sleeper: Callable[[float], None] | None = None,
+        ledger: SiteAccessLedger | None = None,
     ) -> None:
         self.config = config or SitePolicyConfig()
         self._opener = opener or urllib.request.urlopen
         self._monotonic = monotonic or time.monotonic
+        self._wall_clock = wall_clock or time.time
         self._sleeper = sleeper or time.sleep
         self._robots: dict[
             str,
@@ -100,6 +253,11 @@ class SitePolicy:
         ] = {}
         self._last_access: dict[str, float] = {}
         self._lock = threading.RLock()
+        self._ledger = ledger or (
+            SiteAccessLedger(self.config.access_ledger_path)
+            if self.config.access_ledger_path
+            else None
+        )
 
     @staticmethod
     def _private_host(host: str) -> bool:
@@ -210,7 +368,27 @@ class SitePolicy:
             crawl_delay,
         )
         waited = 0.0
-        if pace and interval > 0:
+        if self._ledger is not None:
+            reservation = self._ledger.reserve(
+                domain,
+                now=self._wall_clock(),
+                interval_seconds=interval if pace else 0.0,
+                max_requests=int(self.config.max_requests_per_domain),
+                window_seconds=float(self.config.request_window_seconds),
+            )
+            if not reservation.allowed:
+                return SitePolicyDecision(
+                    False,
+                    reservation.reason,
+                    text,
+                    domain,
+                    crawl_delay_seconds=crawl_delay,
+                    robots_checked=robots_checked,
+                )
+            waited = reservation.waited_seconds
+            if waited:
+                self._sleeper(waited)
+        elif pace and interval > 0:
             with self._lock:
                 now = self._monotonic()
                 last = self._last_access.get(domain)
@@ -266,6 +444,31 @@ class SitePolicy:
                 break
         return decisions
 
+    def observe_response(
+        self,
+        url: str,
+        *,
+        status_code: int | None = None,
+        headers: Mapping[str, Any] | None = None,
+    ) -> BlockingSignal:
+        """Persist an explicit response-level restriction and stop the run."""
+        if int(status_code or 0) != 429:
+            return BlockingSignal(False)
+        domain = str(urlparse(str(url or "")).hostname or "").lower()
+        retry_after = 0.0
+        for key, value in (headers or {}).items():
+            if str(key).lower() == "retry-after":
+                try:
+                    retry_after = max(0.0, float(value))
+                except (TypeError, ValueError):
+                    retry_after = 0.0
+                break
+        cooldown = max(float(self.config.cooldown_seconds), retry_after)
+        if domain and self._ledger is not None:
+            now = self._wall_clock()
+            self._ledger.impose_cooldown(domain, until=now + cooldown, now=now)
+        return BlockingSignal(True, "rate_limit", "http_status:429")
+
     def detect_block_signal(self, payload: Any) -> BlockingSignal:
         if isinstance(payload, str):
             text = payload
@@ -285,8 +488,12 @@ class SitePolicy:
 def build_site_policy() -> SitePolicy:
     from config import (
         SITE_POLICY_ALLOW_PRIVATE,
+        SITE_POLICY_ACCESS_LEDGER_PATH,
+        SITE_POLICY_COOLDOWN_SECONDS,
         SITE_POLICY_ENABLED,
+        SITE_POLICY_MAX_REQUESTS_PER_DOMAIN,
         SITE_POLICY_MIN_INTERVAL_SECONDS,
+        SITE_POLICY_REQUEST_WINDOW_SECONDS,
         SITE_POLICY_ROBOTS_ENABLED,
         SITE_POLICY_ROBOTS_FAIL_OPEN,
         SITE_POLICY_ROBOTS_TIMEOUT_SECONDS,
@@ -302,6 +509,10 @@ def build_site_policy() -> SitePolicy:
             min_interval_seconds=SITE_POLICY_MIN_INTERVAL_SECONDS,
             robots_timeout_seconds=SITE_POLICY_ROBOTS_TIMEOUT_SECONDS,
             user_agent=SITE_POLICY_USER_AGENT,
+            access_ledger_path=SITE_POLICY_ACCESS_LEDGER_PATH,
+            max_requests_per_domain=SITE_POLICY_MAX_REQUESTS_PER_DOMAIN,
+            request_window_seconds=SITE_POLICY_REQUEST_WINDOW_SECONDS,
+            cooldown_seconds=SITE_POLICY_COOLDOWN_SECONDS,
         )
     )
 

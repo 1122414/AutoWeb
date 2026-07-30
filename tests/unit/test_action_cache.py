@@ -45,6 +45,38 @@ class ActionCacheTests(unittest.TestCase):
             self.assertIn('"failure_count": 1', text)
             self.assertIn("ref_stale", text)
 
+    def test_unverified_or_repeatedly_failed_actions_are_not_reused(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = ActionCacheManager(str(Path(temp_dir) / "actions.json"))
+            unverified = manager.save(
+                user_task="extract products",
+                goal="extract title",
+                url="https://example.test/products",
+                action={"skill": "extract", "params": {"target_ref": "r1"}},
+                snapshot_view={"data_regions": [{"ref": "r1", "name": "products"}]},
+                verification_evidence={"is_success": False},
+            )
+            failed = manager.save(
+                user_task="extract products",
+                goal="extract title",
+                url="https://example.test/products",
+                action={"skill": "extract", "params": {"target_ref": "r1"}},
+                snapshot_view={"data_regions": [{"ref": "r1", "name": "products"}]},
+                verification_evidence={"is_success": True},
+            )
+            manager.record_failure(failed, "stale")
+            manager.record_failure(failed, "stale")
+
+            hits = manager.search(
+                user_task="extract products",
+                goal="extract title",
+                url="https://example.test/other",
+                snapshot_view={"data_regions": [{"ref": "r1", "name": "products"}]},
+            )
+
+            self.assertNotIn(unverified, [hit.id for hit in hits])
+            self.assertNotIn(failed, [hit.id for hit in hits])
+
 
 if __name__ == "__main__":
     unittest.main()

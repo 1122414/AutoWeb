@@ -14,6 +14,15 @@ from concurrent.futures import ThreadPoolExecutor, Future
 from threading import Lock
 
 
+# Windows console code pages can otherwise make an optional RAG sidecar crash
+# a crawler before any browser work begins. Keep diagnostic output non-fatal.
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except (OSError, ValueError):
+        pass
+
+
 # 确保项目根目录在 path 中
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -390,9 +399,14 @@ class KnowledgeBaseManager:
 
     def _cleanup(self):
         """程序退出时的清理（atexit 回调）"""
-        print("\n🔄 [KB] 程序退出，正在清理...")
-        self.flush_and_wait(timeout=10.0)
-        self.executor.shutdown(wait=False)
+        # atexit may run after pytest restores a GBK console. Cleanup must not
+        # turn an otherwise successful crawl/test run into an encoding error.
+        try:
+            self.flush_and_wait(timeout=10.0)
+        except Exception:
+            pass
+        finally:
+            self.executor.shutdown(wait=False)
 
 
 # ==================== 全局单例 ====================

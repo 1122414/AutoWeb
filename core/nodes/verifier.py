@@ -417,6 +417,48 @@ def _verify_dpcli_action_with_signals(state, current_url):
             return None
 
         # --- Scroll/Wait: passive actions, tentative success ---
+        if skill == "scroll" and is_contract_action:
+            data = result.get("data") or {}
+            before = data.get("before") if isinstance(data, dict) else None
+            after = data.get("after") if isinstance(data, dict) else None
+            if not isinstance(before, dict) or not isinstance(after, dict):
+                return _build_verification_result(
+                    is_success=False,
+                    is_done=False,
+                    summary="task-contract scroll lacks before/after metrics",
+                    source="verifier",
+                    failure_scope="local",
+                    evidence=_compact_result_evidence(result),
+                    fix_hint="use dp_cli scroll output with before/after metrics",
+                    decision_source="scroll_evidence_missing",
+                )
+            moved = any(
+                float(after.get(axis) or 0) != float(before.get(axis) or 0)
+                for axis in ("x", "y")
+            )
+            if not moved:
+                return _build_verification_result(
+                    is_success=False,
+                    is_done=False,
+                    summary="task-contract scroll did not change viewport",
+                    source="verifier",
+                    failure_scope="local",
+                    evidence=_compact_result_evidence(result),
+                    fix_hint="refresh the page model and select a scrollable collection",
+                    decision_source="scroll_no_effect",
+                )
+            return _build_verification_result(
+                is_success=True,
+                is_done=False,
+                summary="task-contract scroll changed viewport",
+                source="verifier",
+                failure_scope="local",
+                evidence=_compact_result_evidence(result),
+                confidence=1.0,
+                needs_llm=False,
+                decision_source="scroll_metrics",
+            )
+
         if skill in ("scroll", "wait"):
             return _build_verification_result(
                 is_success=True,
@@ -505,6 +547,7 @@ def _handle_dpcli_success_after_verification(
                 action=state.get("generated_action") or {},
                 snapshot_view=state.get("dpcli_snapshot_view"),
                 result_summary=summary,
+                verification_evidence=updates.get("verification_result") or {},
             )
     except Exception as action_store_exc:
         logger.info(f"   [ActionCache] save exception: {action_store_exc}")

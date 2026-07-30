@@ -889,6 +889,12 @@ def _dpcli_policy_action_from_structured_plan(
             params["to"] = str(payload.get("to"))
         if payload.get("wait_time") is not None:
             params["wait_time"] = payload.get("wait_time")
+        if payload.get("ready_condition"):
+            params["ready_condition"] = str(payload.get("ready_condition"))
+        if payload.get("ready_locator"):
+            params["ready_locator"] = str(payload.get("ready_locator"))
+        if payload.get("ready_timeout") is not None:
+            params["ready_timeout"] = payload.get("ready_timeout")
         return {"skill": "scroll", "params": params, "reason": reason}
     if intent == "wait":
         seconds = payload.get("seconds")

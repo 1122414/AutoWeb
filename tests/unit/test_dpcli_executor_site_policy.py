@@ -34,6 +34,18 @@ class _Policy:
         return self.signal
 
 
+class _ResponsePolicy(_Policy):
+    def observe_response(self, url, *, status_code=None, headers=None):
+        self.observed = {"url": url, "status_code": status_code, "headers": headers}
+        return BlockingSignal(True, "rate_limit", "http_status:429")
+
+
+class _NavigationPolicy(_Policy):
+    def authorize(self, url, *, pace=True):
+        self.navigation_url = url
+        return _Decision(False, "robots_denied", url=url)
+
+
 def _executor(policy):
     return DPCLIExecutor(
         session="policy-test",
@@ -113,3 +125,58 @@ def test_captcha_signal_converts_success_into_terminal_policy_error():
     assert result["ok"] is False
     assert result["error"]["code"] == "site_blocked"
     assert result["_site_policy"]["blocking_signal"]["kind"] == "captcha"
+
+
+def test_http_429_response_enters_policy_cooldown_instead_of_retrying():
+    policy = _ResponsePolicy(_Decision(True, "allowed"))
+    payload = {
+        "ok": True,
+        "session": "policy-test",
+        "action": "open",
+        "data": {
+            "page": {
+                "url": "https://example.test/products",
+                "status_code": 429,
+                "headers": {"Retry-After": "60"},
+            }
+        },
+        "error": None,
+    }
+    with patch("skills.dpcli_executor.subprocess.run") as run:
+        run.return_value = Mock(
+            returncode=0,
+            stdout=json.dumps(payload),
+            stderr="",
+        )
+        result = _executor(policy).execute_action(
+            {"skill": "open", "params": {"url": "https://example.test/products"}}
+        )
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "site_blocked"
+    assert policy.observed["status_code"] == 429
+    assert policy.observed["headers"] == {"Retry-After": "60"}
+
+
+def test_click_navigation_is_checked_before_any_follow_up_extraction():
+    policy = _NavigationPolicy(_Decision(True, "allowed"))
+    payload = {
+        "ok": True,
+        "session": "policy-test",
+        "action": "click",
+        "data": {"page": {"url": "https://example.test/private"}},
+        "error": None,
+    }
+    with patch("skills.dpcli_executor.subprocess.run") as run:
+        run.return_value = Mock(
+            returncode=0,
+            stdout=json.dumps(payload),
+            stderr="",
+        )
+        result = _executor(policy).execute_action(
+            {"skill": "click", "params": {"ref": "e1"}}
+        )
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "site_policy_denied"
+    assert policy.navigation_url == "https://example.test/private"
