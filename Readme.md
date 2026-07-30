@@ -104,7 +104,42 @@ AutoWeb/
 └── browser_data/                   # 浏览器运行数据 (gitignored)
 ```
 
-## Quick Start
+## Windows 一键部署
+
+项目提供可重复执行的部署入口：创建项目本地 `.venv`、绑定本地 `drissionpage-cli`、生成/保留 `.env`，导入 AutoWeb 入口/图/执行器，并真实启动一次无头 Chromium 和执行一次 `dp_cli --help`。验证未通过时脚本会以非零退出，不会把“只装了一半”报告为成功。
+
+前置条件：Windows、Python 3.11+、已安装 Chrome/Edge，以及本地 `drissionpage-cli` 仓库。默认 CLI 路径为 AutoWeb 同级的 `..\drissionpage-cli`。
+
+已有 `.env`（推荐）时，一条命令即可部署：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\deploy_windows.ps1 `
+  -Python "C:\Python311\python.exe" `
+  -DpCliPath "E:\GitHub\Repositories\drissionpage-cli"
+```
+
+首次部署且尚未有 `.env` 时，可在同一命令中提供模型配置；脚本不会在日志中输出密钥：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\deploy_windows.ps1 `
+  -Python "C:\Python311\python.exe" `
+  -DpCliPath "E:\GitHub\Repositories\drissionpage-cli" `
+  -BailianModel "你的模型名" `
+  -BailianApiKey $env:BAILIAN_API_KEY `
+  -BailianBaseUrl "https://你的兼容接口/v1"
+```
+
+若 Chrome/Edge 不在系统默认位置，再增加 `-BrowserPath "C:\Program Files\Google\Chrome\Application\chrome.exe"`。脚本成功后使用同一虚拟环境启动：
+
+```powershell
+.\.venv\Scripts\python.exe main.py
+```
+
+`deploy.env.example` 是不含密钥的配置模板。Milvus 仅在启用 RAG 检索时需要；一键部署会校验 Python、CLI、浏览器和模型配置，不会连接模型 API 或 Milvus，因此不会产生模型费用或修改远端数据。
+
+默认 `.venv` 会继承指定 Python 的已安装运行时包，避免在网络镜像暂时不可用时陷入索引重试；部署成功门槛是 Agent 主链路所需模块、模型配置、CLI 和浏览器均通过真实探针。首次机器若需要安装完整开发/RAG 依赖，显式增加 `-AllowNetworkDependencyInstall`，它会安装整份 `requirements.txt` 并执行 `pip check`。若需要完全隔离的环境，必须同时增加 `-NoSystemSitePackages -AllowNetworkDependencyInstall`；若要重建本项目虚拟环境，增加 `-RecreateVenv`。`-UpgradePip` 仅在需要升级 pip 时使用，避免无必要的网络请求。
+
+## Quick Start（手动方式）
 
 ### 1. Install dependencies
 
