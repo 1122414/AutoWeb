@@ -6,6 +6,7 @@ Smoke scripts and tests can import TargetSelector directly from here.
 """
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, List, Optional
 
 from skills.dpcli_snapshot_query import SnapshotQueryEngine
@@ -88,7 +89,9 @@ class TargetSelector:
             }
 
         candidates = self._retrieve_candidates(intent, target_hint, constraints)
-        candidate_pack = self._build_candidate_pack(candidates, intent, target_hint)
+        candidate_pack = self._build_candidate_pack(
+            candidates, intent, target_hint, constraints
+        )
 
         if not candidate_pack:
             return {
@@ -103,13 +106,63 @@ class TargetSelector:
                 "reason": f"no candidates found for '{target_hint}'",
             }
 
+        explicit_values = constraints.get("text_or_name") or []
+        if not isinstance(explicit_values, list):
+            explicit_values = [explicit_values]
+        explicit_values.extend(
+            value
+            for value in (
+                constraints.get("exact_text"),
+                constraints.get("exact_text_preferred"),
+            )
+            if value
+        )
+        explicit_texts = {
+            str(value).strip().casefold()
+            for value in explicit_values
+            if str(value).strip()
+        }
+        exact_candidates = [
+            candidate
+            for candidate in candidate_pack
+            if explicit_texts.intersection({
+                str(candidate.get("name") or "").strip().casefold(),
+                str(candidate.get("text") or "").strip().casefold(),
+            })
+        ]
+        if len(exact_candidates) == 1:
+            exact_candidates[0]["confidence"] = 1.0
+            exact_candidates[0].setdefault("why_matched", []).append(
+                "explicit_text_or_name"
+            )
+            return self._deterministic_result(exact_candidates[0], intent)
+
+        if (
+            len(candidate_pack) == 1
+            and self._matches_explicit_exact_text(candidate_pack[0], constraints)
+        ):
+            candidate_pack[0]["confidence"] = 1.0
+            candidate_pack[0].setdefault("why_matched", []).append(
+                "explicit_exact_text"
+            )
+            return self._deterministic_result(candidate_pack[0], intent)
+
         if len(candidate_pack) == 1 and candidate_pack[0].get("confidence", 0) >= 0.8:
             return self._deterministic_result(candidate_pack[0], intent)
 
         conflicts = self._detect_conflicts(candidate_pack)
         if not conflicts:
-            best = max(candidate_pack, key=lambda c: c.get("confidence", 0))
-            if best.get("confidence", 0) >= 0.9:
+            ranked = sorted(
+                candidate_pack,
+                key=lambda c: c.get("confidence", 0),
+                reverse=True,
+            )
+            best = ranked[0]
+            runner_up = ranked[1].get("confidence", 0) if len(ranked) > 1 else 0
+            if (
+                best.get("confidence", 0) >= 0.85
+                and best.get("confidence", 0) - runner_up >= 0.2
+            ):
                 return self._deterministic_result(best, intent)
 
         return {
@@ -126,6 +179,102 @@ class TargetSelector:
                 f"or conflicts ({len(conflicts)})"
             ),
             "conflicts": conflicts,
+        }
+
+    @staticmethod
+    def _matches_explicit_exact_text(
+        candidate: Dict[str, Any], constraints: Dict[str, Any]
+    ) -> bool:
+        expected = str(constraints.get("exact_text") or "").strip().casefold()
+        if not expected:
+            return False
+        return expected in {
+            str(candidate.get("name") or "").strip().casefold(),
+            str(candidate.get("text") or "").strip().casefold(),
+        }
+
+    @staticmethod
+    def select_from_capability_map(
+        query: Dict[str, Any],
+        agent_view: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        """Resolve high-confidence semantic controls before raw DOM search."""
+        intent = str(query.get("intent") or "click").strip().lower()
+        if intent != "click" or not isinstance(agent_view, dict):
+            return None
+        constraints = query.get("target_constraints") or {}
+        target_hint = str(query.get("target_hint") or "")
+        region_hint = str(constraints.get("region_hint") or "").lower()
+        hint_blob = f"{target_hint} {region_hint}".lower()
+        pagination_markers = (
+            "pagination",
+            "page ",
+            "page_",
+            "页码",
+            "分页",
+            "下一页",
+            "上一页",
+        )
+        if not any(marker in hint_blob for marker in pagination_markers):
+            return None
+
+        capability_map = agent_view.get("capability_map") or {}
+        pagination = capability_map.get("pagination") or []
+        groups = pagination if isinstance(pagination, list) else [pagination]
+        controls = [
+            control
+            for group in groups
+            if isinstance(group, dict)
+            for control in (group.get("controls") or [])
+            if isinstance(control, dict)
+            and re.fullmatch(r"e\d+", str(control.get("ref") or ""))
+            and control.get("enabled") is not False
+        ]
+        if not controls:
+            return None
+
+        raw_text_hints = constraints.get("text_or_name") or []
+        if not isinstance(raw_text_hints, list):
+            raw_text_hints = [raw_text_hints]
+        labels = {
+            str(value).strip().lower()
+            for value in raw_text_hints
+            if str(value).strip()
+        }
+        labels.update(re.findall(r"(?<!\d)\d+(?!\d)", target_hint))
+        direction = None
+        if any(value in hint_blob for value in ("下一页", "next", "forward")):
+            direction = "next"
+        elif any(value in hint_blob for value in ("上一页", "prev", "previous", "back")):
+            direction = "prev"
+
+        matches = []
+        for control in controls:
+            label = str(control.get("label") or "").strip().lower()
+            control_direction = str(control.get("direction") or "").strip().lower()
+            if labels and label in labels:
+                matches.append(control)
+            elif direction and control_direction == direction:
+                matches.append(control)
+        unique = {str(item["ref"]): item for item in matches}
+        if len(unique) != 1:
+            return None
+        control = next(iter(unique.values()))
+        return {
+            "status": "selected",
+            "target_ref": str(control["ref"]),
+            "target_kind": "element",
+            "skill_hint": intent,
+            "selection_mode": "capability_map",
+            "confidence": 1.0,
+            "evidence": {
+                "source": "dpcli_agent_view.capability_map.pagination",
+                "label": control.get("label"),
+                "direction": control.get("direction"),
+                "enabled": control.get("enabled", True),
+            },
+            "alternatives": [],
+            "approval_required": False,
         }
 
     def select_from_structured_plan(
@@ -191,7 +340,14 @@ class TargetSelector:
         for text in text_hints:
             query: Dict[str, Any] = {}
             for k, v in constraints.items():
-                if k not in ("role", "text_or_name", "near"):
+                if k not in (
+                    "role",
+                    "text_or_name",
+                    "near",
+                    "exact_text",
+                    "exact_text_preferred",
+                    "exclude_text",
+                ):
                     query[k] = v
             if roles:
                 query["role"] = roles
@@ -237,6 +393,27 @@ class TargetSelector:
                 if r.get("ref") not in [c.get("ref") for c in candidates]:
                     candidates.append(r)
 
+        excluded = constraints.get("exclude_text") or []
+        if not isinstance(excluded, list):
+            excluded = [excluded]
+        excluded_terms = [
+            str(value).strip().casefold()
+            for value in excluded
+            if str(value).strip()
+        ]
+        if excluded_terms:
+            candidates = [
+                candidate
+                for candidate in candidates
+                if not any(
+                    term in (
+                        f"{candidate.get('name') or ''} "
+                        f"{candidate.get('text') or ''}"
+                    ).casefold()
+                    for term in excluded_terms
+                )
+            ]
+
         return candidates
 
     def _find_near_candidates(
@@ -256,8 +433,18 @@ class TargetSelector:
 
     @staticmethod
     def _build_candidate_pack(
-        candidates: List[Dict[str, Any]], intent: str, target_hint: str
+        candidates: List[Dict[str, Any]],
+        intent: str,
+        target_hint: str,
+        constraints: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
+        constraints = constraints or {}
+        explicit_hints = constraints.get("text_or_name") or []
+        if not isinstance(explicit_hints, list):
+            explicit_hints = [explicit_hints]
+        scoring_hints = [target_hint] + [
+            str(value) for value in explicit_hints if str(value).strip()
+        ]
         pack = []
         seen_refs = set()
         for c in candidates:
@@ -275,10 +462,15 @@ class TargetSelector:
                 "in_viewport": c.get("in_viewport", True),
                 "interactable_now": c.get("interactable_now", True),
                 "parent_ref": c.get("parent_ref", ""),
-                "confidence": TargetSelector._compute_confidence(
-                    c, intent, target_hint
+                "confidence": max(
+                    TargetSelector._compute_confidence(c, intent, hint)
+                    for hint in scoring_hints
                 ),
-                "why_matched": TargetSelector._why_matched(c, intent, target_hint),
+                "why_matched": list(dict.fromkeys(
+                    reason
+                    for hint in scoring_hints
+                    for reason in TargetSelector._why_matched(c, intent, hint)
+                )),
             }
             pack.append(entry)
         return pack[:8]

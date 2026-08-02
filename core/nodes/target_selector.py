@@ -38,6 +38,31 @@ def target_selector_node(
             goto="Coder",
         )
 
+    intent = target_request.get("step_intent") or structured_plan.get(
+        "step_intent", "click"
+    )
+    query = {
+        "intent": intent,
+        "target_hint": target_request.get("target_hint", ""),
+        "target_constraints": _normalize_target_constraints(target_request),
+    }
+    capability_result = TargetSelector.select_from_capability_map(
+        query,
+        state.get("dpcli_agent_view") or {},
+    )
+    if capability_result is not None:
+        logger.info(
+            "   [TargetSelector] selected from capability map: "
+            f"{capability_result.get('target_ref')}"
+        )
+        return Command(
+            update={
+                "dpcli_target_result": capability_result,
+                "target_selection_conflict_count": 0,
+            },
+            goto="Coder",
+        )
+
     snapshot_ref = state.get("dpcli_snapshot_ref")
     prev_result = state.get("dpcli_target_result") or {}
     if not snapshot_ref:
@@ -64,16 +89,8 @@ def target_selector_node(
     selector = TargetSelector(
         store=SnapshotStore(session=str(snapshot_session)) if snapshot_session else None
     )
-    intent = target_request.get("step_intent") or structured_plan.get(
-        "step_intent", "click"
-    )
-
     result = selector.select(
-        query={
-            "intent": intent,
-            "target_hint": target_request.get("target_hint", ""),
-            "target_constraints": _normalize_target_constraints(target_request),
-        },
+        query=query,
         snapshot_ref=snapshot_ref,
     )
 
@@ -84,16 +101,44 @@ def target_selector_node(
     )
 
     if status == "selected":
-        return Command(update={"dpcli_target_result": result}, goto="Coder")
+        return Command(
+            update={
+                "dpcli_target_result": result,
+                "target_selection_conflict_count": 0,
+            },
+            goto="Coder",
+        )
 
     if status in ("not_required", "not_found"):
         return Command(update={"dpcli_target_result": result}, goto="Coder")
 
     if status == "need_approval":
+        previous_refs = [
+            item.get("ref") for item in (prev_result.get("alternatives") or [])
+        ]
+        current_refs = [item.get("ref") for item in (result.get("alternatives") or [])]
+        repeated = bool(current_refs) and current_refs == previous_refs
+        conflict_count = (
+            int(state.get("target_selection_conflict_count") or 0) + 1
+            if repeated
+            else 1
+        )
+        if conflict_count >= 2:
+            logger.info("   [TargetSelector] repeated conflict; stopping arbitration loop")
+            return Command(
+                update={
+                    "dpcli_target_result": result,
+                    "target_selection_conflict_count": conflict_count,
+                    "error": "target selector repeated the same ambiguous candidates",
+                    "error_type": "dpcli_target_ambiguous",
+                },
+                goto="ErrorHandler",
+            )
         logger.info("   [TargetSelector] multiple candidates need planner arbitration")
         return Command(
             update={
                 "dpcli_target_result": result,
+                "target_selection_conflict_count": conflict_count,
                 "human_approval_required": True,
                 "execution_result": (
                     "TargetSelector candidates conflict "

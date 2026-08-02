@@ -112,6 +112,7 @@ from core.nodes._dpcli import (
     _dpcli_action_kind,
     _compact_result_evidence,
     _dpcli_snapshot_loop_fallback_plan,
+    _dpcli_contract_progress_guard,
     _dpcli_policy_action_from_structured_plan,
 )
 
@@ -127,6 +128,7 @@ from core.nodes.executor import executor_node
 from core.nodes.verifier import verifier_node
 from core.nodes.error_handler import error_handler_node
 from core.nodes.target_selector import target_selector_node
+from core.nodes.skill_selector import skill_selector_node
 
 # ============================================================================
 # 第三阶段：测试兼容导出（后续可逐步迁移测试直接导入新模块）
@@ -144,6 +146,7 @@ __all__ = [
     "verifier_node",
     "error_handler_node",
     "target_selector_node",
+    "skill_selector_node",
     # 测试兼容导出的私有 helper
     "_extract_json_object",
     "_validate_dpcli_action",

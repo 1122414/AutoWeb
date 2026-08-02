@@ -11,6 +11,25 @@ import unittest
 
 class TestDpcliPlannerPriority(unittest.TestCase):
 
+    def test_dpcli_view_must_beat_legacy_blank_page_branch(self):
+        state = {
+            "dpcli_agent_view": {"capability_map": {}},
+            "execution_mode": "dp_cli",
+            "current_url": "chrome://newtab/",
+            "loop_count": 0,
+        }
+        current_url = state["current_url"]
+        is_initial_page = current_url.startswith("chrome://")
+        is_dpcli_requested = state["execution_mode"] == "dp_cli"
+
+        use_legacy_blank_branch = (
+            state["loop_count"] == 0
+            and is_initial_page
+            and not (is_dpcli_requested and state.get("dpcli_agent_view"))
+        )
+
+        self.assertFalse(use_legacy_blank_branch)
+
     def test_is_dpcli_true_with_agent_view(self):
         """dp_cli should activate when enabled, agent_view present, not python_code."""
         state = {

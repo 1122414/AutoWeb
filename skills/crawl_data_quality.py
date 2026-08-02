@@ -31,7 +31,16 @@ def is_valid_field_value(field: str, value: Any) -> bool:
     if value is None or value is False:
         return False
     if name in _TEXT_FIELDS:
-        return bool(str(value).strip())
+        text = str(value).strip()
+        if not text:
+            return False
+        if name in {"title", "name"}:
+            parsed = urlparse(text)
+            if parsed.scheme in {"http", "https"} and parsed.netloc:
+                return False
+            if re.search(r"<\s*/?\s*[a-z][^>]*>", text, re.IGNORECASE):
+                return False
+        return True
     if name in {"url", "href", "detail_url", "link"}:
         parsed = urlparse(str(value).strip())
         return parsed.scheme in {"http", "https"} and bool(parsed.netloc)

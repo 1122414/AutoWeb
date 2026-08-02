@@ -204,10 +204,19 @@ class SitePolicy:
     """Stateful rate adapter around a deterministic site policy."""
 
     _BLOCK_PATTERNS = {
+        "access_denied": (
+            "403 forbidden",
+            "access denied",
+            "permission denied",
+            "request blocked",
+            "访问被拒绝",
+            "拒绝访问",
+        ),
         "captcha": (
             "captcha",
             "verify you are human",
             "robot check",
+            "whaleguard block",
             "\u4eba\u673a\u9a8c\u8bc1",
             "\u5b89\u5168\u9a8c\u8bc1",
         ),
@@ -221,7 +230,9 @@ class SitePolicy:
         "login_required": (
             "login required",
             "sign in to continue",
-            "\u8bf7\u5148\u767b\u5f55",
+            "京东-欢迎登录",
+            "\u8bf7\u5148\u767b\u5f55\u540e\u7ee7\u7eed",
+            "\u8bf7\u767b\u5f55\u540e\u7ee7\u7eed",
             "\u767b\u5f55\u540e\u67e5\u770b",
         ),
         "paywall": (

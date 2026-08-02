@@ -99,6 +99,39 @@ class TaskContractParsingTests(unittest.TestCase):
             },
         )
 
+    def test_negated_search_instruction_does_not_create_filter_action(self):
+        for task in (
+            "只采集首页目录元数据，不使用搜索，字段固定为 title、url。",
+            "不要执行站内筛选，提取前10条电影。",
+            "Collect the first 10 cards without using search; fields are title and url.",
+        ):
+            with self.subTest(task=task):
+                self.assertIsNone(build_task_contract(task)["filter"])
+
+    def test_explicit_field_clause_ignores_excluded_ui_words(self):
+        contract = build_task_contract(
+            "提取前10部电影，排除热搜标签、更新时间和播放角标；"
+            "字段固定为 title、rating、url。"
+        )
+
+        self.assertEqual(contract["schema"], ["title", "rating", "url"])
+
+    def test_excluded_filter_button_does_not_create_filter_action(self):
+        contract = build_task_contract(
+            "从产品网格提取10件商品，排除导航、筛选按钮和广告；"
+            "字段固定为 title、price、url。"
+        )
+
+        self.assertIsNone(contract["filter"])
+
+    def test_filter_query_parameter_does_not_create_filter_action(self):
+        contract = build_task_contract(
+            "打开 https://example.test/search?filter=topsellers&lang=zh，"
+            "字段固定为 title、url。"
+        )
+
+        self.assertIsNone(contract["filter"])
+
     def test_common_chinese_content_units_preserve_requested_count(self):
         tasks = (
             "打开 https://example.test/movies，提取前5部电影的名称和URL。",
@@ -135,6 +168,11 @@ class TaskContractParsingTests(unittest.TestCase):
         )
 
         self.assertFalse(link_only["detail_required"])
+        self.assertFalse(
+            build_task_contract("提取仓库列表，不进入仓库详情。")[
+                "detail_required"
+            ]
+        )
         self.assertTrue(actual_detail["detail_required"])
         self.assertFalse(goal_requests_detail_batch("提取书名和详情链接。"))
         self.assertFalse(

@@ -46,8 +46,17 @@ class DPCLIExecutor:
         self._active_policy_decisions: List[Dict[str, Any]] = []
         trace_log(f"DPCLIExecutor 初始化: session={session}, headless={headless}")
 
-    def open(self, url: str, wait_time: Optional[float] = None) -> Dict[str, Any]:
-        return self._run("open", url, *self._wait_args(wait_time))
+    def open(
+        self,
+        url: str,
+        wait_time: Optional[float] = None,
+        navigation_timeout: Optional[float] = 15.0,
+    ) -> Dict[str, Any]:
+        args: List[str] = ["open", url]
+        if navigation_timeout is not None:
+            args.extend(["--navigation-timeout", str(max(1.0, float(navigation_timeout)))])
+        args.extend(self._wait_args(wait_time))
+        return self._run(*args)
 
     def snapshot(
         self,
@@ -196,13 +205,27 @@ class DPCLIExecutor:
         return self._run("resolve-locator", "--ref", ref, *self._wait_args(wait_time))
 
     def eval_js(self, js: str, wait_time: Optional[float] = None) -> Dict[str, Any]:
-        return self._run("eval", js, *self._wait_args(wait_time))
+        result = self._run("eval", js, *self._wait_args(wait_time))
+        if result.get("ok") and isinstance(result.get("data"), dict):
+            data = dict(result["data"])
+            value = data.get("result")
+            if isinstance(value, dict):
+                data["items"] = [value]
+                data["item_count"] = 1
+                result = dict(result)
+                result["data"] = data
+        return result
 
     def session_inspect(self, wait_time: Optional[float] = None) -> Dict[str, Any]:
         return self._run("session", "inspect", *self._wait_args(wait_time))
 
-    def session_close(self) -> Dict[str, Any]:
-        return self._run("session", "close")
+    def session_close(self, timeout_seconds: float = 10.0) -> Dict[str, Any]:
+        """Close a session with a hard deadline on Windows pipe inheritance."""
+        raw = self._run_raw_hard(
+            ["session", "close"],
+            timeout=max(1.0, min(float(timeout_seconds), self.timeout_seconds)),
+        )
+        return self._parse_raw_result(raw, ("session", "close"))
 
     def batch_detail_extract(
         self,
@@ -295,6 +318,9 @@ class DPCLIExecutor:
         params = action.get("params") or {}
         if not isinstance(params, dict):
             return self._invalid_action("Action params must be a JSON object.", skill=skill)
+        if skill == "navigate":
+            action = {**action, "skill": "open", "params": dict(params)}
+            skill = "open"
 
         trace_log(f"execute_action: skill={skill}")
         self._active_request_id = str(action.get("request_id") or "").strip() or None
@@ -410,6 +436,11 @@ class DPCLIExecutor:
 
     def _run(self, *args: str, timeout: Optional[float] = None) -> Dict[str, Any]:
         raw = self._run_raw(list(args), timeout=timeout)
+        return self._parse_raw_result(raw, args)
+
+    def _parse_raw_result(
+        self, raw: Dict[str, Any], args: Iterable[str]
+    ) -> Dict[str, Any]:
         if raw.get("timed_out"):
             return self._finalize_result(self._error_payload(
                 action=self._action_name(args),
@@ -530,6 +561,63 @@ class DPCLIExecutor:
             from skills.site_policy import BlockingSignal
 
             return BlockingSignal(False)
+
+    def _run_raw_hard(self, args: List[str], timeout: float) -> Dict[str, Any]:
+        """Run a lifecycle command without post-timeout pipe hangs.
+
+        On Windows, ``subprocess.run(timeout=...)`` may kill the direct CLI
+        process and then keep waiting because a grandchild inherited the
+        captured stdout/stderr handles.  This path releases those readers after
+        the direct process is killed, enforcing the caller's wall-clock limit.
+        """
+        import time as _time
+
+        cmd = [self.python_executable, "-m", "dp_cli", *args]
+        if "--session" not in cmd:
+            cmd.extend(["--session", self.session])
+        trace_log(f"dp_cli hard-timeout run: {' '.join(cmd)}")
+        started = _time.monotonic()
+        proc = subprocess.Popen(
+            cmd,
+            cwd=self.cwd or None,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout)
+            elapsed = _time.monotonic() - started
+            self._save_dpcli_log(cmd, stdout, stderr, proc.returncode, elapsed)
+            return {
+                "cmd": cmd,
+                "returncode": proc.returncode,
+                "stdout": stdout,
+                "stderr": stderr,
+            }
+        except subprocess.TimeoutExpired:
+            elapsed = _time.monotonic() - started
+            proc.kill()
+            try:
+                proc.wait(timeout=2.0)
+            except subprocess.TimeoutExpired:
+                pass
+            for stream in (proc.stdout, proc.stderr):
+                try:
+                    if stream is not None:
+                        stream.close()
+                except OSError:
+                    pass
+            self._save_dpcli_log(cmd, "", "", None, elapsed, timed_out=True)
+            return {
+                "cmd": cmd,
+                "returncode": None,
+                "stdout": "",
+                "stderr": "",
+                "timeout": timeout,
+                "timed_out": True,
+            }
 
     def _run_raw(self, args: List[str], timeout: Optional[float] = None) -> Dict[str, Any]:
         import time as _time

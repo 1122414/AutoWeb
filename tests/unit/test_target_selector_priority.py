@@ -71,6 +71,72 @@ class TestTargetSelectorTextHintsPriority(unittest.TestCase):
 
 class TestTargetSelectorBugRegression(unittest.TestCase):
 
+    def test_explicit_exact_text_accepts_one_offscreen_interactable_candidate(self):
+        from skills.dpcli_target_selector import TargetSelector
+
+        assert TargetSelector._matches_explicit_exact_text(
+            {
+                "ref": "e581",
+                "role": "link",
+                "name": "Steam",
+                "text": "Steam",
+                "in_viewport": False,
+                "interactable_now": True,
+            },
+            {"exact_text": "Steam"},
+        )
+
+    def test_explicit_exact_text_rejects_partial_match(self):
+        from skills.dpcli_target_selector import TargetSelector
+
+        assert not TargetSelector._matches_explicit_exact_text(
+            {"name": "Steam download"},
+            {"exact_text": "Steam"},
+        )
+
+    def test_clear_high_confidence_margin_is_safe_for_deterministic_choice(self):
+        from skills.dpcli_target_selector import TargetSelector
+
+        selector = TargetSelector.__new__(TargetSelector)
+        selector._engine = MagicMock()
+        selector._engine.is_loaded = True
+        selector._retrieve_candidates = MagicMock(return_value=[
+            {"ref": "e1", "role": "link", "name": "商店", "text": "商店", "interactable_now": True, "in_viewport": True},
+            {"ref": "e2", "role": "link", "name": "浏览商店", "text": "浏览商店"},
+        ])
+        selector._engine.get_ref.return_value = {"ref": "e1"}
+
+        result = selector.select({
+            "intent": "click",
+            "target_hint": "商店链接",
+            "target_constraints": {"role": ["link"], "text_or_name": ["商店"]},
+        })
+
+        self.assertEqual(result["status"], "selected")
+        self.assertEqual(result["target_ref"], "e1")
+
+    def test_exclude_text_removes_semantically_wrong_similar_candidate(self):
+        from skills.dpcli_target_selector import TargetSelector
+
+        selector = TargetSelector.__new__(TargetSelector)
+        selector._engine = MagicMock()
+        selector._engine.search_snapshot.return_value = [
+            {"ref": "e1", "role": "link", "name": "Stardew Valley 2016 ¥1,480"},
+            {"ref": "e2", "role": "link", "name": "Stardew Valley Soundtrack ¥498"},
+        ]
+
+        result = selector._retrieve_candidates(
+            "click",
+            "Stardew Valley",
+            {
+                "role": ["link"],
+                "text_or_name": ["Stardew Valley"],
+                "exclude_text": ["Soundtrack"],
+            },
+        )
+
+        self.assertEqual([item["ref"] for item in result], ["e1"])
+
     def test_original_bug_line_is_fixed(self):
         import os
         repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

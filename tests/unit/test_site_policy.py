@@ -87,11 +87,36 @@ def test_blocking_signals_stop_instead_of_attempting_bypass():
         {"title": "Verify you are human - CAPTCHA"}
     )
     rate = policy.detect_block_signal({"error": "HTTP 429 Too Many Requests"})
+    whaleguard = policy.detect_block_signal({"text": "whaleguard block"})
+    jd_login = policy.detect_block_signal({"title": "京东-欢迎登录"})
 
     assert captcha.detected is True
     assert captcha.kind == "captcha"
     assert rate.detected is True
     assert rate.kind == "rate_limit"
+    assert whaleguard.detected is True
+    assert whaleguard.kind == "captcha"
+    assert jd_login.detected is True
+    assert jd_login.kind == "login_required"
+
+
+def test_login_navigation_link_is_not_mistaken_for_a_login_wall():
+    policy = SitePolicy(SitePolicyConfig(robots_enabled=False))
+
+    normal_page = policy.detect_block_signal(
+        {
+            "title": "Stardew Valley on Steam",
+            "nodes": [
+                {"role": "link", "name": "请先登录"},
+                {"role": "heading", "name": "Stardew Valley"},
+            ],
+        }
+    )
+    real_gate = policy.detect_block_signal({"title": "请先登录后继续"})
+
+    assert normal_page.detected is False
+    assert real_gate.detected is True
+    assert real_gate.kind == "login_required"
 
 
 def test_shared_ledger_enforces_domain_budget_across_policy_instances(tmp_path):

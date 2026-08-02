@@ -34,6 +34,48 @@ def error_handler_node(state: AgentState, config: RunnableConfig, llm) -> Comman
         "error": None,
     }
 
+    error_type = str(state.get("error_type") or "")
+    if error_type in {"dpcli_site_blocked", "dpcli_site_policy_denied"}:
+        result_error = (state.get("dpcli_result") or {}).get("error") or {}
+        details = result_error.get("details") or {}
+        signal = (
+            details.get("blocking_signal")
+            if isinstance(details, dict)
+            else {}
+        ) or {}
+        blocker_kind = str(
+            (signal.get("kind") if isinstance(signal, dict) else "")
+            or result_error.get("code")
+            or error_type.removeprefix("dpcli_")
+        )
+        verification = _build_verification_result(
+            is_success=False,
+            is_done=True,
+            summary=f"site policy stop: {blocker_kind}",
+            source="error_handler",
+            failure_scope="global",
+            failed_action=state.get("plan", ""),
+            evidence={"blocker_kind": blocker_kind, "error": error_msg},
+            fix_hint="preserve evidence and stop; do not bypass the site gate or policy",
+            confidence=1.0,
+            needs_llm=False,
+            decision_source="site_policy_stop",
+        )
+        logger.info(
+            f"   [ErrorHandler] deterministic site-policy stop: {blocker_kind}"
+        )
+        return Command(
+            update={
+                **base_updates,
+                "messages": [
+                    AIMessage(content=f"Status: POLICY_STOP ({blocker_kind})")
+                ],
+                "verification_result": verification,
+                "is_complete": True,
+            },
+            goto="__end__",
+        )
+
     if recovery_count >= 3:
         logger.info(
             "   ❌ ErrHandler: 同一严重错误连续 3 次，停止无界恢复。"

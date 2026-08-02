@@ -2,6 +2,7 @@ import unittest
 
 import tests.unit.stubs  # noqa: F401 - installs lightweight dependency stubs
 from core.nodes import (
+    _dpcli_contract_progress_guard,
     _dpcli_policy_action_from_structured_plan,
     _dpcli_snapshot_loop_fallback_plan,
     _extract_json_object,
@@ -183,6 +184,202 @@ class DPCLIActionPromptTests(unittest.TestCase):
         )
         self.assertEqual(rewritten["action_payload"]["limit"], 5)
         self.assertEqual(rewritten["_planner_rewrite"], "data_region_direct")
+
+    def test_nested_duplicate_regions_prefer_highest_scoring_specific_region(self):
+        shared_samples = [
+            {"text": "Box of Chocolate Candy", "url": "/product/1"},
+            {"text": "Dark Red Energy Potion", "url": "/product/2"},
+        ]
+        state = {
+            "dpcli_snapshot_ref": {"snapshot_id": "ss_1"},
+            "dpcli_agent_view": {
+                "capability_map": {
+                    "data_regions": [
+                        {
+                            "ref": "r19",
+                            "kind": "card_grid",
+                            "name": "Box of Chocolate Candy",
+                            "item_count": 5,
+                            "source_score": 331,
+                            "samples": shared_samples,
+                            "available_actions": ["extract"],
+                        },
+                        {
+                            "ref": "r18",
+                            "kind": "card_grid",
+                            "name": "Box of Chocolate Candy",
+                            "item_count": 5,
+                            "source_score": 327,
+                            "samples": shared_samples,
+                            "available_actions": ["extract"],
+                        },
+                    ]
+                }
+            },
+        }
+        plan = {
+            "step_intent": "extract",
+            "target_request": {
+                "required": True,
+                "target_hint": "商品卡片区域，包含 Box of Chocolate Candy",
+                "role": "region",
+                "constraints": {"item_count": 5},
+            },
+            "action_payload": {"schema": ["title", "price", "url"], "limit": 5},
+        }
+
+        rewritten = _dpcli_snapshot_loop_fallback_plan(state, plan)
+
+        self.assertEqual(rewritten["target_request"], {"required": False})
+        self.assertEqual(rewritten["action_payload"]["target_ref"], "r19")
+
+    def test_verified_page_progress_overrides_repeated_model_extract(self):
+        state = {
+            "user_task": "抓取前3页，每页5个商品的名称、价格和URL",
+            "current_url": "https://example.test/products",
+            "dpcli_task_contract": {
+                "version": 2,
+                "task": "抓取前3页，每页5个商品的名称、价格和URL",
+                "target_url": "https://example.test/products",
+                "schema": ["title", "price", "url"],
+                "list_schema": ["title", "price", "url"],
+                "detail_schema": [],
+                "min_items": 15,
+                "max_items": 15,
+                "per_page_limit": 5,
+                "target_pages": 3,
+                "collection_mode": "pagination",
+                "filter": None,
+                "detail_required": False,
+            },
+            "dpcli_task_progress": {
+                "items": [
+                    {"title": f"p{i}", "price": i, "url": f"/p/{i}"}
+                    for i in range(5)
+                ],
+                "completed_pages": [1],
+                "active_page": 1,
+                "failed_region_refs": ["r19"],
+            },
+            "dpcli_agent_view": {
+                "capability_map": {
+                    "pagination": {
+                        "controls": [
+                            {"ref": "e25", "label": "1", "direction": "page_number", "enabled": True},
+                            {"ref": "e26", "label": "2", "direction": "page_number", "enabled": True},
+                        ]
+                    }
+                }
+            },
+        }
+        model_plan = {
+            "step_intent": "extract",
+            "target_request": {"required": False},
+            "action_payload": {"target_ref": "r19"},
+        }
+
+        guarded = _dpcli_contract_progress_guard(state, model_plan)
+
+        self.assertEqual(guarded["step_intent"], "click")
+        self.assertEqual(guarded["action_payload"]["ref"], "e26")
+        self.assertEqual(guarded["_planner_rewrite"], "contract_progress_guard")
+
+    def test_contract_filter_obligation_overrides_untracked_model_type(self):
+        from skills.task_lifecycle import task_lifecycle
+
+        task = "打开 https://example.test，在搜索框筛选关键词“a”，抓取前2页"
+        state = {
+            "user_task": task,
+            "current_url": "https://example.test",
+            "dpcli_task_contract": task_lifecycle.compile(task),
+            "dpcli_task_progress": {},
+            "dpcli_agent_view": {
+                "capability_map": {
+                    "search": {
+                        "input_ref": "e7",
+                        "input_name": "search",
+                        "kind": "search_area",
+                    }
+                }
+            },
+        }
+        model_plan = {
+            "step_intent": "type",
+            "target_request": {"required": True},
+            "action_payload": {"text": "a"},
+        }
+
+        guarded = _dpcli_contract_progress_guard(state, model_plan)
+
+        self.assertEqual(guarded["step_intent"], "type")
+        self.assertEqual(guarded["action_payload"]["ref"], "e7")
+        self.assertEqual(guarded["action_payload"]["filter_stage"], "applied")
+        self.assertTrue(guarded["_contract_action"])
+
+        state["dpcli_task_progress"] = {
+            "applied_filter_indices": [0],
+            "filter_applied": True,
+            "items": [],
+            "completed_pages": [],
+            "active_page": 1,
+            "failed_region_refs": [],
+        }
+        state["dpcli_agent_view"]["capability_map"]["data_regions"] = [
+            {
+                "ref": "r20",
+                "kind": "table",
+                "name": "teams",
+                "item_count": 10,
+                "available_actions": ["extract"],
+                "source_score": 1000,
+            }
+        ]
+
+        post_filter = _dpcli_contract_progress_guard(state, model_plan)
+
+        self.assertEqual(post_filter["step_intent"], "extract")
+        self.assertEqual(post_filter["action_payload"]["target_ref"], "r20")
+
+    def test_recoverable_extract_caps_limit_to_global_remaining_count(self):
+        state = {
+            "user_task": "提取20条名言的正文和作者",
+            "dpcli_snapshot_ref": {"snapshot_id": "ss_2"},
+            "dpcli_task_contract": {
+                "schema": ["text", "author"],
+                "list_schema": ["text", "author"],
+                "min_items": 20,
+                "max_items": 20,
+                "per_page_limit": 20,
+            },
+            "dpcli_task_progress": {
+                "items": [
+                    {"text": f"quote {i}", "author": "author"}
+                    for i in range(10)
+                ]
+            },
+            "dpcli_agent_view": {
+                "capability_map": {
+                    "data_regions": [
+                        {
+                            "ref": "r10",
+                            "kind": "repeated_structure",
+                            "name": "quotes",
+                            "item_count": 30,
+                            "available_actions": ["extract"],
+                        }
+                    ]
+                }
+            },
+        }
+        model_plan = {
+            "step_intent": "extract",
+            "target_request": {"required": True, "target_hint": "quotes"},
+            "action_payload": {"schema": ["text", "author"], "limit": 20},
+        }
+
+        rewritten = _dpcli_snapshot_loop_fallback_plan(state, model_plan)
+
+        self.assertEqual(rewritten["action_payload"]["limit"], 10)
 
     def test_coder_rejects_virtual_group_policy_action(self):
         state = {

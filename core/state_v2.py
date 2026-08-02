@@ -52,6 +52,7 @@ class TaskState(TypedDict):
 
     # 使用支持清空的 reducer
     reflections: Annotated[List[str], clearable_list_reducer]
+    journey_history: Annotated[List[Dict[str, Any]], clearable_list_reducer]
 
     is_complete: bool                   # 总体任务能否认为已完成
     loop_count: int                     # 防死循环步数控制
@@ -83,6 +84,7 @@ class AgentState(EnvState, TaskState):
     dpcli_target_result: Optional[Dict[str, Any]]       # TargetSelector output
     dpcli_structured_plan: Optional[Dict[str, Any]]     # Planner structured intent
     dpcli_task_contract: Optional[Dict[str, Any]]       # End-to-end user crawl constraints
+    target_selection_conflict_count: Optional[int]      # Repeated identical selector conflicts
     dpcli_task_progress: Optional[Dict[str, Any]]       # Deduplicated rows/pages/failed refs
     dpcli_request_id: Optional[str]                     # Stable per-step CLI idempotency key
     dpcli_detail_batch_ran: bool
@@ -99,6 +101,12 @@ class AgentState(EnvState, TaskState):
     dpcli_action_kind: Optional[str]
     dpcli_verification_contract: Optional[Dict[str, Any]]
     site_policy_decision: Optional[Dict[str, Any]]    # robots/pacing/block evidence
+
+    # Agent Skills：目录元数据常驻，正文仅在 LLM 选中后加载
+    skill_selection_key: Optional[str]                 # task + domain + catalog 指纹
+    skill_selection: Optional[Dict[str, Any]]          # 选择原因、无效名称与审计信息
+    active_skill_names: List[str]                      # 当前任务/域名实际加载的技能
+    active_skill_context: Optional[str]                # 已选 SKILL.md 正文（供 Planner）
 
     # Verifier 确定性判定策略配置（P3: 后续接口预留）
     # {min_target_confidence, schema_coverage_threshold,

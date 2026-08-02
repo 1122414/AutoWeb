@@ -19,7 +19,7 @@ def _dpcli_action_kind(action: Optional[Dict[str, Any]] = None) -> str:
 
     observation: snapshot, expand, resolve-locator, find, session.inspect
                  (improve agent's visible context, no page effect expected)
-    data: extract, list-items, batch-detail-extract
+    data: extract, list-items, batch-detail-extract, eval
           (produce structured data output)
     page: open, navigate, click, type, scroll, wait
           (change browser state or page content)
@@ -28,7 +28,7 @@ def _dpcli_action_kind(action: Optional[Dict[str, Any]] = None) -> str:
     if skill in {"snapshot", "expand", "resolve-locator", "find",
                  "session.inspect", "session_inspect"}:
         return "observation"
-    if skill in {"extract", "list-items", "batch-detail-extract"}:
+    if skill in {"extract", "list-items", "batch-detail-extract", "eval"}:
         return "data"
     if skill in {"open", "navigate", "click", "type", "scroll", "wait"}:
         return "page"
@@ -126,6 +126,101 @@ def _render_dpcli_snapshot_text(view: Dict[str, Any]) -> str:
         "delta": view.get("delta"),
         "last_result": view.get("last_result"),
     }, ensure_ascii=False, indent=2)
+
+
+def _compact_planner_view(agent_view: Dict[str, Any]) -> Dict[str, Any]:
+    """Project the lossy planner view into a bounded decision context.
+
+    The full snapshot and searchable index remain available to TargetSelector.
+    Planner only needs page identity, capability summaries, and a few short
+    representatives.  In particular, first-snapshot ``delta.added_refs`` and
+    long container text add thousands of tokens without helping intent choice.
+    """
+
+    def short(value: Any, limit: int = 160) -> Any:
+        if isinstance(value, str):
+            normalized = " ".join(value.split())
+            return normalized if len(normalized) <= limit else normalized[: limit - 1] + "…"
+        return value
+
+    def sample(item: Any) -> Any:
+        if not isinstance(item, dict):
+            return short(item)
+        keys = (
+            "ref", "group_ref", "group_id", "kind", "role", "tag", "name",
+            "text", "url", "input_ref", "input_name", "parent_ref",
+            "item_count", "count", "link_count", "region_ref", "region_kind",
+            "source_score", "available_actions", "enabled", "direction", "label",
+        )
+        return {key: short(item.get(key)) for key in keys if item.get(key) not in (None, "", [])}
+
+    capability_map = agent_view.get("capability_map") or {}
+    compact_capabilities: Dict[str, Any] = {}
+    limits = {
+        "search": 3,
+        "navigation": 5,
+        "forms": 5,
+        "data_regions": 5,
+        "pagination": 5,
+        "content_regions": 5,
+        "dialogs": 3,
+        "primary_actions": 12,
+    }
+    for key, limit in limits.items():
+        values = capability_map.get(key) or []
+        projected = []
+        for value in list(values)[:limit]:
+            row = sample(value)
+            if isinstance(value, dict):
+                if value.get("inputs"):
+                    row["inputs"] = [sample(entry) for entry in value["inputs"][:4]]
+                if value.get("buttons"):
+                    row["buttons"] = [sample(entry) for entry in value["buttons"][:4]]
+                if value.get("samples"):
+                    row["samples"] = [sample(entry) for entry in value["samples"][:2]]
+                if value.get("controls"):
+                    row["controls"] = [sample(entry) for entry in value["controls"][:8]]
+                if value.get("links"):
+                    row["links"] = list(value["links"][:10])
+                if value.get("nearby_buttons"):
+                    row["nearby_buttons"] = list(value["nearby_buttons"][:5])
+            projected.append(row)
+        compact_capabilities[key] = projected
+
+    coverage = agent_view.get("coverage") or {}
+    compact_coverage = {
+        key: coverage.get(key)
+        for key in ("total_interactables", "shown_representatives", "total_data_regions")
+        if coverage.get(key) is not None
+    }
+    compact_coverage["recoverable_groups"] = []
+    for group in list(coverage.get("recoverable_groups") or [])[:6]:
+        row = sample(group)
+        row["samples"] = [sample(entry) for entry in list(group.get("samples") or [])[:2]]
+        compact_coverage["recoverable_groups"].append(row)
+
+    delta = agent_view.get("delta") or {}
+    compact_delta = {
+        "from_snapshot_id": delta.get("from_snapshot_id"),
+        "added_count": len(delta.get("added_refs") or []),
+        "removed_count": len(delta.get("removed_refs") or []),
+        "changed_count": len(delta.get("changed_refs") or []),
+        "rebound_count": len(delta.get("rebound_refs") or []),
+        "unchanged_count": delta.get("unchanged_count", 0),
+    }
+
+    return {
+        "page": {
+            key: short((agent_view.get("page") or {}).get(key), 240)
+            for key in ("url", "title", "domain", "snapshot_id", "snapshot_seq", "page_id")
+        },
+        "focus": agent_view.get("focus") or {},
+        "capability_map": compact_capabilities,
+        "top_level_groups": [sample(group) for group in list(agent_view.get("top_level_groups") or [])[:12]],
+        "coverage": compact_coverage,
+        "delta_summary": compact_delta,
+        "planner_instructions": list(agent_view.get("planner_instructions") or [])[:4],
+    }
 
 
 def _observer_dpcli_snapshot(state: AgentState) -> Optional[Command]:
@@ -286,6 +381,12 @@ def _build_full_snapshot_command(
     index_summary = _build_index_summary(index_data, store.session_dir, snapshot_id)
     text = json.dumps(agent_view, ensure_ascii=False, indent=2)
     page = result.get("data", {}).get("page", {})
+    observed_url = str(page.get("url") or "")
+    known_url = str(state.get("current_url") or "")
+    observed_is_blank = not observed_url or observed_url.startswith(
+        ("about:", "data:", "chrome://")
+    )
+    effective_url = known_url if observed_is_blank and known_url else observed_url
 
     return Command(
         update={
@@ -317,7 +418,7 @@ def _build_full_snapshot_command(
             "dpcli_observer_diagnostics": diagnostics,
             "dom_skeleton": text,
             "dom_hash": hashlib.md5(text.encode()).hexdigest(),
-            "current_url": str(page.get("url") or state.get("current_url", "")),
+            "current_url": effective_url,
         },
         goto="Planner",
     )
@@ -431,7 +532,12 @@ def _dpcli_action_context(state: AgentState) -> str:
         )
 
     target_result = state.get("dpcli_target_result") or {}
-    if target_result:
+    target_required = (
+        structured_plan.get("target_request", {}).get("required", False)
+        if isinstance(structured_plan.get("target_request"), dict)
+        else False
+    )
+    if target_result and target_required:
         status = target_result.get("status", "unknown")
         target_ref = target_result.get("target_ref", "")
         confidence = target_result.get("confidence", 0)
@@ -498,7 +604,10 @@ def _validate_dpcli_action(action: Dict[str, Any], state: Optional[AgentState] =
         )
 
     if skill == "click" and state:
-        if _state_has_dpcli_refs(state) and params.get("locator"):
+        if (
+            _state_has_dpcli_refs(state)
+            and params.get("locator")
+        ):
             return "click must use a snapshot ref instead of a free-form locator"
 
     if skill in ("click", "type", "select") and state:
@@ -624,6 +733,45 @@ def _dpcli_snapshot_loop_fallback_plan(
     return rewritten
 
 
+def _dpcli_contract_progress_guard(
+    state: AgentState,
+    structured_plan: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Keep model plans within verified lifecycle obligations and progress."""
+    intent = str(structured_plan.get("step_intent") or "").strip().lower()
+    progress = state.get("dpcli_task_progress") or {}
+    contract = state.get("dpcli_task_contract") or {}
+    if not contract:
+        return structured_plan
+
+    from skills.task_lifecycle import task_lifecycle
+
+    guard_plan, _updates = task_lifecycle.decide(state, contract)
+    if not isinstance(guard_plan, dict):
+        return structured_plan
+    guard_intent = str(guard_plan.get("step_intent") or "").strip().lower()
+    lifecycle_intents = {"open", "type", "select", "click", "scroll", "wait", "finish"}
+    repeated_data = (
+        intent in {"extract", "list-items", "batch-detail-extract"}
+        and bool(progress.get("failed_region_refs"))
+        and guard_intent not in {"extract", "list-items", "batch-detail-extract", "fail"}
+    )
+    intent_conflict = bool(guard_intent and guard_intent != intent and guard_intent != "fail")
+    if (
+        guard_intent not in lifecycle_intents
+        and not repeated_data
+        and not intent_conflict
+    ):
+        return structured_plan
+    guarded = dict(guard_plan)
+    guarded["_planner_rewrite"] = "contract_progress_guard"
+    guarded["reason"] = (
+        f"{guarded.get('reason', '')} Verified task lifecycle obligations and "
+        "progress take precedence over the model proposal."
+    ).strip()
+    return guarded
+
+
 def _dpcli_recoverable_data_candidate(
     state: AgentState, structured_plan: Optional[Dict[str, Any]] = None
 ) -> Optional[Dict[str, Any]]:
@@ -642,14 +790,36 @@ def _dpcli_recoverable_data_candidate(
         else {}
     )
     task_contract = state.get("dpcli_task_contract") or {}
-    extract_schema = (
-        action_payload.get("schema")
+    if not task_contract and state.get("user_task"):
+        from skills.task_lifecycle import task_lifecycle
+
+        task_contract = task_lifecycle.compile(str(state.get("user_task") or ""))
+    contract_schema = list(
+        task_contract.get("list_schema")
         or task_contract.get("schema")
-        or ["title", "url"]
+        or []
     )
-    extract_limit = action_payload.get("limit")
-    if extract_limit is None:
-        extract_limit = task_contract.get("per_page_limit") or 20
+    requested_schema = action_payload.get("schema") or []
+    if isinstance(requested_schema, str):
+        requested_schema = [requested_schema]
+    extract_schema = list(
+        dict.fromkeys([*contract_schema, *list(requested_schema)])
+    ) or ["title", "url"]
+    requested_limit = int(action_payload.get("limit") or 0)
+    contract_limit = int(task_contract.get("per_page_limit") or 0)
+    collected_count = len((state.get("dpcli_task_progress") or {}).get("items") or [])
+    required_count = int(
+        task_contract.get("max_items")
+        or task_contract.get("min_items")
+        or 0
+    )
+    remaining_limit = max(1, required_count - collected_count) if required_count else 0
+    positive_limits = [
+        value
+        for value in (requested_limit, contract_limit, remaining_limit)
+        if value > 0
+    ]
+    extract_limit = min(positive_limits) if positive_limits else 20
 
     regions = list(capability_map.get("data_regions") or [])
     ranked_regions = sorted(
@@ -670,7 +840,39 @@ def _dpcli_recoverable_data_candidate(
         ]
         explicit_top_ref = str(top_region.get("ref") or "").lower() in hint_values
         if not explicit_top_ref and top_score - second_score < 15:
-            return None
+            second_region = ranked_regions[1][1]
+
+            def _region_signature(region: Dict[str, Any]) -> tuple:
+                samples = tuple(
+                    (
+                        str(sample.get("text") or "").strip().lower(),
+                        str(sample.get("url") or "").strip().lower(),
+                    )
+                    for sample in (region.get("samples") or [])[:3]
+                    if isinstance(sample, dict)
+                )
+                return (
+                    str(region.get("kind") or "").strip().lower(),
+                    str(region.get("name") or "").strip().lower(),
+                    int(region.get("item_count") or 0),
+                    samples,
+                )
+
+            # Nested wrappers often produce duplicate data-region candidates.
+            # They represent the same records, so prefer the most specific,
+            # highest-scoring region instead of forcing an impossible element
+            # arbitration loop. Truly distinct but similarly scored regions
+            # remain ambiguous and continue through TargetSelector.
+            top_signature = _region_signature(top_region)
+            second_signature = _region_signature(second_region)
+            top_source_score = int(top_region.get("source_score") or 0)
+            second_source_score = int(second_region.get("source_score") or 0)
+            if (
+                top_signature != second_signature
+                or not top_signature[-1]
+                or top_source_score <= second_source_score
+            ):
+                return None
 
     for _score, region in ranked_regions:
         ref = str(region.get("ref") or "")
@@ -835,8 +1037,12 @@ def _dpcli_policy_action_from_structured_plan(
     is_planner_rewrite = structured_plan.get("_planner_rewrite") in {
         "snapshot_loop_guard",
         "data_region_direct",
+        "contract_progress_guard",
     }
-    if not is_planner_rewrite and structured_plan.get("_contract_action") is not True:
+    if (
+        not is_planner_rewrite
+        and structured_plan.get("_contract_action") is not True
+    ):
         return None
 
     intent = str(structured_plan.get("step_intent") or "").strip().lower()
@@ -854,7 +1060,10 @@ def _dpcli_policy_action_from_structured_plan(
                 "reason": reason,
             }
     if intent == "click":
-        ref = payload.get("ref") or payload.get("target_ref")
+        ref = (
+            payload.get("ref")
+            or payload.get("target_ref")
+        )
         locator = payload.get("locator")
         if ref or locator:
             params: Dict[str, Any] = {}
@@ -866,7 +1075,10 @@ def _dpcli_policy_action_from_structured_plan(
                 params["wait_time"] = payload.get("wait_time")
             return {"skill": "click", "params": params, "reason": reason}
     if intent == "type":
-        ref = payload.get("ref") or payload.get("target_ref")
+        ref = (
+            payload.get("ref")
+            or payload.get("target_ref")
+        )
         locator = payload.get("locator")
         text = payload.get("text")
         if (ref or locator) and text is not None:
@@ -949,10 +1161,13 @@ def _dpcli_planner_context(state: AgentState) -> str:
     if not agent_view:
         return ""
 
+    current_url = str(state.get("current_url", "") or "")
+    planner_view = _compact_planner_view(agent_view)
+
     try:
         import json
         view_text = json.dumps(
-            agent_view,
+            planner_view,
             ensure_ascii=False,
             separators=(",", ":"),
         )
@@ -969,12 +1184,16 @@ def _dpcli_planner_context(state: AgentState) -> str:
         for item in list(state.get("reflections", []) or [])[-5:]
     ]
 
-    return DPCLI_PLANNER_PROMPT.format(
+    prompt = DPCLI_PLANNER_PROMPT.format(
         agent_view=view_text,
         user_task=task,
-        current_url=state.get("current_url", ""),
+        current_url=current_url,
         finished_steps=finished_steps,
         reflections=json.dumps(reflections, ensure_ascii=False),
         loop_count=str(state.get("loop_count", 0)),
         execution_mode=state.get("execution_mode", "python_code"),
     )
+    skill_context = str(state.get("active_skill_context") or "").strip()
+    if skill_context:
+        prompt += "\n\n" + skill_context
+    return prompt

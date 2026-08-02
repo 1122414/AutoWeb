@@ -28,6 +28,7 @@ def test_graph_registers_command_nodes_and_hitl_interrupts():
     assert {
         "Observer",
         "Planner",
+        "SkillSelector",
         "CacheLookup",
         "Coder",
         "Executor",

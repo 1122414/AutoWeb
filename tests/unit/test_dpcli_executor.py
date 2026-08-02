@@ -33,6 +33,7 @@ class DPCLIExecutorTests(unittest.TestCase):
         self.assertIn("--headless", args)
         self.assertEqual(args[-2:], ["--session", "unit"])
         self.assertIn("--wait-time", args)
+        self.assertEqual(args[args.index("--navigation-timeout") + 1], "15.0")
 
     @patch("skills.dpcli_executor.subprocess.run")
     def test_nonzero_json_error_is_preserved(self, run):
@@ -193,6 +194,29 @@ class DPCLIExecutorTests(unittest.TestCase):
         self.assertEqual(result["error"]["code"], "invalid_action")
 
     @patch("skills.dpcli_executor.subprocess.run")
+    def test_execute_action_treats_navigate_as_open_alias(self, run):
+        payload = {
+            "ok": True,
+            "session": "unit",
+            "action": "open",
+            "data": {"page": {"url": "https://example.test/next"}},
+            "error": None,
+        }
+        run.return_value = Mock(
+            returncode=0, stdout=json.dumps(payload), stderr=""
+        )
+
+        result = self.make_executor().execute_action({
+            "skill": "navigate",
+            "params": {"url": "https://example.test/next"},
+        })
+
+        self.assertTrue(result["ok"])
+        args = run.call_args.args[0]
+        self.assertIn("open", args)
+        self.assertNotIn("navigate", args)
+
+    @patch("skills.dpcli_executor.subprocess.run")
     def test_batch_detail_filters_invalid_and_duplicate_urls(self, run):
         payload = {
             "ok": True,
@@ -232,8 +256,8 @@ class DPCLIExecutorTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertEqual(result["error"]["code"], "invalid_action")
 
-    @patch("skills.dpcli_executor.subprocess.run")
-    def test_session_close_dispatches_without_headless_flag(self, run):
+    @patch("skills.dpcli_executor.subprocess.Popen")
+    def test_session_close_dispatches_without_headless_flag(self, popen):
         payload = {
             "ok": True,
             "session": "unit",
@@ -241,14 +265,29 @@ class DPCLIExecutorTests(unittest.TestCase):
             "data": {"closed": True},
             "error": None,
         }
-        run.return_value = Mock(returncode=0, stdout=json.dumps(payload), stderr="")
+        process = Mock(returncode=0)
+        process.communicate.return_value = (json.dumps(payload), "")
+        popen.return_value = process
 
         result = self.make_executor().session_close()
 
         self.assertTrue(result["ok"])
-        args = run.call_args.args[0]
+        args = popen.call_args.args[0]
         self.assertEqual(args[:5], ["python", "-m", "dp_cli", "session", "close"])
         self.assertNotIn("--headless", args)
+
+    @patch("skills.dpcli_executor.subprocess.Popen")
+    def test_session_close_has_hard_timeout(self, popen):
+        process = Mock(returncode=None)
+        process.communicate.side_effect = subprocess.TimeoutExpired(["python"], 2)
+        process.wait.return_value = 0
+        popen.return_value = process
+
+        result = self.make_executor().session_close(timeout_seconds=2)
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"]["code"], "timeout")
+        process.kill.assert_called_once()
 
 
 if __name__ == "__main__":

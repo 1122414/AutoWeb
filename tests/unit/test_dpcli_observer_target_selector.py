@@ -524,6 +524,25 @@ class TestTargetSelector(unittest.TestCase):
         })
         self.assertEqual(result["status"], "selected")
 
+    def test_select_page_number_from_capability_map(self):
+        agent_view = PlannerViewGenerator().generate(SAMPLE_SNAPSHOT)
+        result = TargetSelector.select_from_capability_map(
+            {
+                "intent": "click",
+                "target_hint": "分页控件中的第2页按钮",
+                "target_constraints": {
+                    "role": ["button"],
+                    "text_or_name": ["2"],
+                    "region_hint": "pagination",
+                },
+            },
+            agent_view,
+        )
+        self.assertIsNotNone(result)
+        self.assertEqual(result["status"], "selected")
+        self.assertEqual(result["target_ref"], "e5")
+        self.assertEqual(result["selection_mode"], "capability_map")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -30,6 +30,7 @@ from config import (
     CODER_BASE_URL,
     CODER_MODEL_NAME,
     MODEL_NAME,
+    OBSERVER_MODEL_NAME,
     OPENAI_API_KEY,
     OPENAI_BASE_URL,
     PLANNER_API_KEY,
@@ -44,6 +45,7 @@ from core.llm_factory import create_llm
 from langgraph.checkpoint.memory import MemorySaver
 from skills.observer import BrowserObserver
 from skills.dpcli_executor import DPCLIExecutor
+from skills.run_trace import get_run_trace_store
 
 
 @dataclass(frozen=True)
@@ -408,6 +410,10 @@ def _compact_update(node: str, update: Any) -> dict[str, Any]:
         "dpcli_target_result",
         "dpcli_task_contract",
         "dpcli_task_progress",
+        "dpcli_execution_evidence",
+        "skill_selection",
+        "active_skill_names",
+        "human_approval_required",
         "error",
         "error_type",
         "is_complete",
@@ -424,9 +430,21 @@ def _compact_update(node: str, update: Any) -> dict[str, Any]:
                     "action": value.get("action"),
                     "error": value.get("error"),
                     "page_url": _page_url(value),
+                    "page_title": (
+                        (data.get("page") or {}).get("title")
+                        if isinstance(data.get("page"), dict)
+                        else None
+                    ),
+                    "page_status": (
+                        (data.get("page") or {}).get("status_code")
+                        or (data.get("page") or {}).get("http_status")
+                        if isinstance(data.get("page"), dict)
+                        else None
+                    ),
                     "item_count": data.get("item_count"),
                     "detail_pages_extracted": data.get("detail_pages_extracted"),
                     "projection": data.get("projection"),
+                    "result": data.get("result") if value.get("action") == "eval" else None,
                     "items": _result_items(value)[:5],
                 }
             if key == "dpcli_task_progress" and isinstance(value, dict):
@@ -452,12 +470,90 @@ def _terminal_status(values: dict[str, Any]) -> str:
     return "completed" if verification.get("is_success") is True else "failed"
 
 
+def _aggregate_trace_usage(thread_ids: list[str]) -> dict[str, Any]:
+    store = get_run_trace_store()
+    if store is None:
+        return {
+            "available": False,
+            "by_thread": [],
+            "event_count": 0,
+            "llm_call_count": 0,
+            "browser_action_count": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
+            "estimated_call_count": 0,
+            "cost_usd": 0.0,
+            "traced_duration_ms": 0.0,
+            "llm_duration_ms": 0.0,
+            "browser_duration_ms": 0.0,
+            "token_precision": "unavailable",
+        }
+    by_thread = [asdict(store.summarize(thread_id)) for thread_id in thread_ids]
+    totals = {
+        key: sum(item[key] for item in by_thread)
+        for key in (
+            "event_count",
+            "llm_call_count",
+            "browser_action_count",
+            "input_tokens",
+            "output_tokens",
+            "total_tokens",
+            "estimated_call_count",
+            "cost_usd",
+            "total_duration_ms",
+            "llm_duration_ms",
+            "browser_duration_ms",
+        )
+    }
+    estimated = int(totals["estimated_call_count"])
+    calls = int(totals["llm_call_count"])
+    if not calls:
+        precision = "no_llm_calls"
+    elif not estimated:
+        precision = "provider_reported"
+    elif estimated == calls:
+        precision = "estimated"
+    else:
+        precision = "mixed"
+    return {
+        "available": True,
+        "by_thread": by_thread,
+        "event_count": int(totals["event_count"]),
+        "llm_call_count": calls,
+        "browser_action_count": int(totals["browser_action_count"]),
+        "input_tokens": int(totals["input_tokens"]),
+        "output_tokens": int(totals["output_tokens"]),
+        "total_tokens": int(totals["total_tokens"]),
+        "estimated_call_count": estimated,
+        "cost_usd": round(float(totals["cost_usd"]), 8),
+        "traced_duration_ms": round(float(totals["total_duration_ms"]), 3),
+        "llm_duration_ms": round(float(totals["llm_duration_ms"]), 3),
+        "browser_duration_ms": round(float(totals["browser_duration_ms"]), 3),
+        "token_precision": precision,
+    }
+
+
+def _model_configuration() -> dict[str, Any]:
+    return {
+        "default": MODEL_NAME,
+        "coder": CODER_MODEL_NAME,
+        "observer": OBSERVER_MODEL_NAME,
+        "planner": PLANNER_MODEL_NAME,
+        "verifier": VERIFIER_MODEL_NAME,
+        "provider_base_url": OPENAI_BASE_URL,
+        "enable_thinking": os.getenv("LLM_ENABLE_THINKING"),
+    }
+
+
 def run_case(
     app: Any,
     browser: Any,
     case: BenchmarkCase,
     repeat: int,
     max_resumes: int,
+    *,
+    preopen_target: bool = False,
 ) -> dict[str, Any]:
     session = f"benchmark-{case.key}-{repeat}-{uuid.uuid4().hex[:8]}"
     initial_thread_id = str(uuid.uuid4())
@@ -475,6 +571,11 @@ def run_case(
         "loop_count": 0,
         "finished_steps": [],
         "reflections": [],
+        "journey_history": [],
+        "skill_selection_key": None,
+        "skill_selection": None,
+        "active_skill_names": [],
+        "active_skill_context": "",
         "hitl_mode": "off",
         "_task_started_at": datetime.now().isoformat(),
         "_cache_failed_this_round": False,
@@ -503,6 +604,27 @@ def run_case(
     started = time.monotonic()
     events: list[dict[str, Any]] = []
     results: list[dict[str, Any]] = []
+    if preopen_target:
+        preopen = DPCLIExecutor(
+            session=session,
+            headless=True,
+            timeout_seconds=60.0,
+        ).open(case.url, wait_time=0.1, navigation_timeout=10.0)
+        results.append(_json_safe(preopen))
+        preopen_url = _page_url(preopen) or case.url
+        initial_state["current_url"] = preopen_url
+        events.append(
+            {
+                "node": "__deterministic_preopen__",
+                "current_url": preopen_url,
+                "dpcli_result": {
+                    "ok": preopen.get("ok"),
+                    "action": preopen.get("action"),
+                    "error": preopen.get("error"),
+                    "page_url": preopen_url,
+                },
+            }
+        )
     exception = None
     status = "max_resumes"
     next_input: Any = initial_state
@@ -593,6 +715,24 @@ def run_case(
 
     elapsed = time.monotonic() - started
     evaluation = _evaluate(case, status, results)
+    usage = _aggregate_trace_usage(thread_ids)
+    skill_decisions = [
+        event["skill_selection"]
+        for event in events
+        if isinstance(event.get("skill_selection"), dict)
+    ]
+    selected_skills = list(dict.fromkeys(
+        str(name)
+        for decision in skill_decisions
+        for name in (decision.get("selected_skills") or [])
+        if name
+    ))
+    invalid_skills = list(dict.fromkeys(
+        str(name)
+        for decision in skill_decisions
+        for name in (decision.get("invalid_skills") or [])
+        if name
+    ))
     return {
         "case": asdict(case),
         "repeat": repeat,
@@ -601,6 +741,12 @@ def run_case(
         "status": status,
         "exception": exception,
         "elapsed_seconds": round(elapsed, 3),
+        "usage": usage,
+        "skill_selection": {
+            "decision_count": len(skill_decisions),
+            "selected_skills": selected_skills,
+            "invalid_skills": invalid_skills,
+        },
         "resume_count": resume_count,
         "event_count": len(events),
         "restart_simulated": bool(restart_count),
@@ -618,7 +764,10 @@ def run_case(
                     if isinstance(result.get("data"), dict)
                     else None
                 ),
-                "items": _result_items(result)[:10],
+                # Persist every extracted record. Benchmark summaries may use
+                # small samples, but the run artifact is also the crawl data
+                # delivery and must never silently truncate successful output.
+                "items": _result_items(result),
             }
             for result in results
         ],
@@ -685,6 +834,13 @@ def main() -> int:
                         "suite_elapsed_seconds": round(
                             time.monotonic() - suite_started, 3
                         ),
+                        "configuration": {
+                            "headless": True,
+                            "max_resumes": args.max_resumes,
+                            "repeats": args.repeats,
+                            "cases": selected_keys,
+                            "models": _model_configuration(),
+                        },
                         "runs": runs,
                     },
                     ensure_ascii=False,
@@ -702,6 +858,8 @@ def main() -> int:
                             "unique_item_count"
                         ],
                         "elapsed_seconds": run["elapsed_seconds"],
+                        "total_tokens": run["usage"]["total_tokens"],
+                        "llm_call_count": run["usage"]["llm_call_count"],
                     },
                     ensure_ascii=False,
                 ),
@@ -716,6 +874,7 @@ def main() -> int:
             "max_resumes": args.max_resumes,
             "repeats": args.repeats,
             "cases": selected_keys,
+            "models": _model_configuration(),
         },
         "runs": runs,
     }

@@ -14,6 +14,7 @@ AutoWeb 是一个基于 LangGraph 的智能网页自动化 Agent。当前版本�
 - `ActionCache`：在 dp_cli 模式下缓存成功动作，用于替代一部分“重复写代码”的场景。
 - `dp_cli snapshot`：可选用 CLI 快照作为 Observer 的轻量观察输入，失败时可回退到原 DOM Observer。
 - `batch-detail-extract`：针对“列表页抓详情页”任务，Verifier 可在一次成功提取后继续生成批量详情动作。
+- `Agent Skills`：启动时只发现各 `SKILL.md` 的 `name + description`；由 LLM 按任务和当前域名选择后，才把选中技能正文渐进加载给 Planner。
 
 ## Current Status
 
@@ -25,7 +26,11 @@ AutoWeb 是一个基于 LangGraph 的智能网页自动化 Agent。当前版本�
 graph TD
     Start((Start)) --> Observer
     Observer --> Planner
-    Planner --> Done{Task done?}
+    Planner --> SkillNeeded{Task/domain/catalog changed?}
+    SkillNeeded -- Yes --> SkillSelector[SkillSelector: name + description only]
+    SkillSelector --> LoadSkills[Load selected SKILL.md bodies]
+    LoadSkills --> Planner
+    SkillNeeded -- No --> Done{Task done?}
     Done -- Yes --> End((End))
     Done -- No --> CacheLookup
 
@@ -60,6 +65,7 @@ graph TD
 | Capability | Current implementation |
 | --- | --- |
 | Multi-node workflow | `Observer -> Planner -> CacheLookup -> Coder -> Executor -> Verifier` |
+| Progressive Agent Skills | `Planner -> SkillSelector -> Planner`；模型只先看元数据，选中后加载正文 |
 | Dual execution mode | `python_code` for legacy Python strategies, `dp_cli` for structured CLI actions |
 | Human-in-the-loop | Executor 前可人工审查 Python 代码或 Action JSON，Verifier 后可确认结果 |
 | DomCache | Observer 阶段缓存页面结构和语义观察 |
@@ -83,6 +89,7 @@ AutoWeb/
 ├── drivers/
 │   └── drission_driver.py          # DrissionPage 浏览器单例
 ├── prompts/                        # LLM prompt 模板
+├── agent_skills/                   # 每个技能一个目录及必需的 SKILL.md
 ├── skills/                         # 运行时模块 (actor, observer, cache, dpcli, logger, toolbox)
 ├── rag/                            # RAG schema、retriever、QA
 ├── scripts/
@@ -179,6 +186,12 @@ ACTION_CACHE_STORE_PATH=./output/action_cache.json
 # --- Public structured-content fallback (SessionPage JSON-LD only) ---
 SESSION_STRUCTURED_FALLBACK_ENABLED=True
 
+# --- LLM-selected Agent Skills ---
+AGENT_SKILLS_ENABLED=True
+AGENT_SKILLS_DIR=./agent_skills
+AGENT_SKILLS_MAX_SELECTED=3
+AGENT_SKILLS_MAX_BODY_CHARS=20000
+
 # --- Site policy: robots, shared budget, and 429 cooldown ---
 SITE_POLICY_ENABLED=True
 SITE_POLICY_MIN_INTERVAL_SECONDS=0.5
@@ -194,6 +207,8 @@ SITE_POLICY_COOLDOWN_SECONDS=300
 2. 设置 `DPCLI_ENABLED=True`，只验证单步动作生成和执行。
 3. 再开启 `DPCLI_OBSERVER_ENABLED=True`，验证快照观察质量。
 4. 最后开启 `ACTION_CACHE_ENABLED=True`，验证动作缓存复用。
+
+Agent Skills 默认开启。目录扫描只读取 YAML frontmatter 中的 `name` 和 `description`；同一任务停留在同一域名时复用选择，任务、域名或技能目录变化后重新选择。完整协议见 [`docs/architecture/agent-skills.md`](docs/architecture/agent-skills.md)。
 
 ### 3. Run AutoWeb
 
@@ -276,6 +291,8 @@ ActionCache 是本次更新新增的轻量动作缓存。它面向 dp_cli 模式
 | `DPCLI_BATCH_TIMEOUT_SECONDS` | `900` | 批量动作超时 |
 | `DPCLI_OBSERVER_ENABLED` | `False` | Observer 是否优先使用 dp_cli snapshot |
 | `DPCLI_OBSERVER_FALLBACK_TO_DOM` | `True` | dp_cli snapshot 失败时是否回退原 DOM Observer |
+| `DPCLI_TASK_CONTRACT_ENABLED` | `True` | 是否由确定性任务契约直接规划；模型横评时设为 `False`，契约仍负责字段、数量和完成度校验 |
+| `LLM_ENABLE_THINKING` | 未设置 | 可选的模型思考模式开关；模型横评脚本会显式关闭以保证条件一致 |
 | `ACTION_CACHE_ENABLED` | `False` | 是否启用 dp_cli ActionCache |
 | `ACTION_CACHE_THRESHOLD` | `0.75` | ActionCache 相似度阈值 |
 | `ACTION_CACHE_STORE_PATH` | `./output/action_cache.json` | ActionCache JSON 存储路径 |
@@ -299,6 +316,20 @@ python scripts\smoke\smoke_dpcli_executor.py
 ```
 
 注意：部分历史测试依赖 Milvus、pymilvus 或本地模型服务。没有准备这些外部依赖时，建议先运行 unit 测试。
+
+## Natural-language Crawler Model Benchmark
+
+下面的矩阵会在真实本地浏览器中依次运行 `deepseek-v4-flash`、`kimi-k2.6` 和 `kimi-k2.5`，覆盖分页、无限滚动、详情页聚合、表单筛选和浏览器重启恢复任务。脚本会分别保存运行轨迹、JSON 结果和日志，并生成一份自包含 HTML 报告：
+
+```bash
+python scripts\benchmark\benchmark_model_matrix.py --models deepseek-v4-flash,kimi-k2.6,kimi-k2.5 --output output\benchmarks\model_matrix.json --report output\reports\autoweb_crawler_model_comparison.html
+```
+
+模型横评会关闭确定性契约的直接规划、DOM/代码/动作缓存和模型思考模式，让三个模型处理相同的页面与任务；契约仍用于结构化字段、目标数量和完成条件校验。运行前请确认 `.env` 已配置百炼兼容接口，并可先执行：
+
+```bash
+python scripts\verify_deployment.py --require-runtime-config --check-browser
+```
 
 ## Development Notes
 

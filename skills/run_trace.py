@@ -118,6 +118,8 @@ class RunUsageSummary:
     estimated_call_count: int
     cost_usd: float
     total_duration_ms: float
+    llm_duration_ms: float
+    browser_duration_ms: float
 
 
 class RunTraceStore:
@@ -251,7 +253,9 @@ class RunTraceStore:
                     COALESCE(SUM(total_tokens), 0) AS total_tokens,
                     SUM(CASE WHEN estimated_tokens = 1 THEN 1 ELSE 0 END) AS estimated_calls,
                     COALESCE(SUM(cost_usd), 0) AS cost_usd,
-                    COALESCE(SUM(duration_ms), 0) AS total_duration_ms
+                    COALESCE(SUM(duration_ms), 0) AS total_duration_ms,
+                    COALESCE(SUM(CASE WHEN event_type = 'llm' THEN duration_ms ELSE 0 END), 0) AS llm_duration_ms,
+                    COALESCE(SUM(CASE WHEN event_type = 'browser_action' THEN duration_ms ELSE 0 END), 0) AS browser_duration_ms
                 FROM autoweb_run_trace WHERE thread_id = ?
                 """,
                 (str(thread_id),),
@@ -267,6 +271,8 @@ class RunTraceStore:
             estimated_call_count=int(row["estimated_calls"] or 0),
             cost_usd=round(float(row["cost_usd"] or 0), 8),
             total_duration_ms=round(float(row["total_duration_ms"] or 0), 3),
+            llm_duration_ms=round(float(row["llm_duration_ms"] or 0), 3),
+            browser_duration_ms=round(float(row["browser_duration_ms"] or 0), 3),
         )
 
     def summary_dict(self, thread_id: str) -> dict[str, Any]:
@@ -311,6 +317,28 @@ def _thread_id(config: Mapping[str, Any] | None) -> str:
     return str(configurable.get("thread_id") or "unscoped")
 
 
+def _is_transient_llm_error(exc: Exception) -> bool:
+    """Recognize transport failures that are safe to retry without re-planning."""
+
+    text = f"{type(exc).__name__}: {exc}".lower()
+    markers = (
+        "readerror",
+        "connecterror",
+        "connection reset",
+        "connection aborted",
+        "decryption_failed_or_bad_record_mac",
+        "ssl",
+        "timed out",
+        "timeout",
+        "temporarily unavailable",
+        "remote protocol error",
+        "502",
+        "503",
+        "504",
+    )
+    return any(marker in text for marker in markers)
+
+
 def traced_llm_invoke(
     llm: Any,
     messages: Any,
@@ -326,22 +354,34 @@ def traced_llm_invoke(
     model = _model_name(llm)
     started_at = _utc_now()
     start = time.perf_counter()
-    try:
-        response = llm.invoke(messages)
-    except Exception as exc:
-        if trace_store is not None:
-            trace_store.append(
-                TraceEvent(
-                    thread_id=_thread_id(config),
-                    event_type="llm_error",
-                    node=node,
-                    model=model,
-                    started_at=started_at,
-                    duration_ms=(time.perf_counter() - start) * 1000,
-                    payload={"error_type": type(exc).__name__, "error": str(exc)},
+    response = None
+    for attempt in range(3):
+        try:
+            response = llm.invoke(messages)
+            break
+        except Exception as exc:
+            retrying = attempt < 2 and _is_transient_llm_error(exc)
+            if trace_store is not None:
+                trace_store.append(
+                    TraceEvent(
+                        thread_id=_thread_id(config),
+                        event_type="llm_error",
+                        node=node,
+                        model=model,
+                        started_at=started_at,
+                        duration_ms=(time.perf_counter() - start) * 1000,
+                        payload={
+                            "error_type": type(exc).__name__,
+                            "error": str(exc),
+                            "attempt": attempt + 1,
+                            "retrying": retrying,
+                        },
+                    )
                 )
-            )
-        raise
+            if not retrying:
+                raise
+            time.sleep(0.25 * (attempt + 1))
+    assert response is not None
     duration_ms = (time.perf_counter() - start) * 1000
     input_tokens, output_tokens, total_tokens, estimated = _usage_from_response(
         response,

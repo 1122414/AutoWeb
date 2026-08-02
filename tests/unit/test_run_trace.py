@@ -108,3 +108,45 @@ def test_trace_store_keeps_arbitrary_structured_evidence(tmp_path):
     assert event["payload"]["decision_source"] == "task_contract"
     assert store.summarize("run-evidence").event_count == 1
 
+
+def test_transient_ssl_read_error_is_retried_and_traced(tmp_path):
+    store = RunTraceStore(tmp_path / "trace.sqlite3")
+    response = SimpleNamespace(
+        content="recovered",
+        usage_metadata={
+            "input_tokens": 10,
+            "output_tokens": 2,
+            "total_tokens": 12,
+        },
+        response_metadata={},
+    )
+
+    class FlakyLLM:
+        model_name = "flaky-model"
+
+        def __init__(self):
+            self.calls = 0
+
+        def invoke(self, _messages):
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError(
+                    "ReadError: [SSL: DECRYPTION_FAILED_OR_BAD_RECORD_MAC]"
+                )
+            return response
+
+    llm = FlakyLLM()
+    result = traced_llm_invoke(
+        llm,
+        ["prompt"],
+        node="Planner",
+        config={"configurable": {"thread_id": "retry-run"}},
+        store=store,
+    )
+
+    assert result is response
+    assert llm.calls == 2
+    events = store.events("retry-run")
+    assert [event["event_type"] for event in events] == ["llm_error", "llm"]
+    assert events[0]["payload"]["retrying"] is True
+

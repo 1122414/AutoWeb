@@ -15,6 +15,48 @@ from config import RAG_STORE_KEYWORDS, RAG_QA_KEYWORDS, RAG_GOAL_KEYWORDS, RAG_D
 from prompts.planner_prompts import PLANNER_START_PROMPT, PLANNER_STEP_PROMPT, PLANNER_CONTINUE_PROMPT, PLANNER_FORCE_SKIP_PROMPT
 from skills.logger import logger
 from skills.run_trace import traced_llm_invoke
+from skills.agent_skill_runtime import skill_selection_required
+from skills.safety_boundaries import irreversible_target
+
+
+def _with_active_skill_context(prompt: str, state: AgentState) -> str:
+    """Append only bodies that SkillSelector already chose and loaded."""
+
+    context = str(state.get("active_skill_context") or "").strip()
+    if not context:
+        return prompt
+    return f"{prompt}\n\n{context}"
+
+
+def _apply_irreversible_action_boundary(structured_plan: dict) -> dict:
+    """Turn a proposed irreversible click into a successful safe-stop plan."""
+
+    if str(structured_plan.get("step_intent") or "").lower() != "click":
+        return structured_plan
+    target = structured_plan.get("target_request") or {}
+    if not isinstance(target, dict):
+        target = {}
+    names = target.get("text_or_name") or []
+    if not isinstance(names, list):
+        names = [names]
+    haystack = " ".join(
+        [
+            str(target.get("target_hint") or ""),
+            " ".join(str(item) for item in names),
+            str(structured_plan.get("reason") or ""),
+        ]
+    )
+    matched = irreversible_target(haystack)
+    if not matched:
+        return structured_plan
+    return {
+        "step_intent": "finish",
+        "reason": f"safe boundary reached before irreversible action: {matched}",
+        "safe_stop": True,
+        "blocked_action": matched,
+        "needs_rag": False,
+        "needs_human_approval": True,
+    }
 
 
 def _dpcli_contract_planner_step(
@@ -78,6 +120,7 @@ def _dpcli_planner_step(
 ) -> Command:
     """dp_cli 模式 Planner：使用结构化 prompt 产出 dpcli_structured_plan。"""
     from core.nodes._dpcli import (
+        _dpcli_contract_progress_guard,
         _dpcli_planner_context,
         _dpcli_snapshot_loop_fallback_plan,
         _extract_json_object,
@@ -104,7 +147,36 @@ def _dpcli_planner_step(
         logger.info("   ⚠️ [Planner-dp_cli] JSON 解析失败，回退 legacy planner")
         return None
 
+    structured_plan = _apply_irreversible_action_boundary(structured_plan)
     structured_plan = _dpcli_snapshot_loop_fallback_plan(state, structured_plan)
+    forced_reason = _dpcli_plan_needs_forced_replan(state, structured_plan)
+    if forced_reason:
+        logger.info(f"   [Planner-dp_cli] rejecting stalled plan: {forced_reason}")
+        retry_response = traced_llm_invoke(
+            llm,
+            [HumanMessage(content=(
+                context
+                + "\n\nHARD RECOVERY CONSTRAINT: The previous proposal was rejected: "
+                + forced_reason
+                + ". Observer already refreshed the page. Produce one executable "
+                  "progress action now (click/type/open/extract/scroll); do not use "
+                  "snapshot/find and do not finish before the required cross-domain "
+                  "transition is evidenced."
+            ))],
+            node="Planner",
+            state=state,
+            config=config,
+        )
+        retried_plan = _extract_json_object(retry_response.content)
+        if retried_plan:
+            structured_plan = _apply_irreversible_action_boundary(retried_plan)
+            structured_plan = _dpcli_snapshot_loop_fallback_plan(
+                state, structured_plan
+            )
+    from config import DPCLI_TASK_CONTRACT_ENABLED
+
+    if DPCLI_TASK_CONTRACT_ENABLED:
+        structured_plan = _dpcli_contract_progress_guard(state, structured_plan)
     step_intent = structured_plan.get("step_intent", "")
     needs_rag = structured_plan.get("needs_rag", False)
     target_required = (
@@ -124,6 +196,10 @@ def _dpcli_planner_step(
         "loop_count": loop_count + 1,
         "is_complete": step_intent == "finish",
     }
+    if structured_plan.get("safe_stop"):
+        update_dict["human_approval_required"] = True
+    if state.get("dpcli_task_contract"):
+        update_dict["dpcli_task_contract"] = state["dpcli_task_contract"]
 
     if verification:
         update_dict["verification_result"] = {}
@@ -142,6 +218,41 @@ def _dpcli_planner_step(
 
     logger.info("   💻 [Planner-dp_cli] 无需目标 → Coder")
     return Command(update=update_dict, goto="Coder")
+
+
+def _dpcli_plan_needs_forced_replan(
+    state: AgentState, structured_plan: dict
+) -> str:
+    """Reject observation loops and cross-domain completion without evidence."""
+
+    intent = str(structured_plan.get("step_intent") or "").strip().lower()
+    if intent in {"snapshot", "find"} and (
+        state.get("dpcli_snapshot_ref") or state.get("dpcli_agent_view")
+    ):
+        return f"redundant {intent}: Observer already supplied a fresh indexed snapshot"
+
+    if intent != "finish" or structured_plan.get("safe_stop"):
+        return ""
+    task = str(state.get("user_task") or "")
+    cross_domain_markers = (
+        "跳转",
+        "中转",
+        "跨域",
+        "第三方",
+        "外部演示",
+        "目标平台",
+        "outbound",
+        "external demo",
+    )
+    requires_transition = any(marker in task for marker in cross_domain_markers)
+    transitioned = any(
+        bool(item.get("domain_changed"))
+        for item in (state.get("journey_history") or [])
+        if isinstance(item, dict)
+    )
+    if requires_transition and not transitioned:
+        return "premature finish: the task requires a cross-domain transition but none is recorded"
+    return ""
 
 
 def _looks_like_global_rewrite_plan(plan_text: str) -> bool:
@@ -193,7 +304,7 @@ def _planner_forced_extract_plan(task: str) -> str:
     )
 
 
-def planner_node(state: AgentState, config: RunnableConfig, llm) -> Command[Literal["CacheLookup", "RAGNode", "TargetSelector", "Verifier", "Coder", "__end__"]]:
+def planner_node(state: AgentState, config: RunnableConfig, llm) -> Command[Literal["SkillSelector", "CacheLookup", "RAGNode", "TargetSelector", "Verifier", "Coder", "__end__"]]:
     """[Planner] 负责制定下一步计划（环境感知已由 Observer 完成）"""
     logger.info("\n🧠 [Planner] 正在制定计划...")
     tab = _get_tab(config)
@@ -216,37 +327,61 @@ def planner_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lite
         )
 
     # 0. 检测当前页面状态，决定使用哪个 Prompt
-    current_url = tab.url if tab else ""
+    # In dp_cli mode the graph browser is a lightweight placeholder; the
+    # authoritative URL comes from the CLI observer/executor state.
+    current_url = str(state.get("current_url") or (tab.url if tab else ""))
     is_blank = not current_url or current_url.startswith(
         ("about:", "data:", "chrome://"))
     is_google_home = "google.com" in current_url and "/search" not in current_url
     is_initial_page = is_blank or is_google_home
 
-    from config import DPCLI_ENABLED
+    # Skill discovery is a separate LLM decision.  The planner never receives a
+    # body until the metadata-only selector has chosen it for this task/domain.
+    if skill_selection_required(state, current_url):
+        logger.info("   🧩 [Planner] task/domain changed → SkillSelector")
+        return Command(
+            update={"current_url": current_url},
+            goto="SkillSelector",
+        )
+
+    from config import DPCLI_ENABLED, DPCLI_TASK_CONTRACT_ENABLED
     execution_mode = state.get("execution_mode")
     is_dpcli_requested = (
         execution_mode == "dp_cli"
         or (DPCLI_ENABLED and execution_mode != "python_code")
     )
     if is_dpcli_requested:
+        from skills.task_lifecycle import task_lifecycle
+
         contract_state = dict(state)
         contract_state["current_url"] = current_url or state.get("current_url", "")
-        contract_command = _dpcli_contract_planner_step(
-            contract_state,
-            loop_count,
-            verification,
-        )
-        if contract_command is not None:
-            logger.info("   [Planner] using deterministic dp_cli task contract")
-            return contract_command
+        if not contract_state.get("dpcli_task_contract"):
+            contract_state["dpcli_task_contract"] = task_lifecycle.compile(task)
+        # The contract remains authoritative for schema, count and completion
+        # verification whether planning is deterministic or model-driven.
+        state = contract_state
+
+        if DPCLI_TASK_CONTRACT_ENABLED:
+            contract_command = _dpcli_contract_planner_step(
+                contract_state,
+                loop_count,
+                verification,
+            )
+            if contract_command is not None:
+                logger.info("   [Planner] using deterministic dp_cli task contract")
+                return contract_command
 
     # 0.1 初始启动（空白页/Google首页）
-    if loop_count == 0 and is_initial_page:
+    if (
+        loop_count == 0
+        and is_initial_page
+        and not (is_dpcli_requested and state.get("dpcli_agent_view"))
+    ):
         logger.info("   ⏩ [Planner] 初始启动，跳过 DOM 分析，直接生成导航计划。")
         prompt = PLANNER_START_PROMPT.format(task=task)
         response = traced_llm_invoke(
             llm,
-            [HumanMessage(content=prompt)],
+            [HumanMessage(content=_with_active_skill_context(prompt, state))],
             node="Planner",
             state=state,
             config=config,
@@ -257,6 +392,7 @@ def planner_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lite
                 "messages": [response],
                 "plan": response.content,
                 "dom_skeleton": "(Start Page - Empty)",
+                "dpcli_task_contract": state.get("dpcli_task_contract"),
                 "loop_count": loop_count + 1,
                 "is_complete": False
             },
@@ -293,7 +429,7 @@ def planner_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lite
             )
             response = traced_llm_invoke(
                 llm,
-                [HumanMessage(content=prompt)],
+                [HumanMessage(content=_with_active_skill_context(prompt, state))],
                 node="Planner",
                 state=state,
                 config=config,
@@ -304,6 +440,7 @@ def planner_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lite
                     "messages": [response],
                     "plan": response.content,
                     "current_url": current_url,
+                    "dpcli_task_contract": state.get("dpcli_task_contract"),
                     # 保留 locator_suggestions, finished_steps 等
                     "loop_count": loop_count + 1,
                     "is_complete": False
@@ -320,7 +457,7 @@ def planner_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lite
             )
             response = traced_llm_invoke(
                 llm,
-                [HumanMessage(content=prompt)],
+                [HumanMessage(content=_with_active_skill_context(prompt, state))],
                 node="Planner",
                 state=state,
                 config=config,
@@ -341,7 +478,7 @@ def planner_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lite
                     "dpcli_result": None,
                     "dpcli_snapshot": None,
                     "dpcli_snapshot_view": None,
-                    "dpcli_task_contract": None,
+                    "dpcli_task_contract": state.get("dpcli_task_contract"),
                     "dpcli_task_progress": None,
                     "dpcli_detail_batch_ran": False,
                     "execution_log": None,          # 清空执行日志
@@ -436,7 +573,7 @@ def planner_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lite
         "{finished_steps_str}", finished_steps_str)
     response = traced_llm_invoke(
         llm,
-        [HumanMessage(content=prompt)],
+        [HumanMessage(content=_with_active_skill_context(prompt, state))],
         node="Planner",
         state=state,
         config=config,
@@ -452,7 +589,7 @@ def planner_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lite
         )
         response = traced_llm_invoke(
             llm,
-            [HumanMessage(content=prompt + hard_local_fix)],
+            [HumanMessage(content=_with_active_skill_context(prompt + hard_local_fix, state))],
             node="Planner",
             state=state,
             config=config,

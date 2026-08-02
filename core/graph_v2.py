@@ -5,7 +5,7 @@ from core.state_v2 import AgentState
 from core.nodes import (
     observer_node, planner_node, coder_node, executor_node,
     verifier_node, error_handler_node, cache_lookup_node, rag_node,
-    target_selector_node,
+    target_selector_node, skill_selector_node,
 )
 from skills.logger import logger
 
@@ -28,7 +28,8 @@ def build_graph(checkpointer=None, llm=None, observer=None,
     LangGraph 会自动遵守 Command 中的 goto 指令。
 
     流程：
-    START -> Observer -> Planner -> CacheLookup -> (Coder | Executor)
+    START -> Observer -> Planner -> SkillSelector -> Planner (按任务/域名按需)
+    Planner -> CacheLookup -> (Coder | Executor)
     Coder -> Executor -> Verifier -> (Observer | Planner)
     Planner 是唯一的 __end__ 出口
     """
@@ -51,6 +52,11 @@ def build_graph(checkpointer=None, llm=None, observer=None,
     logger.info("   ✅ [build_graph] 注册节点: CacheLookup")
     workflow.add_node("Planner", partial(planner_node, llm=planner_llm or llm))
     logger.info("   ✅ [build_graph] 注册节点: Planner")
+    workflow.add_node(
+        "SkillSelector",
+        partial(skill_selector_node, llm=planner_llm or llm),
+    )
+    logger.info("   ✅ [build_graph] 注册节点: SkillSelector")
     workflow.add_node("Coder", partial(coder_node, llm=coder_llm or llm))
     logger.info("   ✅ [build_graph] 注册节点: Coder")
     workflow.add_node("Executor", executor_node)  # Executor 不需要 LLM

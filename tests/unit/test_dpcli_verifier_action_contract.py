@@ -27,7 +27,7 @@ def _action_kind(action):
     if skill in {"snapshot", "expand", "resolve-locator", "find",
                  "session.inspect", "session_inspect"}:
         return "observation"
-    if skill in {"extract", "list-items", "batch-detail-extract"}:
+    if skill in {"extract", "list-items", "batch-detail-extract", "eval"}:
         return "data"
     if skill in {"open", "navigate", "click", "type", "scroll", "wait"}:
         return "page"
@@ -104,6 +104,9 @@ class TestActionClassification(unittest.TestCase):
     def test_batch_detail_extract_is_data(self):
         self.assertEqual(_action_kind({"skill": "batch-detail-extract"}), "data")
 
+    def test_eval_is_data(self):
+        self.assertEqual(_action_kind({"skill": "eval"}), "data")
+
     def test_click_is_page(self):
         self.assertEqual(_action_kind({"skill": "click"}), "page")
 
@@ -123,7 +126,7 @@ class TestActionClassification(unittest.TestCase):
         self.assertEqual(_action_kind({"skill": "navigate"}), "page")
 
     def test_unknown_skill_is_unknown(self):
-        self.assertEqual(_action_kind({"skill": "eval"}), "unknown")
+        self.assertEqual(_action_kind({"skill": "download"}), "unknown")
 
     def test_none_action_is_unknown(self):
         self.assertEqual(_action_kind(None), "unknown")
@@ -497,3 +500,45 @@ class TestDeterministicWithSignals(unittest.TestCase):
 
         self.assertEqual(command.goto, "Observer")
         self.assertEqual(command.update["current_url"], "https://example.test/list")
+
+    def test_planner_finish_ends_graph_without_replaying_stale_action(self):
+        class ExplodingLLM:
+            def invoke(self, _messages):
+                raise AssertionError("planner finish must not call the LLM")
+
+        state = {
+            "execution_mode": "dp_cli",
+            "current_url": "https://store.steampowered.com/cart/",
+            "execution_log": "ok",
+            "user_task": "add Stardew Valley and stop at the cart",
+            "plan": "finish safely at cart",
+            "generated_action": {
+                "skill": "open",
+                "params": {"url": "https://store.steampowered.com/cart/"},
+            },
+            "dpcli_result": {
+                "ok": True,
+                "data": {
+                    "page": {"url": "https://store.steampowered.com/cart/"}
+                },
+            },
+            "dpcli_structured_plan": {
+                "step_intent": "finish",
+                "reason": "cart reached; stop before purchase method",
+                "safe_stop": True,
+            },
+        }
+
+        command = verifier_node(
+            state,
+            {"configurable": {"browser": None}},
+            ExplodingLLM(),
+        )
+
+        self.assertEqual(command.goto, "__end__")
+        self.assertTrue(command.update["is_complete"])
+        self.assertTrue(command.update["verification_result"]["is_done"])
+        self.assertEqual(
+            command.update["verification_result"]["decision_source"],
+            "planner_finish",
+        )

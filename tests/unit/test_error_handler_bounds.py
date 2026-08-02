@@ -75,6 +75,35 @@ class ErrorHandlerBoundsTests(unittest.TestCase):
         self.assertEqual(command.goto, "Observer")
         self.assertEqual(command.update["_error_recovery_count"], 1)
 
+    def test_site_blocker_stops_deterministically_without_llm(self) -> None:
+        llm = Mock()
+        command = error_handler_node(
+            {
+                "error": "Site blocking signal detected: captcha",
+                "error_type": "dpcli_site_blocked",
+                "plan": "search",
+                "dpcli_result": {
+                    "error": {
+                        "code": "site_blocked",
+                        "details": {
+                            "blocking_signal": {"kind": "captcha"}
+                        },
+                    }
+                },
+            },
+            config={},
+            llm=llm,
+        )
+
+        self.assertEqual(command.goto, "__end__")
+        self.assertTrue(command.update["is_complete"])
+        self.assertEqual(
+            command.update["verification_result"]["decision_source"],
+            "site_policy_stop",
+        )
+        self.assertFalse(command.update["verification_result"]["needs_llm"])
+        llm.invoke.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

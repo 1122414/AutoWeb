@@ -73,7 +73,7 @@ CODE_COLLECTION_NAME = "code_cache"
 # ==========================
 # 百炼
 # ==========================
-MODEL_NAME = os.getenv('BAILIAN_MODEL_NAME')
+MODEL_NAME = os.getenv('BAILIAN_MODEL_NAME') or 'deepseek-v4-flash'
 OPENAI_API_KEY = os.getenv('BAILIAN_API_KEY')
 OPENAI_BASE_URL = os.getenv('BAILIAN_BASE_URL')
 
@@ -137,6 +137,10 @@ BROWSER_ARGS = [
 # dp_cli adapter config
 # ==============================================================================
 DPCLI_ENABLED = _env_bool("DPCLI_ENABLED", "False")
+DPCLI_TASK_CONTRACT_ENABLED = _env_bool(
+    "DPCLI_TASK_CONTRACT_ENABLED",
+    "True",
+)
 DPCLI_CWD = os.getenv("DPCLI_CWD", r"E:\GitHub\Repositories\drissionpage-cli")
 DPCLI_PYTHON = os.getenv("DPCLI_PYTHON", "python")
 DPCLI_SESSION = os.getenv("DPCLI_SESSION", "autoweb")
@@ -155,6 +159,19 @@ ACTION_CACHE_ENABLED = _env_bool("ACTION_CACHE_ENABLED", "False")
 ACTION_CACHE_THRESHOLD = float(os.getenv("ACTION_CACHE_THRESHOLD", "0.75"))
 ACTION_CACHE_STORE_PATH = os.getenv(
     "ACTION_CACHE_STORE_PATH", os.path.join(os.getenv("OUTPUT_DIR", "./output"), "action_cache.json"))
+
+# ==============================================================================
+# Agent Skills（name + description 发现，LLM 选择后渐进加载 SKILL.md）
+# ==============================================================================
+AGENT_SKILLS_ENABLED = _env_bool("AGENT_SKILLS_ENABLED", "True")
+AGENT_SKILLS_DIR = os.getenv(
+    "AGENT_SKILLS_DIR",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "agent_skills"),
+)
+AGENT_SKILLS_MAX_SELECTED = int(os.getenv("AGENT_SKILLS_MAX_SELECTED", "3"))
+AGENT_SKILLS_MAX_BODY_CHARS = int(
+    os.getenv("AGENT_SKILLS_MAX_BODY_CHARS", "20000")
+)
 
 # ==============================================================================
 # 存储与输出路径

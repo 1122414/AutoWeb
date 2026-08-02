@@ -36,6 +36,12 @@ _FIELD_ALIASES: Dict[str, Tuple[str, ...]] = {
     "wins": ("wins", "win", "胜场"),
     "losses": ("losses", "loss", "负场"),
     "description": ("description", "summary", "简介", "描述"),
+    "rating": ("rating", "score", "评分", "得分"),
+    "rank": ("rank", "ranking", "排名", "名次"),
+    "hot_value": ("hot_value", "heat", "热度", "热搜指数"),
+    "time": ("time", "published_at", "发布时间", "时间"),
+    "subtitle": ("subtitle", "sub_title", "副标题"),
+    "badge": ("badge", "label", "徽标", "角标"),
 }
 
 
@@ -46,19 +52,26 @@ def _contains_any(text: str, values: Iterable[str]) -> bool:
 
 def _extract_schema(task: str) -> list[str]:
     text = str(task or "")
-    lower = text.lower()
+    explicit = re.search(
+        r"(?:字段(?:固定)?(?:为|包括)|fields?\s*(?:are|include|:))\s*"
+        r"([^。；;\n]+)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    schema_text = explicit.group(1).strip() if explicit else text
+    lower = schema_text.lower()
     schema: list[str] = []
 
     is_team_task = _contains_any(text, ("球队", "team name", "team stats"))
     is_quote_task = _contains_any(text, ("名言", "quote"))
     is_product_task = _contains_any(text, ("商品", "产品", "product"))
 
-    if is_team_task:
+    if is_team_task and _contains_any(schema_text, ("球队", "team")):
         schema.append("team")
-    elif is_quote_task and _contains_any(text, ("正文", "内容", "text", "quote")):
+    elif is_quote_task and _contains_any(schema_text, ("正文", "内容", "text", "quote")):
         schema.append("text")
     elif _contains_any(
-        text,
+        schema_text,
         (
             "标题",
             "书名",
@@ -66,26 +79,38 @@ def _extract_schema(task: str) -> list[str]:
             "title",
             "name",
         ),
-    ) or is_product_task:
+    ) or (is_product_task and not explicit):
         schema.append("title")
 
-    if _contains_any(text, ("价格", "价钱", "price", "cost")):
+    if _contains_any(schema_text, ("价格", "价钱", "price", "cost")):
         schema.append("price")
-    if _contains_any(text, ("正文", "名言内容", "quote text")) and "text" not in schema:
+    if _contains_any(schema_text, ("正文", "名言内容", "quote text")) and "text" not in schema:
         schema.append("text")
-    if _contains_any(text, ("作者", "author", "writer")):
+    if _contains_any(schema_text, ("作者", "author", "writer")):
         schema.append("author")
-    if _contains_any(text, ("标签", "tags", "tag")):
+    if _contains_any(schema_text, ("标签", "tags", "tag")):
         schema.append("tags")
-    if _contains_any(text, ("年份", "年代", "year")):
+    if _contains_any(schema_text, ("年份", "年代", "year")):
         schema.append("year")
-    if _contains_any(text, ("胜场", "胜利场次", "wins", " win ")):
+    if _contains_any(schema_text, ("胜场", "胜利场次", "wins", " win ")):
         schema.append("wins")
-    if _contains_any(text, ("负场", "失败场次", "losses", " loss ")):
+    if _contains_any(schema_text, ("负场", "失败场次", "losses", " loss ")):
         schema.append("losses")
-    if _contains_any(text, ("简介", "描述", "description", "summary")):
+    if _contains_any(schema_text, ("简介", "描述", "description", "summary")):
         schema.append("description")
-    if _contains_any(text, ("url", "链接", "href", "link")):
+    if _contains_any(schema_text, ("评分", "得分", "rating", "score")):
+        schema.append("rating")
+    if _contains_any(schema_text, ("排名", "名次", "rank", "ranking")):
+        schema.append("rank")
+    if _contains_any(schema_text, ("热度", "热搜指数", "hot_value", "heat")):
+        schema.append("hot_value")
+    if _contains_any(schema_text, ("发布时间", "时间", "published_at", "time")):
+        schema.append("time")
+    if _contains_any(schema_text, ("副标题", "subtitle", "sub_title")):
+        schema.append("subtitle")
+    if _contains_any(schema_text, ("徽标", "角标", "badge", "label")):
+        schema.append("badge")
+    if _contains_any(schema_text, ("url", "链接", "href", "link")):
         schema.append("url")
 
     if not schema and _contains_any(
@@ -174,6 +199,36 @@ def _extract_required_scroll_rounds(task: str) -> int:
 
 def _extract_filter(task: str) -> Optional[Dict[str, Any]]:
     text = str(task or "")
+    # Query parameters such as ``?filter=topsellers`` describe the target URL,
+    # not a form action to perform after navigation.
+    text = _HTTP_URL_RE.sub("", text)
+    # Exclusion clauses describe page noise, not an interaction. For example,
+    # "排除……筛选按钮" must not become a request to type the later schema word
+    # ``title`` into the page's search box.
+    text = re.sub(
+        r"(?:排除|剔除|跳过|忽略)[^。；;\n]{0,160}",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    # A prohibition is not an action request. Real-world tasks frequently say
+    # "不要使用搜索" to stay within robots/site-policy boundaries; leaving the
+    # token behind made the later generic ``为 title`` field declaration look
+    # like a search value.
+    text = re.sub(
+        r"(?:不|不要|无需|无须|禁止|避免|不得|勿|别)\s*"
+        r"(?:使用|执行|进行|点击|打开|采用)?\s*"
+        r"(?:站内|页面内)?\s*(?:筛选|过滤|搜索)",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(
+        r"(?:do\s+not|don't|without|never)\s+(?:use\s+)?(?:filter|search)",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
     if not _contains_any(text, ("筛选", "过滤", "搜索", "filter", "search")):
         return None
 
@@ -263,6 +318,13 @@ def _extract_counts(task: str, target_pages: int) -> tuple[int, int, int]:
 
 def _detail_required(task: str) -> bool:
     text = str(task or "")
+    if re.search(
+        r"(?:不|不要|无需|无须|禁止|避免|不得|勿|别)\s*"
+        r"(?:进入|打开|访问|抓取|采集)?[^，。；;\n]{0,12}?详情",
+        text,
+        flags=re.IGNORECASE,
+    ):
+        return False
     negative = _contains_any(
         text,
         (
@@ -673,7 +735,9 @@ def _pagination_ref(
     page_number: int,
 ) -> Optional[str]:
     next_ref = None
-    for group in capability_map.get("pagination") or []:
+    pagination = capability_map.get("pagination") or []
+    groups = pagination if isinstance(pagination, list) else [pagination]
+    for group in groups:
         if not isinstance(group, dict):
             continue
         for control in group.get("controls") or []:
@@ -695,7 +759,9 @@ def _filter_input_ref(
 ) -> Optional[str]:
     hint = str(filter_spec.get("field_hint") or "").strip().lower()
     candidates: list[tuple[int, str]] = []
-    for area in capability_map.get("search") or []:
+    search = capability_map.get("search") or []
+    search_areas = search if isinstance(search, list) else [search]
+    for area in search_areas:
         if not isinstance(area, dict):
             continue
         ref = str(area.get("input_ref") or "")
@@ -703,7 +769,9 @@ def _filter_input_ref(
             continue
         text = str(area.get("input_name") or "").lower()
         candidates.append((100 + (30 if hint and hint in text else 0), ref))
-    for form in capability_map.get("forms") or []:
+    forms = capability_map.get("forms") or []
+    form_groups = forms if isinstance(forms, list) else [forms]
+    for form in form_groups:
         if not isinstance(form, dict):
             continue
         for field in form.get("inputs") or []:

@@ -127,6 +127,37 @@ def test_captcha_signal_converts_success_into_terminal_policy_error():
     assert result["_site_policy"]["blocking_signal"]["kind"] == "captcha"
 
 
+def test_http_403_title_converts_success_into_terminal_policy_error():
+    from skills.site_policy import SitePolicy
+
+    policy = SitePolicy(opener=lambda *_args, **_kwargs: None)
+    payload = {
+        "ok": True,
+        "session": "policy-test",
+        "action": "open",
+        "data": {
+            "page": {
+                "url": "https://example.test/products",
+                "title": "403 Forbidden",
+            }
+        },
+        "error": None,
+    }
+    with patch("skills.dpcli_executor.subprocess.run") as run:
+        run.return_value = Mock(
+            returncode=0,
+            stdout=json.dumps(payload),
+            stderr="",
+        )
+        result = _executor(policy).execute_action(
+            {"skill": "open", "params": {"url": "https://example.test/products"}}
+        )
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "site_blocked"
+    assert result["_site_policy"]["blocking_signal"]["kind"] == "access_denied"
+
+
 def test_http_429_response_enters_policy_cooldown_instead_of_retrying():
     policy = _ResponsePolicy(_Decision(True, "allowed"))
     payload = {

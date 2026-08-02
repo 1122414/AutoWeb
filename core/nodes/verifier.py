@@ -129,6 +129,7 @@ def _verify_dpcli_action_with_signals(state, current_url):
         VERIFIER_SCHEMA_COVERAGE_THRESHOLD,
         VERIFIER_ALLOW_LOW_CONFIDENCE_SUCCESS,
         VERIFIER_LLM_REQUIRED_FOR_AMBIGUOUS_PAGE,
+        DPCLI_TASK_CONTRACT_ENABLED,
     )
 
     action = state.get("generated_action") or {}
@@ -171,7 +172,11 @@ def _verify_dpcli_action_with_signals(state, current_url):
                 decision_source="dpcli_data",
             )
 
-        contract_result = _contract_action_verification(state, skill)
+        contract_result = (
+            _contract_action_verification(state, skill)
+            if DPCLI_TASK_CONTRACT_ENABLED
+            else None
+        )
         if contract_result is not None:
             return contract_result
 
@@ -402,7 +407,7 @@ def _verify_dpcli_action_with_signals(state, current_url):
             ]
             has_transition_intent = any(kw in step_intent for kw in page_transition_keywords)
             url_changed = bool(execution_evidence.get("url_changed"))
-            if url_changed and has_transition_intent:
+            if url_changed:
                 return _build_verification_result(
                     is_success=True,
                     is_done=False,
@@ -410,8 +415,8 @@ def _verify_dpcli_action_with_signals(state, current_url):
                     source="verifier",
                     failure_scope="local",
                     evidence=_compact_result_evidence(result),
-                    confidence=0.75,
-                    needs_llm=True,
+                    confidence=1.0,
+                    needs_llm=False,
                     decision_source="dpcli_page_url_change",
                 )
             return None
@@ -873,6 +878,39 @@ def verifier_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lit
     logger.info(f"   -> 当前验收 URL: {current_url[:60]}...")
     logger.info(f"   📦 代码来源: {code_source}")
 
+    # A Planner ``finish`` plan is a terminal decision, not another
+    # browser action. In dp_cli mode the previous successful action/result
+    # remains in state as evidence; replaying that stale action would loop.
+    structured_plan = state.get("dpcli_structured_plan") or {}
+    if (
+        is_dpcli_execution
+        and str(structured_plan.get("step_intent") or "").strip().lower()
+        == "finish"
+    ):
+        summary = str(structured_plan.get("reason") or "task completed")
+        completion = _build_verification_result(
+            is_success=True,
+            is_done=True,
+            summary=summary,
+            source="planner",
+            failure_scope="local",
+            evidence=_compact_result_evidence(state.get("dpcli_result") or {}),
+            confidence=1.0,
+            needs_llm=False,
+            decision_source="planner_finish",
+        )
+        logger.info("   [Verifier] planner finish accepted; ending graph")
+        return Command(
+            update={
+                "messages": [AIMessage(content=f"Status: TASK_DONE ({summary})")],
+                "is_complete": True,
+                "current_url": current_url,
+                "verification_result": completion,
+                "finished_steps": [summary],
+            },
+            goto="__end__",
+        )
+
     # 1. P0-4: Structured error_type fast path (before generic keyword scan)
     error_type_route = _route_by_error_type(state, current_plan, code_source)
     if error_type_route is not None:
@@ -977,7 +1015,9 @@ def verifier_node(state: AgentState, config: RunnableConfig, llm) -> Command[Lit
                         _advance_contract_page_progress(state)
                     )
 
-                if action_kind == "data":
+                from config import DPCLI_TASK_CONTRACT_ENABLED
+
+                if action_kind == "data" and DPCLI_TASK_CONTRACT_ENABLED:
                     contract_progress = _merge_dpcli_contract_progress(state)
                     if contract_progress is not None:
                         progress, cumulative, is_done = contract_progress

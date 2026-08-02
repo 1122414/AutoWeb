@@ -6,6 +6,7 @@ import hashlib
 import json
 import time
 from typing import Any, Dict, Literal
+from urllib.parse import urlparse
 
 from langchain_core.messages import HumanMessage, AIMessage
 from langchain_core.runnables import RunnableConfig
@@ -246,6 +247,27 @@ def _executor_dpcli_branch(state: AgentState, config: RunnableConfig) -> Command
         "action_skill": action.get("skill", ""),
         "result_ok": bool(result.get("ok")),
     }
+    before_domain = urlparse(str(before_url or "")).netloc.lower()
+    after_domain = urlparse(str(current_url or "")).netloc.lower()
+    journey_entry = {
+        "before_url": before_url,
+        "after_url": current_url,
+        "before_domain": before_domain,
+        "after_domain": after_domain,
+        "domain_changed": bool(
+            before_domain and after_domain and before_domain != after_domain
+        ),
+        "action_skill": str(action.get("skill") or ""),
+        "result_ok": bool(result.get("ok")),
+    }
+    if str(action.get("skill") or "").lower() == "eval":
+        eval_items = result_data.get("items") if isinstance(result_data, dict) else None
+        if isinstance(eval_items, list) and eval_items and isinstance(eval_items[0], dict):
+            journey_entry["data_sample"] = {
+                str(key): value
+                for key, value in list(eval_items[0].items())[:8]
+                if isinstance(value, (str, int, float, bool)) or value is None
+            }
     if str(action.get("skill") or "").lower() == "scroll":
         execution_evidence.update(
             {
@@ -265,6 +287,7 @@ def _executor_dpcli_branch(state: AgentState, config: RunnableConfig) -> Command
         "dpcli_request_id": request_id,
         "current_url": current_url,
         "dpcli_execution_evidence": execution_evidence,
+        "journey_history": [journey_entry],
     }
     if result.get("action") == "snapshot" and result.get("ok"):
         update["dpcli_snapshot"] = _compact_dpcli_snapshot(result)
@@ -312,6 +335,8 @@ def _executor_dpcli_branch(state: AgentState, config: RunnableConfig) -> Command
             ),
         ),
     })
+    if error_code == "ref_stale":
+        update["dpcli_target_result"] = {}
     if state.get("_action_source") == "action_cache":
         failed_ids = list(state.get("_failed_action_cache_ids", []) or [])
         hit_id = state.get("_action_cache_hit_id")
